@@ -16,4 +16,10 @@
 # Headless render / audio dumps from the dev harnesses.
 /out/
 /dumps/*.state
-/out/
+
+# Bulk ROM corpora (pulled from device) + classifier output. Data, never tracked;
+# the `.nes` glob above only catches loose files at dumps/ root, not these trees.
+/dumps/*.zip
+/dumps/fullset/
+/dumps/fullset_10785/
+/dumps/classify_usa/

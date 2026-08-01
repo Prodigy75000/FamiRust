@@ -21,6 +21,11 @@ path = "src/nes.rs"
 name = "testrom"
 path = "src/testrom.rs"
 
+# Batch outlier classifier: sorts non-booting dumps into labelled folders.
+[[bin]]
+name = "classify"
+path = "src/classify.rs"
+
 [dependencies]
 nes-core = { path = "../nes-core" }
 png = "0.17"
