@@ -43,6 +43,23 @@ fn main() -> ExitCode {
     };
     let frames: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(60);
     let out = args.next().unwrap_or_else(|| "out/nes.png".to_string());
+    // Optional 4th arg: comma-separated buttons to hold (e.g. "start,a") to
+    // drive past menus, plus a flicker analysis of consecutive frames.
+    let hold = args.next().unwrap_or_default();
+    let mut buttons = 0u8;
+    for b in hold.split(',') {
+        buttons |= match b.trim().to_ascii_lowercase().as_str() {
+            "a" => 0x01,
+            "b" => 0x02,
+            "select" => 0x04,
+            "start" => 0x08,
+            "up" => 0x10,
+            "down" => 0x20,
+            "left" => 0x40,
+            "right" => 0x80,
+            _ => 0,
+        };
+    }
 
     let rom = match std::fs::read(&path) {
         Ok(b) => b,
@@ -60,11 +77,107 @@ fn main() -> ExitCode {
         }
     };
 
+    // Optional 5th arg: a save-state file to load (must match this ROM).
+    if let Some(state_path) = args.next() {
+        match std::fs::read(&state_path) {
+            Ok(bytes) => match nes.load_state(&bytes) {
+                Ok(()) => println!("loaded state {state_path} ({} bytes)", bytes.len()),
+                Err(e) => {
+                    eprintln!("state load failed: {e:?}");
+                    return ExitCode::FAILURE;
+                }
+            },
+            Err(e) => {
+                eprintln!("cannot read state {state_path}: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
     let mut last: Vec<u32> = Vec::new();
     let mut audio: Vec<f32> = Vec::new();
-    for _ in 0..frames {
+    for f in 0..frames {
+        // Pulse the held buttons (press/release alternating so menus that need a
+        // fresh edge advance) once we're a little past boot.
+        if buttons != 0 && f > 20 {
+            nes.set_buttons(0, if f % 8 < 4 { buttons } else { 0 });
+        }
         last = nes.step_frame().to_vec();
         audio.extend(nes.take_audio());
+    }
+
+    // Flicker analysis (only when a 4th "hold" arg is given, i.e. a debug run):
+    // render more consecutive frames and report, per scanline, how many pixels
+    // changed vs the previous frame + the sprite-0 hit scanline + the HUD band.
+    if !hold.is_empty() {
+        let mut prev = last.clone();
+        let analysis_frames = 40;
+        println!("--- flicker analysis ({analysis_frames} frames) ---");
+        for k in 0..analysis_frames {
+            if buttons != 0 {
+                nes.set_buttons(0, if k % 8 < 4 { buttons } else { 0 });
+            }
+            let fb = nes.step_frame().to_vec();
+            audio.extend(nes.take_audio());
+            // Per-scanline change counts; report rows with the most churn.
+            let mut worst: Vec<(usize, u32)> = (0..240)
+                .map(|y| {
+                    let c = (0..256)
+                        .filter(|&x| fb[y * 256 + x] != prev[y * 256 + x])
+                        .count() as u32;
+                    (y, c)
+                })
+                .filter(|&(_, c)| c > 0)
+                .collect();
+            worst.sort_by_key(|&(_, c)| std::cmp::Reverse(c));
+            let top: Vec<String> =
+                worst.iter().take(4).map(|&(y, c)| format!("row{y}={c}")).collect();
+            // HUD band = rows 190..239 (the bottom status bar).
+            let hud: u32 = (190..240)
+                .map(|y| (0..256).filter(|&x| fb[y * 256 + x] != prev[y * 256 + x]).count() as u32)
+                .sum();
+            println!(
+                "frame +{k}: s0_hit={}, changed_rows={}, HUD_band_changed_px={}, top: {}",
+                nes.dbg_sprite0_scanline(),
+                worst.len(),
+                hud,
+                top.join(" ")
+            );
+            // Dump frames where the HUD band churns hard (the flicker), plus the
+            // clean frame right before it, so the HUD can be compared directly.
+            if hud > 500 {
+                let dir = std::path::Path::new(&out).parent().unwrap_or(std::path::Path::new("."));
+                let dump = |name: String, buf: &[u32]| {
+                    let mut rgba = Vec::with_capacity(buf.len() * 4);
+                    for &px in buf {
+                        rgba.push(((px >> 16) & 0xff) as u8);
+                        rgba.push(((px >> 8) & 0xff) as u8);
+                        rgba.push((px & 0xff) as u8);
+                        rgba.push(0xff);
+                    }
+                    let gp = dir.join(name).to_string_lossy().to_string();
+                    if let Ok(file) = std::fs::File::create(&gp) {
+                        let mut enc = png::Encoder::new(std::io::BufWriter::new(file), 256, 240);
+                        enc.set_color(png::ColorType::Rgba);
+                        enc.set_depth(png::BitDepth::Eight);
+                        if let Ok(mut wr) = enc.write_header() {
+                            let _ = wr.write_image_data(&rgba);
+                        }
+                    }
+                    println!("  -> dumped {gp}");
+                };
+                dump(format!("glitch_{k}_before.png"), &prev);
+                dump(format!("glitch_{k}.png"), &fb);
+                // Per-column HUD-band change signature (which x's move) to reveal a
+                // uniform horizontal shift vs localized garbage.
+                let cols: Vec<usize> = (0..256)
+                    .filter(|&x| (190..240).any(|y| fb[y * 256 + x] != prev[y * 256 + x]))
+                    .collect();
+                println!("     HUD changed columns: {} of 256 (first {:?})", cols.len(), &cols[..cols.len().min(12)]);
+            }
+            prev = fb.clone();
+            last = fb;
+        }
     }
 
     // Write the audio track as a 16-bit PCM mono WAV next to the PNG.

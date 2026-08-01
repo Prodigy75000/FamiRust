@@ -97,6 +97,11 @@ impl Nes {
         self.bus.apu.take_samples()
     }
 
+    /// Debug: the scanline at which sprite-0 hit was set this frame (-1 = none).
+    pub fn dbg_sprite0_scanline(&self) -> i32 {
+        self.bus.ppu.dbg_s0_scanline
+    }
+
     /// Serialize the entire machine to a byte-identical snapshot. The layout is
     /// `MAGIC(8) || format_version(u16 LE) || cpu || bus`. Two machines in the
     /// same logical state produce an equal `Vec<u8>` on any target triple.

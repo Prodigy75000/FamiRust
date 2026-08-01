@@ -68,6 +68,8 @@ pub struct Ppu {
     suppress_vbl: bool,
     /// One-tick-delayed NMI line level (see [`Ppu::nmi_line`]).
     nmi_delayed: bool,
+    /// Debug: scanline at which sprite-0 hit was set this frame (-1 = none yet).
+    pub dbg_s0_scanline: i32,
 
     // ---- background fetch pipeline ----
     bg_next_id: u8,
@@ -116,6 +118,7 @@ impl Default for Ppu {
             frame_complete: false,
             suppress_vbl: false,
             nmi_delayed: false,
+            dbg_s0_scanline: -1,
             bg_next_id: 0,
             bg_next_attr: 0,
             bg_next_lo: 0,
@@ -538,6 +541,9 @@ impl Ppu {
             (true, true) => {
                 // Sprite-0 hit: both opaque, from sprite 0, not at x=255.
                 if is_sprite0 && x != 255 {
+                    if self.status & 0x40 == 0 {
+                        self.dbg_s0_scanline = self.scanline as i32;
+                    }
                     self.status |= 0x40;
                 }
                 if sp_behind {
@@ -600,6 +606,7 @@ impl Ppu {
         }
         if prerender && self.dot == 1 {
             self.status &= !0xe0; // clear vblank, sprite-0, overflow
+            self.dbg_s0_scanline = -1;
         }
 
         // Propagate the NMI line with a one-tick delay.

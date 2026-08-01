@@ -120,7 +120,7 @@ impl CpuBus for Bus {
     }
 
     fn irq(&self) -> bool {
-        self.apu.irq_asserted()
+        self.apu.irq_asserted() || self.mapper.irq()
     }
 }
 

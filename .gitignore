@@ -15,3 +15,5 @@
 
 # Headless render / audio dumps from the dev harnesses.
 /out/
+/dumps/*.state
+/out/
