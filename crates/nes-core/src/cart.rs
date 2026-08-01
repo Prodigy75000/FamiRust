@@ -1377,6 +1377,140 @@ impl SaveState for Nina001 {
     }
 }
 
+/// Mapper 73 (Konami VRC3): 16 KiB switchable PRG at $8000 + fixed last, 8 KiB
+/// CHR RAM, and a 16-bit (or 8-bit) CPU-cycle IRQ counter that *increments*.
+/// Used by the non-Mike-Tyson "Punch-Out!!" and Salamander.
+#[allow(dead_code)]
+pub struct Vrc3 {
+    prg: Vec<u8>,
+    chr: Vec<u8>,
+    prg_ram: Vec<u8>,
+    prg_banks: usize,
+    prg_bank: usize,
+
+    irq_latch: u16,
+    irq_counter: u16,
+    irq_enable: bool,
+    irq_ack_enable: bool,
+    irq_mode_8bit: bool,
+    irq_flag: bool,
+}
+impl Vrc3 {
+    pub fn new(cart: Cartridge) -> Self {
+        Vrc3 {
+            prg_banks: (cart.prg_rom.len() / PRG_BANK).max(1),
+            prg: cart.prg_rom,
+            chr: cart.chr_rom,
+            prg_ram: cart.prg_ram,
+            prg_bank: 0,
+            irq_latch: 0,
+            irq_counter: 0,
+            irq_enable: false,
+            irq_ack_enable: false,
+            irq_mode_8bit: false,
+            irq_flag: false,
+        }
+    }
+}
+impl Mapper for Vrc3 {
+    fn cpu_read(&mut self, addr: u16) -> u8 {
+        match addr {
+            0x6000..=0x7fff => self.prg_ram[(addr as usize - 0x6000) & (self.prg_ram.len() - 1)],
+            0x8000..=0xbfff => self.prg[(self.prg_bank % self.prg_banks) * PRG_BANK + (addr as usize - 0x8000)],
+            0xc000..=0xffff => self.prg[(self.prg_banks - 1) * PRG_BANK + (addr as usize - 0xc000)],
+            _ => 0,
+        }
+    }
+    fn cpu_write(&mut self, addr: u16, val: u8) {
+        match addr & 0xf000 {
+            0x6000 | 0x7000 => {
+                let n = self.prg_ram.len();
+                self.prg_ram[(addr as usize - 0x6000) & (n - 1)] = val;
+            }
+            0x8000 => self.irq_latch = (self.irq_latch & 0xfff0) | (val as u16 & 0x0f),
+            0x9000 => self.irq_latch = (self.irq_latch & 0xff0f) | ((val as u16 & 0x0f) << 4),
+            0xa000 => self.irq_latch = (self.irq_latch & 0xf0ff) | ((val as u16 & 0x0f) << 8),
+            0xb000 => self.irq_latch = (self.irq_latch & 0x0fff) | ((val as u16 & 0x0f) << 12),
+            0xc000 => {
+                self.irq_ack_enable = val & 0x01 != 0;
+                self.irq_enable = val & 0x02 != 0;
+                self.irq_mode_8bit = val & 0x04 != 0;
+                self.irq_flag = false;
+                if self.irq_enable {
+                    self.irq_counter = self.irq_latch;
+                }
+            }
+            0xd000 => {
+                self.irq_flag = false;
+                self.irq_enable = self.irq_ack_enable;
+            }
+            0xf000 => self.prg_bank = (val & 0x07) as usize,
+            _ => {}
+        }
+    }
+    fn ppu_read(&mut self, addr: u16) -> u8 {
+        self.chr[addr as usize & (self.chr.len() - 1)]
+    }
+    fn ppu_write(&mut self, addr: u16, val: u8) {
+        let n = self.chr.len();
+        self.chr[addr as usize & (n - 1)] = val;
+    }
+    fn mirroring(&self) -> Mirroring {
+        Mirroring::Vertical // VRC3 has fixed (header) mirroring; typ. vertical
+    }
+    fn irq(&self) -> bool {
+        self.irq_flag
+    }
+    fn tick_cpu(&mut self) {
+        if !self.irq_enable {
+            return;
+        }
+        if self.irq_mode_8bit {
+            let lo = self.irq_counter & 0x00ff;
+            if lo == 0x00ff {
+                self.irq_flag = true;
+                self.irq_counter = (self.irq_counter & 0xff00) | (self.irq_latch & 0x00ff);
+            } else {
+                self.irq_counter = (self.irq_counter & 0xff00) | (lo + 1);
+            }
+        } else if self.irq_counter == 0xffff {
+            self.irq_flag = true;
+            self.irq_counter = self.irq_latch;
+        } else {
+            self.irq_counter += 1;
+        }
+    }
+}
+impl SaveState for Vrc3 {
+    fn save(&self, w: &mut WriteCursor) {
+        w.bytes(&self.prg_ram);
+        w.bytes(&self.chr);
+        w.u32(self.prg_bank as u32);
+        w.u16(self.irq_latch);
+        w.u16(self.irq_counter);
+        w.bool(self.irq_enable);
+        w.bool(self.irq_ack_enable);
+        w.bool(self.irq_mode_8bit);
+        w.bool(self.irq_flag);
+    }
+    fn load(&mut self, r: &mut ReadCursor) -> Result<(), LoadError> {
+        let mut ram = vec![0u8; self.prg_ram.len()];
+        r.bytes(&mut ram)?;
+        self.prg_ram = ram;
+        let mut chr = vec![0u8; self.chr.len()];
+        r.bytes(&mut chr)?;
+        self.chr = chr;
+        self.prg_bank = r.u32()? as usize;
+        self.irq_latch = r.u16()?;
+        self.irq_counter = r.u16()?;
+        self.irq_enable = r.bool()?;
+        self.irq_ack_enable = r.bool()?;
+        self.irq_mode_8bit = r.bool()?;
+        self.irq_flag = r.bool()?;
+        Ok(())
+    }
+}
+
 /// Construct the mapper implementation for a parsed cart.
 pub fn make_mapper(cart: Cartridge) -> Result<Box<dyn Mapper>, CartError> {
     match cart.mapper {
@@ -1393,6 +1527,7 @@ pub fn make_mapper(cart: Cartridge) -> Result<Box<dyn Mapper>, CartError> {
         34 => Ok(Box::new(BankSwap::new(cart, BankSwapKind::Bnrom))),
         66 => Ok(Box::new(BankSwap::new(cart, BankSwapKind::Gxrom))),
         71 => Ok(Box::new(Camerica::new(cart))),
+        // 73 (VRC3) hangs like 65 (H3001) -- both CPU-cycle-IRQ; deferred.
         79 => Ok(Box::new(Nina03::new(cart))),
         // 65 (Irem H3001) hangs (IRQ) -- deferred to the IRQ-mapper pass.
         other => Err(CartError::UnsupportedMapper(other)),
