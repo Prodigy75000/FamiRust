@@ -251,17 +251,23 @@ impl Mmc1 {
 
     /// Map a CPU address in $8000-$FFFF to a byte offset in PRG ROM.
     fn prg_offset(&self, addr: u16) -> usize {
-        let last = self.prg_banks - 1;
-        let bank16 = |n: usize| (n % self.prg_banks) * PRG_BANK;
+        // SUROM/SXROM (512 KiB PRG): the CHR bank register's bit 4 supplies PRG
+        // A18, selecting which 256 KiB half the 4-bit 16 KiB bank register indexes
+        // into. Only carts bigger than 256 KiB (>16 banks) use it; on everything
+        // else CHR bit 4 is a real CHR bank bit and must not touch PRG. Dragon
+        // Warrior 3/4 are the classic 512 KiB cases.
+        let a18 = if self.prg_banks > 16 { self.chr0 as usize & 0x10 } else { 0 };
+        let bank16 = |n: usize| ((n | a18) % self.prg_banks) * PRG_BANK;
+        let total = self.prg_banks * PRG_BANK;
         let off = (addr as usize) & 0x3fff;
         match (self.control >> 2) & 0x3 {
             0 | 1 => {
                 // 32 KiB switch (ignore low bit of the bank number).
-                let base = ((self.prg_bank as usize & 0x0e)) * PRG_BANK;
-                (base + (addr as usize - 0x8000)) % (self.prg_banks * PRG_BANK)
+                let base = bank16(self.prg_bank as usize & 0x0e);
+                (base + (addr as usize - 0x8000)) % total
             }
             2 => {
-                // Fix first bank at $8000, switch 16 KiB at $C000.
+                // Fix first bank (of the current 256 KiB half) at $8000, switch $C000.
                 if addr < 0xc000 {
                     bank16(0) + off
                 } else {
@@ -269,11 +275,12 @@ impl Mmc1 {
                 }
             }
             _ => {
-                // Fix last bank at $C000, switch 16 KiB at $8000.
+                // Switch 16 KiB at $8000, fix the LAST bank of the current 256 KiB
+                // half at $C000 (0x0f | A18, so SUROM fixes bank 15 or 31).
                 if addr < 0xc000 {
                     bank16(self.prg_bank as usize & 0x0f) + off
                 } else {
-                    bank16(last) + off
+                    bank16(0x0f) + off
                 }
             }
         }
