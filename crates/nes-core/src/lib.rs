@@ -102,6 +102,11 @@ impl Nes {
         self.bus.ppu.dbg_s0_scanline
     }
 
+    /// Debug: current PPUMASK (bit1 = show BG left-8, bit2 = show sprites left-8).
+    pub fn dbg_ppu_mask(&self) -> u8 {
+        self.bus.ppu.mask
+    }
+
     /// Serialize the entire machine to a byte-identical snapshot. The layout is
     /// `MAGIC(8) || format_version(u16 LE) || cpu || bus`. Two machines in the
     /// same logical state produce an equal `Vec<u8>` on any target triple.
