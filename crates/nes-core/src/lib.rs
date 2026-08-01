@@ -64,6 +64,17 @@ impl Nes {
         self.cpu.step(&mut self.bus)
     }
 
+    /// Re-run the power-on reset sequence (for test ROMs that request a reset).
+    pub fn reset(&mut self) {
+        self.cpu.reset(&mut self.bus);
+    }
+
+    /// Read a CPU-space byte without advancing the machine (no PPU tick). For
+    /// test harnesses probing PRG-RAM result ports; not a cycle-accurate read.
+    pub fn peek(&mut self, addr: u16) -> u8 {
+        self.bus.peek(addr)
+    }
+
     /// Run until the PPU completes a frame (reaches vblank), then return the
     /// ARGB8888 framebuffer (256x240).
     pub fn step_frame(&mut self) -> &[u32] {

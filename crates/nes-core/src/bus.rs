@@ -53,6 +53,16 @@ impl Bus {
         self.ppu.tick(m);
     }
 
+    /// Non-ticking CPU-space read for test harnesses (e.g. the $6000 result
+    /// port). Only RAM and cartridge space are decoded; not cycle-accurate.
+    pub fn peek(&mut self, addr: u16) -> u8 {
+        match addr {
+            0x0000..=0x1fff => self.ram[(addr & 0x07ff) as usize],
+            0x4020..=0xffff => self.mapper.cpu_read(addr),
+            _ => 0,
+        }
+    }
+
     /// $4014 OAM DMA: copy 256 bytes from CPU page `hi` into OAM at the current
     /// OAMADDR, one read + one write cycle per byte (each ticks the PPU).
     fn oam_dma(&mut self, hi: u8) {

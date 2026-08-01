@@ -16,6 +16,11 @@ path = "src/tomharte.rs"
 name = "nes"
 path = "src/nes.rs"
 
+# Blargg test-ROM runner (the $6000 result-port protocol).
+[[bin]]
+name = "testrom"
+path = "src/testrom.rs"
+
 [dependencies]
 nes-core = { path = "../nes-core" }
 png = "0.17"

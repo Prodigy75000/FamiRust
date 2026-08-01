@@ -39,6 +39,8 @@ pub struct Ppu {
     pub palette: [u8; 0x20],
     /// 256-byte primary OAM (64 sprites x 4 bytes).
     pub oam: [u8; 0x100],
+    /// 32-byte secondary OAM (the up-to-8 sprites selected for the next line).
+    pub secondary_oam: [u8; 0x20],
 
     // ---- external register file ($2000-$2007) ----
     pub ctrl: u8,   // PPUCTRL
@@ -72,6 +74,15 @@ pub struct Ppu {
     bg_attr_lo: u16,
     bg_attr_hi: u16,
 
+    // ---- sprite output units for the line currently being drawn ----
+    sprite_count: u8,
+    sprite_pat_lo: [u8; 8],
+    sprite_pat_hi: [u8; 8],
+    sprite_attr: [u8; 8],
+    sprite_x: [u8; 8],
+    /// True when OAM sprite 0 is among this line's sprites (in slot 0).
+    sprite_zero_present: bool,
+
     /// ARGB8888 framebuffer, handed to the frontend each completed frame.
     pub framebuffer: Vec<u32>,
 }
@@ -82,6 +93,7 @@ impl Default for Ppu {
             ciram: [0; 0x800],
             palette: [0; 0x20],
             oam: [0; 0x100],
+            secondary_oam: [0xff; 0x20],
             ctrl: 0,
             mask: 0,
             status: 0,
@@ -105,6 +117,12 @@ impl Default for Ppu {
             bg_shift_hi: 0,
             bg_attr_lo: 0,
             bg_attr_hi: 0,
+            sprite_count: 0,
+            sprite_pat_lo: [0; 8],
+            sprite_pat_hi: [0; 8],
+            sprite_attr: [0; 8],
+            sprite_x: [0; 8],
+            sprite_zero_present: false,
             framebuffer: vec![0; FRAME_W * FRAME_H],
         }
     }
@@ -369,6 +387,106 @@ impl Ppu {
         }
     }
 
+    // ---------------- sprite pipeline ----------------
+
+    /// Evaluate primary OAM for the NEXT scanline into secondary OAM (up to 8),
+    /// then fetch each selected sprite's pattern bytes into the output units.
+    /// Performed at dot 257 (the hardware evaluates on line L for line L+1).
+    fn evaluate_sprites(&mut self, mapper: &mut dyn Mapper) {
+        self.secondary_oam = [0xff; 0x20];
+        self.sprite_count = 0;
+        self.sprite_zero_present = false;
+        let height: i16 = if self.ctrl & 0x20 != 0 { 16 } else { 8 };
+        // Evaluate against the CURRENT scanline (pre-render = -1); the selected
+        // sprites are drawn on the NEXT line. So a sprite at OAM Y=y first
+        // appears on line y+1 (row = eval_line - y).
+        let eval_line: i16 = if self.scanline == 261 { -1 } else { self.scanline as i16 };
+
+        for n in 0..64 {
+            let y = self.oam[n * 4] as i16;
+            let diff = eval_line - y;
+            if diff >= 0 && diff < height {
+                if self.sprite_count < 8 {
+                    let s = self.sprite_count as usize;
+                    self.secondary_oam[s * 4..s * 4 + 4]
+                        .copy_from_slice(&self.oam[n * 4..n * 4 + 4]);
+                    if n == 0 {
+                        self.sprite_zero_present = true;
+                    }
+                    self.sprite_count += 1;
+                } else {
+                    // 9th in-range sprite -> overflow. (The hardware's buggy
+                    // diagonal scan is modeled in stage 4; this is the basic set.)
+                    self.status |= 0x20;
+                    break;
+                }
+            }
+        }
+
+        // Fetch pattern bytes for each selected sprite.
+        for i in 0..self.sprite_count as usize {
+            let y = self.secondary_oam[i * 4] as i16;
+            let tile = self.secondary_oam[i * 4 + 1];
+            let attr = self.secondary_oam[i * 4 + 2];
+            let flip_v = attr & 0x80 != 0;
+            let mut row = (eval_line - y) as u16;
+
+            let addr = if height == 8 {
+                let base = if self.ctrl & 0x08 != 0 { 0x1000 } else { 0 };
+                if flip_v {
+                    row = 7 - row;
+                }
+                base + (tile as u16) * 16 + row
+            } else {
+                // 8x16: tile bit0 selects table; the two halves are tile&0xFE / |1.
+                let base = ((tile & 1) as u16) * 0x1000;
+                let mut t = (tile & 0xfe) as u16;
+                if flip_v {
+                    row = 15 - row;
+                }
+                if row >= 8 {
+                    t += 1;
+                    row -= 8;
+                }
+                base + t * 16 + row
+            };
+
+            let mut lo = self.mem_read(addr, mapper);
+            let mut hi = self.mem_read(addr + 8, mapper);
+            if attr & 0x40 != 0 {
+                lo = lo.reverse_bits();
+                hi = hi.reverse_bits();
+            }
+            self.sprite_pat_lo[i] = lo;
+            self.sprite_pat_hi[i] = hi;
+            self.sprite_attr[i] = attr;
+            self.sprite_x[i] = self.secondary_oam[i * 4 + 3];
+        }
+    }
+
+    /// The sprite candidate for screen x: returns (pattern, palette, behind_bg,
+    /// is_sprite0). The first (lowest-index) opaque sprite wins.
+    fn sprite_pixel(&self, x: usize) -> (u8, u8, bool, bool) {
+        if self.mask & 0x10 == 0 || (x < 8 && self.mask & 0x04 == 0) {
+            return (0, 0, false, false);
+        }
+        for i in 0..self.sprite_count as usize {
+            let dx = x as i16 - self.sprite_x[i] as i16;
+            if dx < 0 || dx >= 8 {
+                continue;
+            }
+            let bit = 7 - dx as u8;
+            let p0 = (self.sprite_pat_lo[i] >> bit) & 1;
+            let p1 = (self.sprite_pat_hi[i] >> bit) & 1;
+            let pattern = (p1 << 1) | p0;
+            if pattern != 0 {
+                let attr = self.sprite_attr[i];
+                return (pattern, attr & 0x03, attr & 0x20 != 0, self.sprite_zero_present && i == 0);
+            }
+        }
+        (0, 0, false, false)
+    }
+
     /// Compose and store the pixel for the current visible dot (x = dot-1).
     fn render_pixel(&mut self, mapper: &mut dyn Mapper) {
         let x = (self.dot - 1) as usize;
@@ -386,11 +504,24 @@ impl Ppu {
             bg_palette = (a1 << 1) | a0;
         }
 
-        // Background-only for now: transparent BG pixels show the backdrop.
-        let pal_addr = if bg_pixel == 0 {
-            0x3f00
-        } else {
-            0x3f00 | ((bg_palette as u16) << 2) | bg_pixel as u16
+        let (sp_pixel, sp_palette, sp_behind, is_sprite0) = self.sprite_pixel(x);
+
+        // Multiplex background and sprite (see notes §11).
+        let pal_addr = match (bg_pixel != 0, sp_pixel != 0) {
+            (false, false) => 0x3f00, // backdrop
+            (false, true) => 0x3f10 | ((sp_palette as u16) << 2) | sp_pixel as u16,
+            (true, false) => 0x3f00 | ((bg_palette as u16) << 2) | bg_pixel as u16,
+            (true, true) => {
+                // Sprite-0 hit: both opaque, from sprite 0, not at x=255.
+                if is_sprite0 && x != 255 {
+                    self.status |= 0x40;
+                }
+                if sp_behind {
+                    0x3f00 | ((bg_palette as u16) << 2) | bg_pixel as u16
+                } else {
+                    0x3f10 | ((sp_palette as u16) << 2) | sp_pixel as u16
+                }
+            }
         };
         let mut index = self.mem_read(pal_addr, mapper) & 0x3f;
         if self.mask & 0x01 != 0 {
@@ -419,6 +550,8 @@ impl Ppu {
             if self.dot == 257 {
                 self.load_shifters();
                 self.copy_horizontal();
+                // Evaluate + fetch sprites for the next scanline.
+                self.evaluate_sprites(mapper);
             }
             // Dummy nametable fetches at 337 & 339 (feed mapper A12 watchers).
             if self.dot == 338 || self.dot == 340 {
@@ -473,6 +606,7 @@ impl SaveState for Ppu {
         w.bytes(&self.ciram);
         w.bytes(&self.palette);
         w.bytes(&self.oam);
+        w.bytes(&self.secondary_oam);
         w.u8(self.ctrl);
         w.u8(self.mask);
         w.u8(self.status);
@@ -496,6 +630,12 @@ impl SaveState for Ppu {
         w.u16(self.bg_shift_hi);
         w.u16(self.bg_attr_lo);
         w.u16(self.bg_attr_hi);
+        w.u8(self.sprite_count);
+        w.bytes(&self.sprite_pat_lo);
+        w.bytes(&self.sprite_pat_hi);
+        w.bytes(&self.sprite_attr);
+        w.bytes(&self.sprite_x);
+        w.bool(self.sprite_zero_present);
         // Framebuffer is pure output, reconstructed by rendering — not saved.
     }
 
@@ -503,6 +643,7 @@ impl SaveState for Ppu {
         r.bytes(&mut self.ciram)?;
         r.bytes(&mut self.palette)?;
         r.bytes(&mut self.oam)?;
+        r.bytes(&mut self.secondary_oam)?;
         self.ctrl = r.u8()?;
         self.mask = r.u8()?;
         self.status = r.u8()?;
@@ -526,6 +667,12 @@ impl SaveState for Ppu {
         self.bg_shift_hi = r.u16()?;
         self.bg_attr_lo = r.u16()?;
         self.bg_attr_hi = r.u16()?;
+        self.sprite_count = r.u8()?;
+        r.bytes(&mut self.sprite_pat_lo)?;
+        r.bytes(&mut self.sprite_pat_hi)?;
+        r.bytes(&mut self.sprite_attr)?;
+        r.bytes(&mut self.sprite_x)?;
+        self.sprite_zero_present = r.bool()?;
         Ok(())
     }
 }
