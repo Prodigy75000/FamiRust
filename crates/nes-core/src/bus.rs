@@ -43,18 +43,28 @@ impl Bus {
 }
 
 impl Bus {
-    /// Advance the rest of the system for one CPU cycle: three PPU dots (and,
-    /// later, one APU tick). Every CPU bus access is one cycle and calls this.
+    /// Advance the rest of the system for one CPU cycle: three PPU dots + one APU
+    /// cycle + the mapper's per-cycle hook.
     #[inline]
-    fn tick(&mut self) {
+    fn tick_once(&mut self) {
         self.ppu.tick(&mut *self.mapper);
         self.ppu.tick(&mut *self.mapper);
         self.ppu.tick(&mut *self.mapper);
         self.apu.tick(&mut *self.mapper);
         self.mapper.tick_cpu();
-        // DMC DMA stall is drained but not yet applied to CPU timing (the APU
-        // tests are insensitive to it; exact 1-4 cycle stall is a later refinement).
-        let _ = self.apu.take_dma_stall();
+    }
+
+    /// One CPU cycle. If the DMC just fetched a sample byte, the CPU is stalled
+    /// for the DMA: the rest of the system (PPU/APU) advances those extra cycles
+    /// while the CPU makes no progress. This is what keeps DMC-using games'
+    /// cycle-timed raster splits from jittering.
+    #[inline]
+    fn tick(&mut self) {
+        self.tick_once();
+        let stall = self.apu.take_dma_stall();
+        for _ in 0..stall {
+            self.tick_once();
+        }
     }
 
     /// Non-ticking CPU-space read for test harnesses (e.g. the $6000 result
