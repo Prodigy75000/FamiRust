@@ -47,10 +47,13 @@ impl Bus {
     /// later, one APU tick). Every CPU bus access is one cycle and calls this.
     #[inline]
     fn tick(&mut self) {
-        let m = &mut *self.mapper;
-        self.ppu.tick(m);
-        self.ppu.tick(m);
-        self.ppu.tick(m);
+        self.ppu.tick(&mut *self.mapper);
+        self.ppu.tick(&mut *self.mapper);
+        self.ppu.tick(&mut *self.mapper);
+        self.apu.tick(&mut *self.mapper);
+        // DMC DMA stall is drained but not yet applied to CPU timing (the APU
+        // tests are insensitive to it; exact 1-4 cycle stall is a later refinement).
+        let _ = self.apu.take_dma_stall();
     }
 
     /// Non-ticking CPU-space read for test harnesses (e.g. the $6000 result
@@ -83,9 +86,10 @@ impl CpuBus for Bus {
         let val = match addr {
             0x0000..=0x1fff => self.ram[(addr & 0x07ff) as usize],
             0x2000..=0x3fff => self.ppu.read_register(addr & 7, &mut *self.mapper),
+            0x4015 => self.apu.read_status(),
             0x4016 => self.controllers[0].read() | (self.open_bus & 0xe0),
             0x4017 => self.controllers[1].read() | (self.open_bus & 0xe0),
-            0x4000..=0x4015 | 0x4018..=0x401f => self.open_bus, // APU/test: TODO
+            0x4000..=0x4014 | 0x4018..=0x401f => self.open_bus, // write-only regs: open bus
             0x4020..=0xffff => self.mapper.cpu_read(addr),
         };
         self.open_bus = val;
@@ -104,7 +108,8 @@ impl CpuBus for Bus {
                 self.controllers[0].set_strobe(strobe);
                 self.controllers[1].set_strobe(strobe);
             }
-            0x4000..=0x4013 | 0x4015 | 0x4017..=0x401f => {} // APU/test: TODO
+            0x4000..=0x4013 | 0x4015 | 0x4017 => self.apu.write_register(addr, val),
+            0x4018..=0x401f => {} // disabled test registers
             0x4020..=0xffff => self.mapper.cpu_write(addr, val),
         }
         self.tick();
@@ -115,7 +120,7 @@ impl CpuBus for Bus {
     }
 
     fn irq(&self) -> bool {
-        false // APU frame IRQ / DMC / mapper IRQ: TODO
+        self.apu.irq_asserted()
     }
 }
 

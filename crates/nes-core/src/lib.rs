@@ -91,6 +91,11 @@ impl Nes {
         self.bus.controllers[port].buttons = buttons;
     }
 
+    /// Drain accumulated host-rate audio samples (f32, ~44.1 kHz mono).
+    pub fn take_audio(&mut self) -> Vec<f32> {
+        self.bus.apu.take_samples()
+    }
+
     /// Serialize the entire machine to a byte-identical snapshot. The layout is
     /// `MAGIC(8) || format_version(u16 LE) || cpu || bus`. Two machines in the
     /// same logical state produce an equal `Vec<u8>` on any target triple.
