@@ -130,6 +130,9 @@ pub trait Mapper: SaveState {
     fn irq(&self) -> bool {
         false
     }
+    /// Called once per CPU cycle, for mappers with a CPU-cycle IRQ counter
+    /// (Irem H3001, Sunsoft FME-7, ...). Default no-op.
+    fn tick_cpu(&mut self) {}
 }
 
 /// Mapper 0: fixed PRG (16 or 32 KiB), fixed CHR. The bring-up mapper.
@@ -791,6 +794,589 @@ impl SaveState for Mmc3 {
     }
 }
 
+/// A "bank-swap" mapper covering several simple discrete-logic families that
+/// differ only in which register bits pick the 32 KiB PRG bank and 8 KiB CHR
+/// bank: GxROM (66), Color Dreams (11), BNROM (34). One register at $8000-$FFFF.
+pub struct BankSwap {
+    prg: Vec<u8>,
+    chr: Vec<u8>,
+    chr_is_ram: bool,
+    prg_banks32: usize,
+    chr_banks8: usize,
+    prg_bank: usize,
+    chr_bank: usize,
+    mirroring: Mirroring,
+    /// How to decode a $8000-$FFFF write into (prg32, chr8).
+    kind: BankSwapKind,
+}
+#[derive(Clone, Copy)]
+pub enum BankSwapKind {
+    Gxrom,       // PRG=(v>>4)&3, CHR=v&3
+    ColorDreams, // PRG=v&3, CHR=(v>>4)&0xF
+    Bnrom,       // PRG=v (32K), CHR RAM
+}
+impl BankSwap {
+    pub fn new(cart: Cartridge, kind: BankSwapKind) -> Self {
+        BankSwap {
+            prg_banks32: (cart.prg_rom.len() / (32 * 1024)).max(1),
+            chr_banks8: (cart.chr_rom.len() / CHR_BANK).max(1),
+            prg: cart.prg_rom,
+            chr: cart.chr_rom,
+            chr_is_ram: cart.chr_is_ram,
+            prg_bank: 0,
+            chr_bank: 0,
+            mirroring: cart.mirroring,
+            kind,
+        }
+    }
+}
+impl Mapper for BankSwap {
+    fn cpu_read(&mut self, addr: u16) -> u8 {
+        match addr {
+            0x8000..=0xffff => {
+                let base = (self.prg_bank % self.prg_banks32) * 32 * 1024;
+                self.prg[base + (addr as usize - 0x8000)]
+            }
+            _ => 0,
+        }
+    }
+    fn cpu_write(&mut self, addr: u16, val: u8) {
+        if addr >= 0x8000 {
+            let (p, c) = match self.kind {
+                BankSwapKind::Gxrom => (((val >> 4) & 3) as usize, (val & 3) as usize),
+                BankSwapKind::ColorDreams => ((val & 3) as usize, ((val >> 4) & 0x0f) as usize),
+                BankSwapKind::Bnrom => (val as usize, 0),
+            };
+            self.prg_bank = p;
+            self.chr_bank = c;
+        }
+    }
+    fn ppu_read(&mut self, addr: u16) -> u8 {
+        let base = (self.chr_bank % self.chr_banks8) * CHR_BANK;
+        self.chr[(base + addr as usize) % self.chr.len()]
+    }
+    fn ppu_write(&mut self, addr: u16, val: u8) {
+        if self.chr_is_ram {
+            let n = self.chr.len();
+            self.chr[addr as usize & (n - 1)] = val;
+        }
+    }
+    fn mirroring(&self) -> Mirroring {
+        self.mirroring
+    }
+}
+impl SaveState for BankSwap {
+    fn save(&self, w: &mut WriteCursor) {
+        if self.chr_is_ram {
+            w.bytes(&self.chr);
+        }
+        w.u32(self.prg_bank as u32);
+        w.u32(self.chr_bank as u32);
+    }
+    fn load(&mut self, r: &mut ReadCursor) -> Result<(), LoadError> {
+        if self.chr_is_ram {
+            let mut chr = vec![0u8; self.chr.len()];
+            r.bytes(&mut chr)?;
+            self.chr = chr;
+        }
+        self.prg_bank = r.u32()? as usize;
+        self.chr_bank = r.u32()? as usize;
+        Ok(())
+    }
+}
+
+/// Mapper 71 (Camerica/Codemasters): UxROM-like — a switchable 16 KiB PRG bank
+/// at $8000 selected by writes to $C000-$FFFF, fixed last bank at $C000, CHR RAM.
+pub struct Camerica {
+    prg: Vec<u8>,
+    chr: Vec<u8>,
+    prg_banks: usize,
+    bank: u8,
+    mirroring: Mirroring,
+}
+impl Camerica {
+    pub fn new(cart: Cartridge) -> Self {
+        Camerica {
+            prg_banks: (cart.prg_rom.len() / PRG_BANK).max(1),
+            prg: cart.prg_rom,
+            chr: cart.chr_rom,
+            bank: 0,
+            mirroring: cart.mirroring,
+        }
+    }
+}
+impl Mapper for Camerica {
+    fn cpu_read(&mut self, addr: u16) -> u8 {
+        match addr {
+            0x8000..=0xbfff => self.prg[(self.bank as usize % self.prg_banks) * PRG_BANK + (addr as usize - 0x8000)],
+            0xc000..=0xffff => self.prg[(self.prg_banks - 1) * PRG_BANK + (addr as usize - 0xc000)],
+            _ => 0,
+        }
+    }
+    fn cpu_write(&mut self, addr: u16, val: u8) {
+        // BF9093/BF9097: the 16 KiB PRG bank register is at $C000-$FFFF.
+        if addr >= 0xc000 {
+            self.bank = val & 0x0f;
+        }
+    }
+    fn ppu_read(&mut self, addr: u16) -> u8 {
+        self.chr[addr as usize & (self.chr.len() - 1)]
+    }
+    fn ppu_write(&mut self, addr: u16, val: u8) {
+        let n = self.chr.len();
+        self.chr[addr as usize & (n - 1)] = val;
+    }
+    fn mirroring(&self) -> Mirroring {
+        self.mirroring
+    }
+}
+impl SaveState for Camerica {
+    fn save(&self, w: &mut WriteCursor) {
+        w.bytes(&self.chr);
+        w.u8(self.bank);
+    }
+    fn load(&mut self, r: &mut ReadCursor) -> Result<(), LoadError> {
+        r.bytes(&mut self.chr)?;
+        self.bank = r.u8()?;
+        Ok(())
+    }
+}
+
+/// Mapper 79 (NINA-03/06, AVE): fixed 32 KiB PRG bank + 8 KiB CHR bank, selected
+/// by a write to $4100-$5FFF (bit3 = PRG 32K, bits0-2 = CHR 8K).
+pub struct Nina03 {
+    prg: Vec<u8>,
+    chr: Vec<u8>,
+    prg_banks32: usize,
+    chr_banks8: usize,
+    prg_bank: usize,
+    chr_bank: usize,
+    mirroring: Mirroring,
+}
+impl Nina03 {
+    pub fn new(cart: Cartridge) -> Self {
+        Nina03 {
+            prg_banks32: (cart.prg_rom.len() / (32 * 1024)).max(1),
+            chr_banks8: (cart.chr_rom.len() / CHR_BANK).max(1),
+            prg: cart.prg_rom,
+            chr: cart.chr_rom,
+            prg_bank: 0,
+            chr_bank: 0,
+            mirroring: cart.mirroring,
+        }
+    }
+}
+impl Mapper for Nina03 {
+    fn cpu_read(&mut self, addr: u16) -> u8 {
+        match addr {
+            0x8000..=0xffff => {
+                let base = (self.prg_bank % self.prg_banks32) * 32 * 1024;
+                self.prg[base + (addr as usize - 0x8000)]
+            }
+            _ => 0,
+        }
+    }
+    fn cpu_write(&mut self, addr: u16, val: u8) {
+        if (0x4100..=0x5fff).contains(&addr) {
+            self.prg_bank = ((val >> 3) & 1) as usize;
+            self.chr_bank = (val & 0x07) as usize;
+        }
+    }
+    fn ppu_read(&mut self, addr: u16) -> u8 {
+        let base = (self.chr_bank % self.chr_banks8) * CHR_BANK;
+        self.chr[(base + addr as usize) % self.chr.len()]
+    }
+    fn ppu_write(&mut self, _addr: u16, _val: u8) {}
+    fn mirroring(&self) -> Mirroring {
+        self.mirroring
+    }
+}
+impl SaveState for Nina03 {
+    fn save(&self, w: &mut WriteCursor) {
+        w.u32(self.prg_bank as u32);
+        w.u32(self.chr_bank as u32);
+    }
+    fn load(&mut self, r: &mut ReadCursor) -> Result<(), LoadError> {
+        self.prg_bank = r.u32()? as usize;
+        self.chr_bank = r.u32()? as usize;
+        Ok(())
+    }
+}
+
+/// Mappers 9 (MMC2, Punch-Out) and 10 (MMC4, Fire Emblem). Both use a pair of
+/// CHR "latches" that flip when the PPU fetches tile $FD vs $FE, selecting which
+/// 4 KiB CHR bank shows. MMC2 switches 8 KiB PRG at $8000 (three fixed banks
+/// after); MMC4 switches 16 KiB PRG at $8000 (last 16 KiB fixed).
+pub struct Mmc2 {
+    is_mmc4: bool,
+    prg: Vec<u8>,
+    chr: Vec<u8>,
+    prg_ram: Vec<u8>,
+    prg_banks: usize, // 8K (mmc2) or 16K (mmc4) window count is derived on read
+    prg_bank: u8,
+    chr_banks: [u8; 4], // [$0000/FD, $0000/FE, $1000/FD, $1000/FE] (4 KiB each)
+    latch0: bool,       // false=FD, true=FE for $0000
+    latch1: bool,       // for $1000
+    mirroring: Mirroring,
+}
+impl Mmc2 {
+    pub fn new(cart: Cartridge, is_mmc4: bool) -> Self {
+        let unit = if is_mmc4 { 16 * 1024 } else { 8 * 1024 };
+        Mmc2 {
+            is_mmc4,
+            prg_banks: (cart.prg_rom.len() / unit).max(1),
+            prg: cart.prg_rom,
+            chr: cart.chr_rom,
+            prg_ram: cart.prg_ram,
+            prg_bank: 0,
+            chr_banks: [0; 4],
+            latch0: true,
+            latch1: true,
+            mirroring: cart.mirroring,
+        }
+    }
+    fn chr4(&self, sel: usize, off: usize) -> u8 {
+        let bank = self.chr_banks[sel] as usize;
+        self.chr[(bank * 0x1000 + off) % self.chr.len().max(1)]
+    }
+}
+impl Mapper for Mmc2 {
+    fn cpu_read(&mut self, addr: u16) -> u8 {
+        match addr {
+            0x6000..=0x7fff => self.prg_ram[(addr as usize - 0x6000) & (self.prg_ram.len() - 1)],
+            0x8000..=0xffff => {
+                if self.is_mmc4 {
+                    // 16K switchable at $8000, fixed last 16K at $C000.
+                    if addr < 0xc000 {
+                        self.prg[(self.prg_bank as usize % self.prg_banks) * 0x4000 + (addr as usize - 0x8000)]
+                    } else {
+                        self.prg[(self.prg_banks - 1) * 0x4000 + (addr as usize - 0xc000)]
+                    }
+                } else {
+                    // 8K switchable at $8000, last three 8K fixed.
+                    let region = (addr as usize - 0x8000) / 0x2000;
+                    let off = addr as usize & 0x1fff;
+                    // $8000 switchable; $A000/$C000/$E000 = last three 8K banks.
+                    let bank = match region {
+                        0 => self.prg_bank as usize & 0x0f,
+                        1 => self.prg_banks - 3,
+                        2 => self.prg_banks - 2,
+                        _ => self.prg_banks - 1,
+                    };
+                    self.prg[(bank % self.prg_banks) * 0x2000 + off]
+                }
+            }
+            _ => 0,
+        }
+    }
+    fn cpu_write(&mut self, addr: u16, val: u8) {
+        match addr {
+            0x6000..=0x7fff => {
+                let n = self.prg_ram.len();
+                self.prg_ram[(addr as usize - 0x6000) & (n - 1)] = val;
+            }
+            0xa000..=0xafff => self.prg_bank = val & 0x0f,
+            0xb000..=0xbfff => self.chr_banks[0] = val & 0x1f, // $0000 FD
+            0xc000..=0xcfff => self.chr_banks[1] = val & 0x1f, // $0000 FE
+            0xd000..=0xdfff => self.chr_banks[2] = val & 0x1f, // $1000 FD
+            0xe000..=0xefff => self.chr_banks[3] = val & 0x1f, // $1000 FE
+            0xf000..=0xffff => {
+                self.mirroring = if val & 1 != 0 {
+                    Mirroring::Horizontal
+                } else {
+                    Mirroring::Vertical
+                };
+            }
+            _ => {}
+        }
+    }
+    fn ppu_read(&mut self, addr: u16) -> u8 {
+        let a = addr as usize & 0x1fff;
+        let val = if a < 0x1000 {
+            self.chr4(if self.latch0 { 1 } else { 0 }, a)
+        } else {
+            self.chr4(if self.latch1 { 3 } else { 2 }, a - 0x1000)
+        };
+        // Update the latches AFTER the fetch (tile $FD -> FD latch, $FE -> FE).
+        match addr & 0x1ff8 {
+            0x0fd8 => self.latch0 = false,
+            0x0fe8 => self.latch0 = true,
+            0x1fd8 => self.latch1 = false,
+            0x1fe8 => self.latch1 = true,
+            _ => {}
+        }
+        val
+    }
+    fn ppu_write(&mut self, _addr: u16, _val: u8) {}
+    fn mirroring(&self) -> Mirroring {
+        self.mirroring
+    }
+}
+impl SaveState for Mmc2 {
+    fn save(&self, w: &mut WriteCursor) {
+        w.bytes(&self.prg_ram);
+        w.u8(self.prg_bank);
+        w.bytes(&self.chr_banks);
+        w.bool(self.latch0);
+        w.bool(self.latch1);
+        w.u8(match self.mirroring {
+            Mirroring::Horizontal => 0,
+            _ => 1,
+        });
+    }
+    fn load(&mut self, r: &mut ReadCursor) -> Result<(), LoadError> {
+        let mut ram = vec![0u8; self.prg_ram.len()];
+        r.bytes(&mut ram)?;
+        self.prg_ram = ram;
+        self.prg_bank = r.u8()?;
+        r.bytes(&mut self.chr_banks)?;
+        self.latch0 = r.bool()?;
+        self.latch1 = r.bool()?;
+        self.mirroring = if r.u8()? == 0 {
+            Mirroring::Horizontal
+        } else {
+            Mirroring::Vertical
+        };
+        Ok(())
+    }
+}
+
+/// Mapper 65 (Irem H3001): three switchable 8 KiB PRG banks + fixed last, eight
+/// 1 KiB CHR banks, and a 16-bit CPU-cycle IRQ counter.
+#[allow(dead_code)]
+pub struct H3001 {
+    prg: Vec<u8>,
+    chr: Vec<u8>,
+    prg_ram: Vec<u8>,
+    chr_is_ram: bool,
+    prg_banks8: usize,
+    chr_banks1: usize,
+    prg_regs: [u8; 3], // banks at $8000, $A000, $C000
+    chr_regs: [u8; 8],
+    mirroring: Mirroring,
+    irq_counter: u16,
+    irq_latch: u16,
+    irq_enable: bool,
+    irq_flag: bool,
+}
+impl H3001 {
+    pub fn new(cart: Cartridge) -> Self {
+        H3001 {
+            prg_banks8: (cart.prg_rom.len() / (8 * 1024)).max(1),
+            chr_banks1: (cart.chr_rom.len() / 1024).max(1),
+            prg: cart.prg_rom,
+            chr: cart.chr_rom,
+            prg_ram: cart.prg_ram,
+            chr_is_ram: cart.chr_is_ram,
+            prg_regs: [0; 3],
+            chr_regs: [0; 8],
+            mirroring: cart.mirroring,
+            irq_counter: 0,
+            irq_latch: 0,
+            irq_enable: false,
+            irq_flag: false,
+        }
+    }
+}
+impl Mapper for H3001 {
+    fn cpu_read(&mut self, addr: u16) -> u8 {
+        match addr {
+            0x6000..=0x7fff => self.prg_ram[(addr as usize - 0x6000) & (self.prg_ram.len() - 1)],
+            0x8000..=0xffff => {
+                let region = (addr as usize - 0x8000) / 0x2000; // 0..3
+                let bank = match region {
+                    0 => self.prg_regs[0] as usize,
+                    1 => self.prg_regs[1] as usize,
+                    2 => self.prg_regs[2] as usize,
+                    _ => self.prg_banks8 - 1, // fixed last
+                };
+                self.prg[(bank % self.prg_banks8) * 0x2000 + (addr as usize & 0x1fff)]
+            }
+            _ => 0,
+        }
+    }
+    fn cpu_write(&mut self, addr: u16, val: u8) {
+        match addr {
+            0x6000..=0x7fff => {
+                let n = self.prg_ram.len();
+                self.prg_ram[(addr as usize - 0x6000) & (n - 1)] = val;
+            }
+            0x8000..=0x8fff => self.prg_regs[0] = val,
+            0xa000..=0xafff => self.prg_regs[1] = val,
+            0xc000..=0xcfff => self.prg_regs[2] = val,
+            0x9001 => {
+                self.mirroring = if val & 0x80 != 0 {
+                    Mirroring::Horizontal
+                } else {
+                    Mirroring::Vertical
+                };
+            }
+            0x9003 => {
+                self.irq_enable = val & 0x80 != 0;
+                self.irq_flag = false;
+            }
+            0x9004 => {
+                self.irq_counter = self.irq_latch;
+                self.irq_flag = false;
+            }
+            0x9005 => self.irq_latch = (self.irq_latch & 0x00ff) | ((val as u16) << 8),
+            0x9006 => self.irq_latch = (self.irq_latch & 0xff00) | val as u16,
+            0xb000..=0xb007 => self.chr_regs[(addr & 0x0007) as usize] = val,
+            _ => {}
+        }
+    }
+    fn ppu_read(&mut self, addr: u16) -> u8 {
+        let slot = (addr as usize & 0x1fff) / 0x400; // 0..7
+        let bank = self.chr_regs[slot] as usize;
+        self.chr[(bank % self.chr_banks1) * 0x400 + (addr as usize & 0x3ff)]
+    }
+    fn ppu_write(&mut self, addr: u16, val: u8) {
+        if self.chr_is_ram {
+            let slot = (addr as usize & 0x1fff) / 0x400;
+            let bank = self.chr_regs[slot] as usize;
+            let i = ((bank % self.chr_banks1) * 0x400 + (addr as usize & 0x3ff)) % self.chr.len();
+            self.chr[i] = val;
+        }
+    }
+    fn mirroring(&self) -> Mirroring {
+        self.mirroring
+    }
+    fn irq(&self) -> bool {
+        self.irq_flag
+    }
+    fn tick_cpu(&mut self) {
+        if self.irq_enable && self.irq_counter > 0 {
+            self.irq_counter -= 1;
+            if self.irq_counter == 0 {
+                self.irq_flag = true;
+            }
+        }
+    }
+}
+impl SaveState for H3001 {
+    fn save(&self, w: &mut WriteCursor) {
+        w.bytes(&self.prg_ram);
+        if self.chr_is_ram {
+            w.bytes(&self.chr);
+        }
+        w.bytes(&self.prg_regs);
+        w.bytes(&self.chr_regs);
+        w.u8(match self.mirroring {
+            Mirroring::Horizontal => 0,
+            _ => 1,
+        });
+        w.u16(self.irq_counter);
+        w.u16(self.irq_latch);
+        w.bool(self.irq_enable);
+        w.bool(self.irq_flag);
+    }
+    fn load(&mut self, r: &mut ReadCursor) -> Result<(), LoadError> {
+        let mut ram = vec![0u8; self.prg_ram.len()];
+        r.bytes(&mut ram)?;
+        self.prg_ram = ram;
+        if self.chr_is_ram {
+            let mut chr = vec![0u8; self.chr.len()];
+            r.bytes(&mut chr)?;
+            self.chr = chr;
+        }
+        r.bytes(&mut self.prg_regs)?;
+        r.bytes(&mut self.chr_regs)?;
+        self.mirroring = if r.u8()? == 0 {
+            Mirroring::Horizontal
+        } else {
+            Mirroring::Vertical
+        };
+        self.irq_counter = r.u16()?;
+        self.irq_latch = r.u16()?;
+        self.irq_enable = r.bool()?;
+        self.irq_flag = r.bool()?;
+        Ok(())
+    }
+}
+
+/// Mapper 34 variant NINA-001 (the CHR-ROM form of mapper 34): registers live in
+/// PRG-RAM space — $7FFD picks a 32 KiB PRG bank, $7FFE/$7FFF pick two 4 KiB CHR
+/// banks. (The CHR-RAM form of mapper 34 is BNROM, handled by BankSwap.)
+pub struct Nina001 {
+    prg: Vec<u8>,
+    chr: Vec<u8>,
+    prg_ram: Vec<u8>,
+    prg_banks32: usize,
+    chr_banks4: usize,
+    prg_bank: usize,
+    chr_bank0: usize,
+    chr_bank1: usize,
+    mirroring: Mirroring,
+}
+impl Nina001 {
+    pub fn new(cart: Cartridge) -> Self {
+        Nina001 {
+            prg_banks32: (cart.prg_rom.len() / (32 * 1024)).max(1),
+            chr_banks4: (cart.chr_rom.len() / 0x1000).max(1),
+            prg: cart.prg_rom,
+            chr: cart.chr_rom,
+            prg_ram: cart.prg_ram,
+            prg_bank: 0,
+            chr_bank0: 0,
+            chr_bank1: 1,
+            mirroring: cart.mirroring,
+        }
+    }
+}
+impl Mapper for Nina001 {
+    fn cpu_read(&mut self, addr: u16) -> u8 {
+        match addr {
+            0x6000..=0x7fff => self.prg_ram[(addr as usize - 0x6000) & (self.prg_ram.len() - 1)],
+            0x8000..=0xffff => {
+                let base = (self.prg_bank % self.prg_banks32) * 32 * 1024;
+                self.prg[base + (addr as usize - 0x8000)]
+            }
+            _ => 0,
+        }
+    }
+    fn cpu_write(&mut self, addr: u16, val: u8) {
+        match addr {
+            0x7ffd => self.prg_bank = (val & 1) as usize,
+            0x7ffe => self.chr_bank0 = (val & 0x0f) as usize,
+            0x7fff => self.chr_bank1 = (val & 0x0f) as usize,
+            0x6000..=0x7fff => {
+                let n = self.prg_ram.len();
+                self.prg_ram[(addr as usize - 0x6000) & (n - 1)] = val;
+            }
+            _ => {}
+        }
+    }
+    fn ppu_read(&mut self, addr: u16) -> u8 {
+        let (bank, off) = if addr < 0x1000 {
+            (self.chr_bank0, addr as usize)
+        } else {
+            (self.chr_bank1, addr as usize - 0x1000)
+        };
+        self.chr[((bank % self.chr_banks4) * 0x1000 + off) % self.chr.len()]
+    }
+    fn ppu_write(&mut self, _addr: u16, _val: u8) {}
+    fn mirroring(&self) -> Mirroring {
+        self.mirroring
+    }
+}
+impl SaveState for Nina001 {
+    fn save(&self, w: &mut WriteCursor) {
+        w.bytes(&self.prg_ram);
+        w.u32(self.prg_bank as u32);
+        w.u32(self.chr_bank0 as u32);
+        w.u32(self.chr_bank1 as u32);
+    }
+    fn load(&mut self, r: &mut ReadCursor) -> Result<(), LoadError> {
+        let mut ram = vec![0u8; self.prg_ram.len()];
+        r.bytes(&mut ram)?;
+        self.prg_ram = ram;
+        self.prg_bank = r.u32()? as usize;
+        self.chr_bank0 = r.u32()? as usize;
+        self.chr_bank1 = r.u32()? as usize;
+        Ok(())
+    }
+}
+
 /// Construct the mapper implementation for a parsed cart.
 pub fn make_mapper(cart: Cartridge) -> Result<Box<dyn Mapper>, CartError> {
     match cart.mapper {
@@ -800,6 +1386,15 @@ pub fn make_mapper(cart: Cartridge) -> Result<Box<dyn Mapper>, CartError> {
         3 => Ok(Box::new(Cnrom::new(cart))),
         4 => Ok(Box::new(Mmc3::new(cart))),
         7 => Ok(Box::new(Axrom::new(cart))),
+        9 => Ok(Box::new(Mmc2::new(cart, false))),
+        11 => Ok(Box::new(BankSwap::new(cart, BankSwapKind::ColorDreams))),
+        // Mapper 34: NINA-001 (CHR ROM) vs BNROM (CHR RAM).
+        34 if !cart.chr_is_ram => Ok(Box::new(Nina001::new(cart))),
+        34 => Ok(Box::new(BankSwap::new(cart, BankSwapKind::Bnrom))),
+        66 => Ok(Box::new(BankSwap::new(cart, BankSwapKind::Gxrom))),
+        71 => Ok(Box::new(Camerica::new(cart))),
+        79 => Ok(Box::new(Nina03::new(cart))),
+        // 65 (Irem H3001) hangs (IRQ) -- deferred to the IRQ-mapper pass.
         other => Err(CartError::UnsupportedMapper(other)),
     }
 }

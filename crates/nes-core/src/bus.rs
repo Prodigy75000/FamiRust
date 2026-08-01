@@ -51,6 +51,7 @@ impl Bus {
         self.ppu.tick(&mut *self.mapper);
         self.ppu.tick(&mut *self.mapper);
         self.apu.tick(&mut *self.mapper);
+        self.mapper.tick_cpu();
         // DMC DMA stall is drained but not yet applied to CPU timing (the APU
         // tests are insensitive to it; exact 1-4 cycle stall is a later refinement).
         let _ = self.apu.take_dma_stall();

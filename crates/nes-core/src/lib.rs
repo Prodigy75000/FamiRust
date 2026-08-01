@@ -107,6 +107,11 @@ impl Nes {
         self.bus.ppu.mask
     }
 
+    /// Debug: current CPU program counter (to spot a hang/stuck loop).
+    pub fn dbg_pc(&self) -> u16 {
+        self.cpu.pc
+    }
+
     /// Serialize the entire machine to a byte-identical snapshot. The layout is
     /// `MAGIC(8) || format_version(u16 LE) || cpu || bus`. Two machines in the
     /// same logical state produce an equal `Vec<u8>` on any target triple.
