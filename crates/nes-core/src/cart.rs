@@ -1397,12 +1397,13 @@ pub struct Vrc3 {
 }
 impl Vrc3 {
     pub fn new(cart: Cartridge) -> Self {
+        let prg_banks = (cart.prg_rom.len() / PRG_BANK).max(1);
         Vrc3 {
-            prg_banks: (cart.prg_rom.len() / PRG_BANK).max(1),
+            prg_banks,
             prg: cart.prg_rom,
             chr: cart.chr_rom,
             prg_ram: cart.prg_ram,
-            prg_bank: 0,
+            prg_bank: 0, // power-up bank is undefined on VRC3; game sets it
             irq_latch: 0,
             irq_counter: 0,
             irq_enable: false,
@@ -1527,9 +1528,11 @@ pub fn make_mapper(cart: Cartridge) -> Result<Box<dyn Mapper>, CartError> {
         34 => Ok(Box::new(BankSwap::new(cart, BankSwapKind::Bnrom))),
         66 => Ok(Box::new(BankSwap::new(cart, BankSwapKind::Gxrom))),
         71 => Ok(Box::new(Camerica::new(cart))),
-        // 73 (VRC3) hangs like 65 (H3001) -- both CPU-cycle-IRQ; deferred.
         79 => Ok(Box::new(Nina03::new(cart))),
-        // 65 (Irem H3001) hangs (IRQ) -- deferred to the IRQ-mapper pass.
+        // 65 (Irem H3001) and 73 (Konami VRC3) have complete impls below but both
+        // hang their boot -- a CPU-cycle-counted IRQ + reset-bank subtlety we have
+        // not cracked. Left unwired (report unsupported) until the IRQ-mapper pass,
+        // rather than shipping a frozen black screen.
         other => Err(CartError::UnsupportedMapper(other)),
     }
 }
