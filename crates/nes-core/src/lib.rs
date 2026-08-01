@@ -25,10 +25,10 @@ pub mod cpu;
 pub mod ppu;
 pub mod save;
 
+pub use cpu::{Cpu, CpuBus};
 pub use save::{LoadError, ReadCursor, SaveState, WriteCursor};
 
 use bus::Bus;
-use cpu::Cpu;
 
 /// Leading magic on every save state. Identifies the producing core so a
 /// cross-engine transfer can reject a foreign or corrupt buffer up front rather

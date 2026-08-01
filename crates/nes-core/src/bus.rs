@@ -14,6 +14,7 @@
 use crate::apu::Apu;
 use crate::cart::Mapper;
 use crate::controller::Controller;
+use crate::cpu::CpuBus;
 use crate::ppu::Ppu;
 use crate::save::{LoadError, ReadCursor, SaveState, WriteCursor};
 
@@ -39,7 +40,10 @@ impl Bus {
         }
     }
 
-    pub fn read(&mut self, addr: u16) -> u8 {
+}
+
+impl CpuBus for Bus {
+    fn read(&mut self, addr: u16) -> u8 {
         let val = match addr {
             0x0000..=0x1fff => self.ram[(addr & 0x07ff) as usize],
             0x2000..=0x3fff => self.open_bus, // PPU register decode: TODO
@@ -52,7 +56,7 @@ impl Bus {
         val
     }
 
-    pub fn write(&mut self, addr: u16, val: u8) {
+    fn write(&mut self, addr: u16, val: u8) {
         self.open_bus = val;
         match addr {
             0x0000..=0x1fff => self.ram[(addr & 0x07ff) as usize] = val,
