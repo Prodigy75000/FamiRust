@@ -42,13 +42,37 @@ impl Bus {
 
 }
 
+impl Bus {
+    /// Advance the rest of the system for one CPU cycle: three PPU dots (and,
+    /// later, one APU tick). Every CPU bus access is one cycle and calls this.
+    #[inline]
+    fn tick(&mut self) {
+        let m = &mut *self.mapper;
+        self.ppu.tick(m);
+        self.ppu.tick(m);
+        self.ppu.tick(m);
+    }
+
+    /// $4014 OAM DMA: copy 256 bytes from CPU page `hi` into OAM at the current
+    /// OAMADDR, one read + one write cycle per byte (each ticks the PPU).
+    fn oam_dma(&mut self, hi: u8) {
+        let base = (hi as u16) << 8;
+        for i in 0..256u16 {
+            let b = self.read(base + i); // read cycle (ticks)
+            self.tick(); // write cycle
+            self.ppu.oam_dma_write(b);
+        }
+    }
+}
+
 impl CpuBus for Bus {
     fn read(&mut self, addr: u16) -> u8 {
+        self.tick();
         let val = match addr {
             0x0000..=0x1fff => self.ram[(addr & 0x07ff) as usize],
-            0x2000..=0x3fff => self.open_bus, // PPU register decode: TODO
-            0x4016 => self.controllers[0].read(),
-            0x4017 => self.controllers[1].read(),
+            0x2000..=0x3fff => self.ppu.read_register(addr & 7, &mut *self.mapper),
+            0x4016 => self.controllers[0].read() | (self.open_bus & 0xe0),
+            0x4017 => self.controllers[1].read() | (self.open_bus & 0xe0),
             0x4000..=0x4015 | 0x4018..=0x401f => self.open_bus, // APU/test: TODO
             0x4020..=0xffff => self.mapper.cpu_read(addr),
         };
@@ -57,18 +81,28 @@ impl CpuBus for Bus {
     }
 
     fn write(&mut self, addr: u16, val: u8) {
+        self.tick();
         self.open_bus = val;
         match addr {
             0x0000..=0x1fff => self.ram[(addr & 0x07ff) as usize] = val,
-            0x2000..=0x3fff => {} // PPU register decode: TODO
+            0x2000..=0x3fff => self.ppu.write_register(addr & 7, val, &mut *self.mapper),
+            0x4014 => self.oam_dma(val),
             0x4016 => {
                 let strobe = val & 1 != 0;
                 self.controllers[0].set_strobe(strobe);
                 self.controllers[1].set_strobe(strobe);
             }
-            0x4000..=0x4015 | 0x4017..=0x401f => {} // APU/test: TODO
+            0x4000..=0x4013 | 0x4015 | 0x4017..=0x401f => {} // APU/test: TODO
             0x4020..=0xffff => self.mapper.cpu_write(addr, val),
         }
+    }
+
+    fn nmi(&self) -> bool {
+        self.ppu.nmi_line()
+    }
+
+    fn irq(&self) -> bool {
+        false // APU frame IRQ / DMC / mapper IRQ: TODO
     }
 }
 

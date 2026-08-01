@@ -32,6 +32,15 @@ use flag::*;
 pub trait CpuBus {
     fn read(&mut self, addr: u16) -> u8;
     fn write(&mut self, addr: u16, val: u8);
+    /// Current NMI line level (PPU vblank-NMI). The CPU edge-detects it. Default
+    /// low so the conformance harness sees no interrupts.
+    fn nmi(&self) -> bool {
+        false
+    }
+    /// Current IRQ line level (APU/mapper, level-sensitive, gated by the I flag).
+    fn irq(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,10 +58,8 @@ pub struct Cpu {
     pub cycles: u64,
     /// Set by a JAM/KIL opcode: the CPU is locked until reset.
     pub halted: bool,
-    /// Latched NMI request (edge-triggered by the system; cleared on service).
-    pub nmi_pending: bool,
-    /// Level-sensitive IRQ line (held by the system while a source is active).
-    pub irq_line: bool,
+    /// Last sampled NMI line level, for edge detection across instructions.
+    pub prev_nmi: bool,
 }
 
 impl Default for Cpu {
@@ -66,8 +73,7 @@ impl Default for Cpu {
             p: IRQ_DISABLE | UNUSED,
             cycles: 0,
             halted: false,
-            nmi_pending: false,
-            irq_line: false,
+            prev_nmi: false,
         }
     }
 }
@@ -347,9 +353,6 @@ impl Cpu {
         let lo = self.rb(bus, vec) as u16;
         let hi = self.rb(bus, vec + 1) as u16;
         self.pc = (hi << 8) | lo;
-        if nmi {
-            self.nmi_pending = false;
-        }
     }
 
     /// Execute one instruction (or service a pending interrupt). Returns the
@@ -357,17 +360,23 @@ impl Cpu {
     pub fn step<B: CpuBus>(&mut self, bus: &mut B) -> u64 {
         let start = self.cycles;
 
+        // Sample the NMI line and detect a low->high edge across the boundary.
+        let nmi_now = bus.nmi();
+        let nmi_edge = nmi_now && !self.prev_nmi;
+        self.prev_nmi = nmi_now;
+
         if self.halted {
             self.rb(bus, self.pc); // JAM keeps the bus alive but never advances
             return self.cycles - start;
         }
 
-        // Interrupt poll at the instruction boundary (NMI > IRQ; IRQ masked by I).
-        if self.nmi_pending {
+        // Interrupt poll at the instruction boundary (NMI edge > IRQ level; IRQ
+        // masked by the I flag).
+        if nmi_edge {
             self.service_interrupt(bus, true);
             return self.cycles - start;
         }
-        if self.irq_line && !self.get_flag(IRQ_DISABLE) {
+        if bus.irq() && !self.get_flag(IRQ_DISABLE) {
             self.service_interrupt(bus, false);
             return self.cycles - start;
         }
@@ -815,8 +824,7 @@ impl SaveState for Cpu {
         w.u8(self.p);
         w.u64(self.cycles);
         w.bool(self.halted);
-        w.bool(self.nmi_pending);
-        w.bool(self.irq_line);
+        w.bool(self.prev_nmi);
     }
 
     fn load(&mut self, r: &mut ReadCursor) -> Result<(), LoadError> {
@@ -828,8 +836,7 @@ impl SaveState for Cpu {
         self.p = r.u8()?;
         self.cycles = r.u64()?;
         self.halted = r.bool()?;
-        self.nmi_pending = r.bool()?;
-        self.irq_line = r.bool()?;
+        self.prev_nmi = r.bool()?;
         Ok(())
     }
 }
@@ -849,8 +856,7 @@ mod tests {
             p: CARRY | NEGATIVE | UNUSED,
             cycles: 1_234_567,
             halted: false,
-            nmi_pending: true,
-            irq_line: false,
+            prev_nmi: true,
         };
         let mut w = WriteCursor::new();
         cpu.save(&mut w);

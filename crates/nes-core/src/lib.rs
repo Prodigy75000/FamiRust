@@ -46,14 +46,38 @@ pub struct Nes {
 }
 
 impl Nes {
-    /// Build a machine from a raw `.nes` (iNES / NES 2.0) image.
+    /// Build a machine from a raw `.nes` (iNES / NES 2.0) image, then run the
+    /// 7-cycle power-on reset so PC is loaded from the reset vector.
     pub fn from_rom(rom: &[u8]) -> Result<Self, cart::CartError> {
         let cart = cart::Cartridge::from_ines(rom)?;
         let mapper = cart::make_mapper(cart)?;
-        Ok(Nes {
+        let mut nes = Nes {
             cpu: Cpu::new(),
             bus: Bus::new(mapper),
-        })
+        };
+        nes.cpu.reset(&mut nes.bus);
+        Ok(nes)
+    }
+
+    /// Run one instruction. Returns the CPU cycles it consumed.
+    pub fn step(&mut self) -> u64 {
+        self.cpu.step(&mut self.bus)
+    }
+
+    /// Run until the PPU completes a frame (reaches vblank), then return the
+    /// ARGB8888 framebuffer (256x240).
+    pub fn step_frame(&mut self) -> &[u32] {
+        self.bus.ppu.frame_complete = false;
+        while !self.bus.ppu.frame_complete {
+            self.cpu.step(&mut self.bus);
+        }
+        &self.bus.ppu.framebuffer
+    }
+
+    /// Set the button bitmask for controller `port` (0 or 1). See
+    /// [`controller::button`] for bit positions.
+    pub fn set_buttons(&mut self, port: usize, buttons: u8) {
+        self.bus.controllers[port].buttons = buttons;
     }
 
     /// Serialize the entire machine to a byte-identical snapshot. The layout is
