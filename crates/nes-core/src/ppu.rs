@@ -450,44 +450,55 @@ impl Ppu {
             }
         }
 
-        // Fetch pattern bytes for each selected sprite.
-        for i in 0..self.sprite_count as usize {
-            let y = self.secondary_oam[i * 4] as i16;
-            let tile = self.secondary_oam[i * 4 + 1];
-            let attr = self.secondary_oam[i * 4 + 2];
-            let flip_v = attr & 0x80 != 0;
-            let mut row = (eval_line - y) as u16;
+        // Fetch pattern bytes for ALL 8 sprite slots every scanline. Slots beyond
+        // sprite_count are dummy fetches (tile $FF) that render nothing but keep
+        // PPU A12 toggling every scanline — the MMC3 scanline IRQ counts on that.
+        for i in 0..8 {
+            if i < self.sprite_count as usize {
+                let y = self.secondary_oam[i * 4] as i16;
+                let tile = self.secondary_oam[i * 4 + 1];
+                let attr = self.secondary_oam[i * 4 + 2];
+                let flip_v = attr & 0x80 != 0;
+                let mut row = (eval_line - y) as u16;
 
-            let addr = if height == 8 {
-                let base = if self.ctrl & 0x08 != 0 { 0x1000 } else { 0 };
-                if flip_v {
-                    row = 7 - row;
+                let addr = if height == 8 {
+                    let base = if self.ctrl & 0x08 != 0 { 0x1000 } else { 0 };
+                    if flip_v {
+                        row = 7 - row;
+                    }
+                    base + (tile as u16) * 16 + row
+                } else {
+                    // 8x16: tile bit0 selects table; halves are tile&0xFE / |1.
+                    let base = ((tile & 1) as u16) * 0x1000;
+                    let mut t = (tile & 0xfe) as u16;
+                    if flip_v {
+                        row = 15 - row;
+                    }
+                    if row >= 8 {
+                        t += 1;
+                        row -= 8;
+                    }
+                    base + t * 16 + row
+                };
+
+                let mut lo = self.mem_read(addr, mapper);
+                let mut hi = self.mem_read(addr + 8, mapper);
+                if attr & 0x40 != 0 {
+                    lo = lo.reverse_bits();
+                    hi = hi.reverse_bits();
                 }
-                base + (tile as u16) * 16 + row
+                self.sprite_pat_lo[i] = lo;
+                self.sprite_pat_hi[i] = hi;
+                self.sprite_attr[i] = attr;
+                self.sprite_x[i] = self.secondary_oam[i * 4 + 3];
             } else {
-                // 8x16: tile bit0 selects table; the two halves are tile&0xFE / |1.
-                let base = ((tile & 1) as u16) * 0x1000;
-                let mut t = (tile & 0xfe) as u16;
-                if flip_v {
-                    row = 15 - row;
-                }
-                if row >= 8 {
-                    t += 1;
-                    row -= 8;
-                }
-                base + t * 16 + row
-            };
-
-            let mut lo = self.mem_read(addr, mapper);
-            let mut hi = self.mem_read(addr + 8, mapper);
-            if attr & 0x40 != 0 {
-                lo = lo.reverse_bits();
-                hi = hi.reverse_bits();
+                // Empty slot: dummy fetch of tile $FF from the sprite pattern
+                // table (result discarded; only the bus access matters for A12).
+                let base = if height == 16 || self.ctrl & 0x08 != 0 { 0x1000 } else { 0x0000 };
+                let addr = base | 0x0ff0;
+                self.mem_read(addr, mapper);
+                self.mem_read(addr + 8, mapper);
             }
-            self.sprite_pat_lo[i] = lo;
-            self.sprite_pat_hi[i] = hi;
-            self.sprite_attr[i] = attr;
-            self.sprite_x[i] = self.secondary_oam[i * 4 + 3];
         }
     }
 
