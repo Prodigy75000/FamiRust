@@ -30,6 +30,15 @@ pub use save::{LoadError, ReadCursor, SaveState, WriteCursor};
 use bus::Bus;
 use cpu::Cpu;
 
+/// Leading magic on every save state. Identifies the producing core so a
+/// cross-engine transfer can reject a foreign or corrupt buffer up front rather
+/// than misinterpret it (contract rule 4/5 in `docs/SAVESTATE.md`).
+pub const STATE_MAGIC: &[u8; 8] = b"FAMIRST1";
+
+/// Save-state layout version. Bump on ANY change to the serialized field set or
+/// order; older builds refuse a newer version cleanly (never panic, never guess).
+pub const STATE_VERSION: u16 = 1;
+
 /// A whole NES: CPU plus the bus that owns every other device.
 pub struct Nes {
     pub cpu: Cpu,
@@ -47,20 +56,40 @@ impl Nes {
         })
     }
 
-    /// Serialize the entire machine to a byte-identical snapshot. Two machines
-    /// in the same logical state produce equal `Vec<u8>` on any platform.
+    /// Serialize the entire machine to a byte-identical snapshot. The layout is
+    /// `MAGIC(8) || format_version(u16 LE) || cpu || bus`. Two machines in the
+    /// same logical state produce an equal `Vec<u8>` on any target triple.
     pub fn save_state(&self) -> Vec<u8> {
         let mut w = WriteCursor::new();
+        w.bytes(STATE_MAGIC);
+        w.u16(STATE_VERSION);
         self.cpu.save(&mut w);
         self.bus.save(&mut w);
         w.into_bytes()
     }
 
+    /// Byte length of a snapshot for this machine. Stable for a given ROM/mapper
+    /// and equal across platforms per `format_version` — the netplay handshake
+    /// keys on it (contract rule 7). Cheap enough to compute by serializing.
+    pub fn state_size(&self) -> usize {
+        self.save_state().len()
+    }
+
     /// Restore a snapshot produced by [`Nes::save_state`] on a machine built
-    /// from the *same ROM*. Refuses truncated, malformed, or over-long buffers
+    /// from the *same ROM*. Verifies the magic and refuses a newer
+    /// `format_version`, then refuses truncated, malformed, or over-long buffers
     /// (a cross-engine transfer must reject a mismatched state, never guess).
     pub fn load_state(&mut self, bytes: &[u8]) -> Result<(), LoadError> {
         let mut r = ReadCursor::new(bytes);
+        let mut magic = [0u8; 8];
+        r.bytes(&mut magic)?;
+        if &magic != STATE_MAGIC {
+            return Err(LoadError::BadMagic);
+        }
+        let version = r.u16()?;
+        if version > STATE_VERSION {
+            return Err(LoadError::UnsupportedVersion(version));
+        }
         self.cpu.load(&mut r)?;
         self.bus.load(&mut r)?;
         r.finish()
@@ -98,11 +127,52 @@ mod tests {
         assert_eq!(snap, other.save_state());
     }
 
+    /// Golden header: the exact leading bytes are part of the cross-platform
+    /// contract. A zeroed machine's first 10 bytes are magic + version, and the
+    /// serialized size is fixed for this ROM/mapper.
+    #[test]
+    fn state_header_is_golden_and_size_is_stable() {
+        let nes = Nes::from_rom(&synth_rom()).unwrap();
+        let snap = nes.save_state();
+        assert_eq!(&snap[0..8], b"FAMIRST1");
+        assert_eq!(&snap[8..10], &[0x01, 0x00]); // format_version = 1, LE
+        // NROM 16K PRG + CHR ROM (no CHR RAM): size is deterministic.
+        // header(10) + cpu(15) + ram(2048) + ppu + apu + 2 pads + mapper(prg_ram
+        // 8192) + open_bus(1). Assert it is fixed and matches state_size().
+        assert_eq!(snap.len(), nes.state_size());
+    }
+
     #[test]
     fn load_rejects_truncated_state() {
         let mut nes = Nes::from_rom(&synth_rom()).unwrap();
         let mut snap = nes.save_state();
         snap.truncate(snap.len() - 1);
         assert_eq!(nes.load_state(&snap), Err(LoadError::UnexpectedEof));
+    }
+
+    #[test]
+    fn load_rejects_wrong_magic() {
+        let mut nes = Nes::from_rom(&synth_rom()).unwrap();
+        let mut snap = nes.save_state();
+        snap[0] ^= 0xff; // corrupt the magic
+        assert_eq!(nes.load_state(&snap), Err(LoadError::BadMagic));
+    }
+
+    #[test]
+    fn load_rejects_newer_version() {
+        let mut nes = Nes::from_rom(&synth_rom()).unwrap();
+        let mut snap = nes.save_state();
+        // Stamp format_version = 0x00FF (LE at offset 8), far newer than we know.
+        snap[8] = 0xff;
+        snap[9] = 0x00;
+        assert_eq!(nes.load_state(&snap), Err(LoadError::UnsupportedVersion(0x00ff)));
+    }
+
+    #[test]
+    fn load_rejects_oversized_state() {
+        let mut nes = Nes::from_rom(&synth_rom()).unwrap();
+        let mut snap = nes.save_state();
+        snap.push(0x00); // one trailing byte too many
+        assert_eq!(nes.load_state(&snap), Err(LoadError::TrailingBytes));
     }
 }

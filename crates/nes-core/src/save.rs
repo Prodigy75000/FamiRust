@@ -93,6 +93,12 @@ pub enum LoadError {
     /// Trailing bytes remained after a full structural read (state longer than
     /// the machine expects) — a version/shape mismatch we refuse up front.
     TrailingBytes,
+    /// Leading magic did not match this core — not a FamiRust state at all.
+    BadMagic,
+    /// State `format_version` is newer than this build understands. Per the
+    /// save-state contract we refuse cleanly rather than misread a layout we do
+    /// not know (the carried value is the version we found).
+    UnsupportedVersion(u16),
 }
 
 /// Sequential little-endian reader; the exact inverse of [`WriteCursor`].
