@@ -63,9 +63,12 @@ pub struct Ppu {
     pub frame: u64,
     /// Set true at (241,1); the host polls it to grab a completed frame.
     pub frame_complete: bool,
-    /// Set when $2002 is read in the race window just before/at the vblank set
-    /// point; suppresses the flag + NMI for that frame.
-    suppress_vbl: bool,
+    /// True during the CPU cycle in which the vblank flag was set (at 241,1);
+    /// a coincident $2002 read consumes it to suppress the flag + NMI.
+    vbl_just_set: bool,
+    /// Symmetric: true on the dot the vblank flag is cleared (261,1); a coincident
+    /// $2002 read still returns the flag as set (the pre-clear value).
+    vbl_just_cleared: bool,
     /// One-tick-delayed NMI line level (see [`Ppu::nmi_line`]).
     nmi_delayed: bool,
     /// Debug: scanline at which sprite-0 hit was set this frame (-1 = none yet).
@@ -116,7 +119,8 @@ impl Default for Ppu {
             frame_odd: false,
             frame: 0,
             frame_complete: false,
-            suppress_vbl: false,
+            vbl_just_set: false,
+            vbl_just_cleared: false,
             nmi_delayed: false,
             dbg_s0_scanline: -1,
             bg_next_id: 0,
@@ -158,6 +162,13 @@ impl Ppu {
     #[inline]
     fn nmi_condition(&self) -> bool {
         (self.ctrl & 0x80 != 0) && (self.status & 0x80 != 0)
+    }
+
+    /// Called by the bus at the start of each CPU cycle, before that cycle's PPU
+    /// dots are clocked, so `vbl_just_set` reflects only this cycle's dots.
+    #[inline]
+    pub fn begin_cpu_cycle(&mut self) {
+        self.vbl_just_set = false;
     }
 
     // ---------------- PPU-internal memory access ----------------
@@ -218,13 +229,17 @@ impl Ppu {
                 // PPUSTATUS: top 3 bits are flags, low 5 are open bus. Reading
                 // clears vblank and resets the write toggle.
                 let mut status = self.status;
-                // VBlank read race (this read samples at the cycle-start dot;
-                // the set happens at (241,1) during this cycle's later dots).
-                // Reading on the dot the flag would be set reads 0 and suppresses
-                // the flag + NMI for this frame.
-                if self.scanline == 241 && self.dot == 1 {
+                // VBlank read race: this read samples at the END of the CPU cycle
+                // (dots already clocked). If the flag was set during THIS cycle's
+                // dots (`vbl_just_set`), the read is coincident: it returns 0 and
+                // the flag + NMI are suppressed for this frame.
+                if self.vbl_just_set {
                     status &= 0x7f;
-                    self.suppress_vbl = true;
+                    self.nmi_delayed = false;
+                }
+                // Coincident with the clear: the read still sees the flag set.
+                if self.vbl_just_cleared {
+                    status |= 0x80;
                 }
                 let v = (status & 0xe0) | (self.io_bus & 0x1f);
                 self.status &= 0x7f; // clear vblank
@@ -575,6 +590,11 @@ impl Ppu {
 
     /// Advance one PPU dot. `mapper` supplies CHR + mirroring.
     pub fn tick(&mut self, mapper: &mut dyn Mapper) {
+        // `vbl_just_set` is a one-dot flag: it is true only immediately after the
+        // dot that set the vblank flag, so a $2002 read (which samples after this
+        // cycle's last dot) is "coincident" only when the set landed on that dot.
+        self.vbl_just_set = false;
+        self.vbl_just_cleared = false;
         let rendering = self.rendering_enabled();
         let visible = self.scanline < 240;
         let prerender = self.scanline == 261;
@@ -609,14 +629,13 @@ impl Ppu {
 
         // VBlank set / clear.
         if self.scanline == 241 && self.dot == 1 {
-            if !self.suppress_vbl {
-                self.status |= 0x80; // vblank
-            }
-            self.suppress_vbl = false;
+            self.status |= 0x80; // vblank
+            self.vbl_just_set = true; // consumed by a coincident $2002 read
             self.frame_complete = true;
         }
         if prerender && self.dot == 1 {
             self.status &= !0xe0; // clear vblank, sprite-0, overflow
+            self.vbl_just_cleared = true;
             self.dbg_s0_scanline = -1;
         }
 
@@ -670,7 +689,8 @@ impl SaveState for Ppu {
         w.bool(self.frame_odd);
         w.u64(self.frame);
         w.bool(self.frame_complete);
-        w.bool(self.suppress_vbl);
+        w.bool(self.vbl_just_set);
+        w.bool(self.vbl_just_cleared);
         w.bool(self.nmi_delayed);
         w.u8(self.bg_next_id);
         w.u8(self.bg_next_attr);
@@ -709,7 +729,8 @@ impl SaveState for Ppu {
         self.frame_odd = r.bool()?;
         self.frame = r.u64()?;
         self.frame_complete = r.bool()?;
-        self.suppress_vbl = r.bool()?;
+        self.vbl_just_set = r.bool()?;
+        self.vbl_just_cleared = r.bool()?;
         self.nmi_delayed = r.bool()?;
         self.bg_next_id = r.u8()?;
         self.bg_next_attr = r.u8()?;

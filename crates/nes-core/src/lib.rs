@@ -38,7 +38,8 @@ pub const STATE_MAGIC: &[u8; 8] = b"FAMIRST1";
 
 /// Save-state layout version. Bump on ANY change to the serialized field set or
 /// order; older builds refuse a newer version cleanly (never panic, never guess).
-pub const STATE_VERSION: u16 = 1;
+/// v2: added the PPU vbl_just_cleared field (sub-cycle timing rework).
+pub const STATE_VERSION: u16 = 2;
 
 /// A whole NES: CPU plus the bus that owns every other device.
 pub struct Nes {
@@ -191,7 +192,7 @@ mod tests {
         let nes = Nes::from_rom(&synth_rom()).unwrap();
         let snap = nes.save_state();
         assert_eq!(&snap[0..8], b"FAMIRST1");
-        assert_eq!(&snap[8..10], &[0x01, 0x00]); // format_version = 1, LE
+        assert_eq!(&snap[8..10], &[0x02, 0x00]); // format_version = 2, LE
         // NROM 16K PRG + CHR ROM (no CHR RAM): size is deterministic.
         // header(10) + cpu(15) + ram(2048) + ppu + apu + 2 pads + mapper(prg_ram
         // 8192) + open_bus(1). Assert it is fixed and matches state_size().

@@ -81,9 +81,12 @@ impl Bus {
 
 impl CpuBus for Bus {
     fn read(&mut self, addr: u16) -> u8 {
-        // The register access samples the PPU at the start of the CPU cycle;
-        // the three PPU dots for this cycle are then clocked afterward. This
-        // ordering is what makes the $2002 vblank read-race modelable.
+        // Clock this CPU cycle's three PPU dots FIRST, then do the access. The
+        // register read and the CPU's interrupt poll (right after) both sample
+        // the PPU at the END of the cycle, consistently -- which is what keeps
+        // mid-frame split timing (sprite-0 hit) stable frame to frame.
+        self.ppu.begin_cpu_cycle();
+        self.tick();
         let val = match addr {
             0x0000..=0x1fff => self.ram[(addr & 0x07ff) as usize],
             0x2000..=0x3fff => self.ppu.read_register(addr & 7, &mut *self.mapper),
@@ -94,11 +97,12 @@ impl CpuBus for Bus {
             0x4020..=0xffff => self.mapper.cpu_read(addr),
         };
         self.open_bus = val;
-        self.tick();
         val
     }
 
     fn write(&mut self, addr: u16, val: u8) {
+        self.ppu.begin_cpu_cycle();
+        self.tick();
         self.open_bus = val;
         match addr {
             0x0000..=0x1fff => self.ram[(addr & 0x07ff) as usize] = val,
@@ -113,7 +117,6 @@ impl CpuBus for Bus {
             0x4018..=0x401f => {} // disabled test registers
             0x4020..=0xffff => self.mapper.cpu_write(addr, val),
         }
-        self.tick();
     }
 
     fn nmi(&self) -> bool {
