@@ -1,0 +1,12 @@
+[package]
+name = "nes-core"
+version = "0.1.0"
+edition = "2021"
+description = "A clean-room Nintendo Entertainment System (NES / Famicom) emulator core, written from scratch in Rust. Codename FamiRust. Cycle-accurate and byte-identical-save-state by construction for cross-engine netplay."
+
+[lib]
+name = "nes_core"
+path = "src/lib.rs"
+
+[dependencies]
+pocketrust-common = { path = "../../../pocketrust-common" }

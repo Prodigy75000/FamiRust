@@ -1,0 +1,17 @@
+/target
+
+# Commercial cart images and any BIOS-ish dumps stay out of git. The NES has no
+# boot ROM, but disk-system (FDS) BIOS and vendored test ROMs are gitignored too.
+/dumps/*.nes
+/dumps/*.unf
+/dumps/*.unif
+/dumps/*.fds
+/dumps/*.nsf
+/dumps/fds*.bin
+/dumps/disksys*.rom
+
+# Vendored TomHarte 6502 single-step vector clone (the CPU conformance corpus).
+/tests/vendor/
+
+# Headless render / audio dumps from the dev harnesses.
+/out/

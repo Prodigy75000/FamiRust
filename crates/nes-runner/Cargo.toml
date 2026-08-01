@@ -1,0 +1,27 @@
+[package]
+name = "nes-runner"
+version = "0.1.0"
+edition = "2021"
+
+# Dev harnesses. `tomharte` is the CPU conformance runner and comes first -- it
+# is how we grind the Ricoh 2A03 (an NMOS 6502 sans decimal mode) to green
+# against the TomHarte single-step JSON vectors, the same role it plays for the
+# GBA core's ARM7 and the SNES core's 65C816. The `nes` window / png `shot` bins
+# mirror the other cores and land once the PPU renders.
+[[bin]]
+name = "tomharte"
+path = "src/tomharte.rs"
+
+[[bin]]
+name = "nes"
+path = "src/nes.rs"
+
+[dependencies]
+nes-core = { path = "../nes-core" }
+png = "0.17"
+# tomharte harness only: parse the SingleStepTests JSON and decompress the
+# gzipped vector files we vendor under tests/vendor/. Dev-tool deps -- the core
+# and the shipped libretro cdylib pull in neither.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+flate2 = "1"

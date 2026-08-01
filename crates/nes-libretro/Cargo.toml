@@ -1,0 +1,13 @@
+[package]
+name = "nes-libretro"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+# cdylib -> libnescore_libretro.so; renamed to the libretro convention on
+# deploy (famirust_nes). Deploys to Trophy Hub as its own .so.
+name = "nescore_libretro"
+crate-type = ["cdylib"]
+
+[dependencies]
+nes-core = { path = "../nes-core" }
