@@ -11,8 +11,9 @@ use crate::save::{LoadError, ReadCursor, SaveState, WriteCursor};
 
 /// NTSC CPU clock (Hz), used for host-rate decimation.
 const CPU_HZ: f64 = 1_789_773.0;
-/// Host output sample rate.
-pub const SAMPLE_RATE: u32 = 44_100;
+/// Host output sample rate. 48 kHz matches what libretro hosts commonly assume
+/// (a mismatched rate is the classic "drilling" audio artifact).
+pub const SAMPLE_RATE: u32 = 48_000;
 
 const LENGTH_TABLE: [u8; 32] = [
     10, 254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14, 12, 16, 24, 18, 48, 20, 96, 22,

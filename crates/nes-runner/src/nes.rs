@@ -9,7 +9,7 @@ use std::process::ExitCode;
 
 /// Write f32 samples (roughly -1..1) as a 16-bit PCM mono WAV at 44.1 kHz.
 fn write_wav(path: &std::path::Path, samples: &[f32]) {
-    let sr: u32 = 44_100;
+    let sr: u32 = nes_core::SAMPLE_RATE;
     let data_len = (samples.len() * 2) as u32;
     let Ok(mut f) = std::fs::File::create(path).map(std::io::BufWriter::new) else {
         eprintln!("cannot write {}", path.display());

@@ -25,6 +25,7 @@ pub mod cpu;
 pub mod ppu;
 pub mod save;
 
+pub use apu::SAMPLE_RATE;
 pub use cpu::{Cpu, CpuBus};
 pub use save::{LoadError, ReadCursor, SaveState, WriteCursor};
 
