@@ -9,4 +9,3 @@ name = "nes_core"
 path = "src/lib.rs"
 
 [dependencies]
-pocketrust-common = { path = "../../../pocketrust-common" }
