@@ -43,6 +43,14 @@ pub trait CpuBus {
     }
 }
 
+/// The interrupt selected by a cycle's poll. NMI (edge-latched) outranks IRQ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pending {
+    None,
+    Nmi,
+    Irq,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cpu {
     pub a: u8,
@@ -58,8 +66,15 @@ pub struct Cpu {
     pub cycles: u64,
     /// Set by a JAM/KIL opcode: the CPU is locked until reset.
     pub halted: bool,
-    /// Last sampled NMI line level, for edge detection across instructions.
-    pub prev_nmi: bool,
+    /// NMI edge latch (edge-triggered; consumed when the NMI is serviced).
+    pub nmi_flag: bool,
+    /// Last sampled NMI line level, for edge detection.
+    pub nmi_line_prev: bool,
+    /// Interrupt poll result for the cycle just executed, and the one before it.
+    /// The 6502 acts on the poll from the instruction's *second-to-last* cycle,
+    /// so a line change on the final cycle is deferred one instruction.
+    pub poll: Pending,
+    pub poll_prev: Pending,
 }
 
 impl Default for Cpu {
@@ -73,7 +88,10 @@ impl Default for Cpu {
             p: IRQ_DISABLE | UNUSED,
             cycles: 0,
             halted: false,
-            prev_nmi: false,
+            nmi_flag: false,
+            nmi_line_prev: false,
+            poll: Pending::None,
+            poll_prev: Pending::None,
         }
     }
 }
@@ -88,13 +106,36 @@ impl Cpu {
     #[inline]
     fn rb<B: CpuBus>(&mut self, bus: &mut B, addr: u16) -> u8 {
         self.cycles += 1;
-        bus.read(addr)
+        let v = bus.read(addr);
+        self.poll_interrupts(bus);
+        v
     }
 
     #[inline]
     fn wb<B: CpuBus>(&mut self, bus: &mut B, addr: u16, val: u8) {
         self.cycles += 1;
         bus.write(addr, val);
+        self.poll_interrupts(bus);
+    }
+
+    /// Sample the interrupt lines once per cycle. NMI is edge-latched; IRQ is
+    /// level-sensitive and gated by the I flag. `poll_prev` lags `poll` by one
+    /// cycle so the instruction boundary acts on the second-to-last cycle's poll.
+    #[inline]
+    fn poll_interrupts<B: CpuBus>(&mut self, bus: &B) {
+        self.poll_prev = self.poll;
+        let nmi = bus.nmi();
+        if nmi && !self.nmi_line_prev {
+            self.nmi_flag = true; // latch the rising edge
+        }
+        self.nmi_line_prev = nmi;
+        self.poll = if self.nmi_flag {
+            Pending::Nmi
+        } else if bus.irq() && !self.get_flag(IRQ_DISABLE) {
+            Pending::Irq
+        } else {
+            Pending::None
+        };
     }
 
     /// Read at PC then advance PC (an opcode/operand fetch).
@@ -360,25 +401,24 @@ impl Cpu {
     pub fn step<B: CpuBus>(&mut self, bus: &mut B) -> u64 {
         let start = self.cycles;
 
-        // Sample the NMI line and detect a low->high edge across the boundary.
-        let nmi_now = bus.nmi();
-        let nmi_edge = nmi_now && !self.prev_nmi;
-        self.prev_nmi = nmi_now;
-
         if self.halted {
             self.rb(bus, self.pc); // JAM keeps the bus alive but never advances
             return self.cycles - start;
         }
 
-        // Interrupt poll at the instruction boundary (NMI edge > IRQ level; IRQ
-        // masked by the I flag).
-        if nmi_edge {
-            self.service_interrupt(bus, true);
-            return self.cycles - start;
-        }
-        if bus.irq() && !self.get_flag(IRQ_DISABLE) {
-            self.service_interrupt(bus, false);
-            return self.cycles - start;
+        // Act on the interrupt poll from the previous instruction's
+        // second-to-last cycle (see `poll_interrupts`).
+        match self.poll_prev {
+            Pending::Nmi => {
+                self.nmi_flag = false; // edge consumed
+                self.service_interrupt(bus, true);
+                return self.cycles - start;
+            }
+            Pending::Irq => {
+                self.service_interrupt(bus, false);
+                return self.cycles - start;
+            }
+            Pending::None => {}
         }
 
         let op = self.fetch(bus);
@@ -814,6 +854,15 @@ impl Cpu {
     }
 }
 
+fn decode_pending(v: u8) -> Result<Pending, LoadError> {
+    match v {
+        0 => Ok(Pending::None),
+        1 => Ok(Pending::Nmi),
+        2 => Ok(Pending::Irq),
+        _ => Err(LoadError::BadValue("Pending")),
+    }
+}
+
 impl SaveState for Cpu {
     fn save(&self, w: &mut WriteCursor) {
         w.u8(self.a);
@@ -824,7 +873,10 @@ impl SaveState for Cpu {
         w.u8(self.p);
         w.u64(self.cycles);
         w.bool(self.halted);
-        w.bool(self.prev_nmi);
+        w.bool(self.nmi_flag);
+        w.bool(self.nmi_line_prev);
+        w.u8(self.poll as u8);
+        w.u8(self.poll_prev as u8);
     }
 
     fn load(&mut self, r: &mut ReadCursor) -> Result<(), LoadError> {
@@ -836,7 +888,10 @@ impl SaveState for Cpu {
         self.p = r.u8()?;
         self.cycles = r.u64()?;
         self.halted = r.bool()?;
-        self.prev_nmi = r.bool()?;
+        self.nmi_flag = r.bool()?;
+        self.nmi_line_prev = r.bool()?;
+        self.poll = decode_pending(r.u8()?)?;
+        self.poll_prev = decode_pending(r.u8()?)?;
         Ok(())
     }
 }
@@ -856,7 +911,10 @@ mod tests {
             p: CARRY | NEGATIVE | UNUSED,
             cycles: 1_234_567,
             halted: false,
-            prev_nmi: true,
+            nmi_flag: true,
+            nmi_line_prev: false,
+            poll: Pending::Nmi,
+            poll_prev: Pending::None,
         };
         let mut w = WriteCursor::new();
         cpu.save(&mut w);

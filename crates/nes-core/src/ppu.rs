@@ -63,6 +63,11 @@ pub struct Ppu {
     pub frame: u64,
     /// Set true at (241,1); the host polls it to grab a completed frame.
     pub frame_complete: bool,
+    /// Set when $2002 is read in the race window just before/at the vblank set
+    /// point; suppresses the flag + NMI for that frame.
+    suppress_vbl: bool,
+    /// One-tick-delayed NMI line level (see [`Ppu::nmi_line`]).
+    nmi_delayed: bool,
 
     // ---- background fetch pipeline ----
     bg_next_id: u8,
@@ -109,6 +114,8 @@ impl Default for Ppu {
             frame_odd: false,
             frame: 0,
             frame_complete: false,
+            suppress_vbl: false,
+            nmi_delayed: false,
             bg_next_id: 0,
             bg_next_attr: 0,
             bg_next_lo: 0,
@@ -138,9 +145,15 @@ impl Ppu {
         self.mask & 0x18 != 0 // background or sprite enable
     }
 
-    /// NMI line to the CPU: vblank flag AND the NMI-enable bit.
+    /// NMI line to the CPU. The 2C02 asserts /NMI one PPU cycle after the vblank
+    /// flag rises, so we expose a one-tick-delayed level (`nmi_delayed`).
     #[inline]
     pub fn nmi_line(&self) -> bool {
+        self.nmi_delayed
+    }
+
+    #[inline]
+    fn nmi_condition(&self) -> bool {
         (self.ctrl & 0x80 != 0) && (self.status & 0x80 != 0)
     }
 
@@ -201,7 +214,16 @@ impl Ppu {
             2 => {
                 // PPUSTATUS: top 3 bits are flags, low 5 are open bus. Reading
                 // clears vblank and resets the write toggle.
-                let v = (self.status & 0xe0) | (self.io_bus & 0x1f);
+                let mut status = self.status;
+                // VBlank read race (this read samples at the cycle-start dot;
+                // the set happens at (241,1) during this cycle's later dots).
+                // Reading on the dot the flag would be set reads 0 and suppresses
+                // the flag + NMI for this frame.
+                if self.scanline == 241 && self.dot == 1 {
+                    status &= 0x7f;
+                    self.suppress_vbl = true;
+                }
+                let v = (status & 0xe0) | (self.io_bus & 0x1f);
                 self.status &= 0x7f; // clear vblank
                 self.w = false;
                 self.io_bus = v;
@@ -570,12 +592,18 @@ impl Ppu {
 
         // VBlank set / clear.
         if self.scanline == 241 && self.dot == 1 {
-            self.status |= 0x80; // vblank
+            if !self.suppress_vbl {
+                self.status |= 0x80; // vblank
+            }
+            self.suppress_vbl = false;
             self.frame_complete = true;
         }
         if prerender && self.dot == 1 {
             self.status &= !0xe0; // clear vblank, sprite-0, overflow
         }
+
+        // Propagate the NMI line with a one-tick delay.
+        self.nmi_delayed = self.nmi_condition();
 
         self.advance(rendering);
     }
@@ -624,6 +652,8 @@ impl SaveState for Ppu {
         w.bool(self.frame_odd);
         w.u64(self.frame);
         w.bool(self.frame_complete);
+        w.bool(self.suppress_vbl);
+        w.bool(self.nmi_delayed);
         w.u8(self.bg_next_id);
         w.u8(self.bg_next_attr);
         w.u8(self.bg_next_lo);
@@ -661,6 +691,8 @@ impl SaveState for Ppu {
         self.frame_odd = r.bool()?;
         self.frame = r.u64()?;
         self.frame_complete = r.bool()?;
+        self.suppress_vbl = r.bool()?;
+        self.nmi_delayed = r.bool()?;
         self.bg_next_id = r.u8()?;
         self.bg_next_attr = r.u8()?;
         self.bg_next_lo = r.u8()?;

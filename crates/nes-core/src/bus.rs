@@ -77,7 +77,9 @@ impl Bus {
 
 impl CpuBus for Bus {
     fn read(&mut self, addr: u16) -> u8 {
-        self.tick();
+        // The register access samples the PPU at the start of the CPU cycle;
+        // the three PPU dots for this cycle are then clocked afterward. This
+        // ordering is what makes the $2002 vblank read-race modelable.
         let val = match addr {
             0x0000..=0x1fff => self.ram[(addr & 0x07ff) as usize],
             0x2000..=0x3fff => self.ppu.read_register(addr & 7, &mut *self.mapper),
@@ -87,11 +89,11 @@ impl CpuBus for Bus {
             0x4020..=0xffff => self.mapper.cpu_read(addr),
         };
         self.open_bus = val;
+        self.tick();
         val
     }
 
     fn write(&mut self, addr: u16, val: u8) {
-        self.tick();
         self.open_bus = val;
         match addr {
             0x0000..=0x1fff => self.ram[(addr & 0x07ff) as usize] = val,
@@ -105,6 +107,7 @@ impl CpuBus for Bus {
             0x4000..=0x4013 | 0x4015 | 0x4017..=0x401f => {} // APU/test: TODO
             0x4020..=0xffff => self.mapper.cpu_write(addr, val),
         }
+        self.tick();
     }
 
     fn nmi(&self) -> bool {
