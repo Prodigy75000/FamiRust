@@ -8,14 +8,19 @@
 
 use crate::save::{LoadError, ReadCursor, SaveState, WriteCursor};
 
-/// Nametable mirroring as declared by the header. Mapper-controlled mirroring
-/// (MMC1 etc.) overrides this at runtime.
+/// Nametable mirroring. Header carts declare Horizontal/Vertical/FourScreen;
+/// mapper-controlled mirroring (MMC1 etc.) can also select a single-screen bank
+/// at runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mirroring {
     Horizontal,
     Vertical,
     /// Cart supplies 4 KiB of its own VRAM; both logical tables are distinct.
     FourScreen,
+    /// All four nametables map to CIRAM bank A.
+    SingleScreenA,
+    /// All four nametables map to CIRAM bank B.
+    SingleScreenB,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,10 +208,190 @@ impl SaveState for Nrom {
     }
 }
 
+/// Mapper 1: MMC1 (SxROM). A 5-bit serial shift register loaded one bit per
+/// write drives four internal registers (control, CHR bank 0/1, PRG bank) that
+/// select PRG/CHR banks and runtime nametable mirroring.
+pub struct Mmc1 {
+    prg: Vec<u8>,
+    chr: Vec<u8>,
+    prg_ram: Vec<u8>,
+    chr_is_ram: bool,
+    prg_banks: usize, // count of 16 KiB PRG banks
+
+    shift: u8,
+    control: u8, // bits0-1 mirroring, 2-3 PRG mode, 4 CHR mode
+    chr0: u8,
+    chr1: u8,
+    prg_bank: u8,
+}
+
+impl Mmc1 {
+    pub fn new(cart: Cartridge) -> Self {
+        let prg_banks = (cart.prg_rom.len() / PRG_BANK).max(1);
+        Mmc1 {
+            prg: cart.prg_rom,
+            chr: cart.chr_rom,
+            prg_ram: cart.prg_ram,
+            chr_is_ram: cart.chr_is_ram,
+            prg_banks,
+            shift: 0x10,       // sentinel bit marks the 5th write
+            control: 0x0c,     // power-on: PRG mode 3 (fix last bank at $C000)
+            chr0: 0,
+            chr1: 0,
+            prg_bank: 0,
+        }
+    }
+
+    /// Map a CPU address in $8000-$FFFF to a byte offset in PRG ROM.
+    fn prg_offset(&self, addr: u16) -> usize {
+        let last = self.prg_banks - 1;
+        let bank16 = |n: usize| (n % self.prg_banks) * PRG_BANK;
+        let off = (addr as usize) & 0x3fff;
+        match (self.control >> 2) & 0x3 {
+            0 | 1 => {
+                // 32 KiB switch (ignore low bit of the bank number).
+                let base = ((self.prg_bank as usize & 0x0e)) * PRG_BANK;
+                (base + (addr as usize - 0x8000)) % (self.prg_banks * PRG_BANK)
+            }
+            2 => {
+                // Fix first bank at $8000, switch 16 KiB at $C000.
+                if addr < 0xc000 {
+                    bank16(0) + off
+                } else {
+                    bank16(self.prg_bank as usize & 0x0f) + off
+                }
+            }
+            _ => {
+                // Fix last bank at $C000, switch 16 KiB at $8000.
+                if addr < 0xc000 {
+                    bank16(self.prg_bank as usize & 0x0f) + off
+                } else {
+                    bank16(last) + off
+                }
+            }
+        }
+    }
+
+    /// Map a PPU address in $0000-$1FFF to a byte offset in CHR.
+    fn chr_offset(&self, addr: u16) -> usize {
+        let a = addr as usize & 0x1fff;
+        let n = self.chr.len().max(1);
+        if self.control & 0x10 == 0 {
+            // 8 KiB switch (ignore low bit of chr0).
+            ((self.chr0 as usize & 0x1e) * 0x1000 + a) % n
+        } else {
+            // Two 4 KiB banks.
+            if a < 0x1000 {
+                ((self.chr0 as usize) * 0x1000 + a) % n
+            } else {
+                ((self.chr1 as usize) * 0x1000 + (a - 0x1000)) % n
+            }
+        }
+    }
+
+    fn write_serial(&mut self, addr: u16, val: u8) {
+        if val & 0x80 != 0 {
+            // Reset: clear the shift register and force PRG mode 3.
+            self.shift = 0x10;
+            self.control |= 0x0c;
+            return;
+        }
+        let complete = self.shift & 1 != 0; // sentinel reached bit 0 -> 5th write
+        self.shift = (self.shift >> 1) | ((val & 1) << 4);
+        if complete {
+            let data = self.shift & 0x1f;
+            match (addr >> 13) & 3 {
+                0 => self.control = data,
+                1 => self.chr0 = data,
+                2 => self.chr1 = data,
+                _ => self.prg_bank = data,
+            }
+            self.shift = 0x10;
+        }
+    }
+}
+
+impl Mapper for Mmc1 {
+    fn cpu_read(&mut self, addr: u16) -> u8 {
+        match addr {
+            0x6000..=0x7fff => self.prg_ram[(addr as usize - 0x6000) & (self.prg_ram.len() - 1)],
+            0x8000..=0xffff => {
+                let off = self.prg_offset(addr);
+                self.prg[off]
+            }
+            _ => 0,
+        }
+    }
+
+    fn cpu_write(&mut self, addr: u16, val: u8) {
+        match addr {
+            0x6000..=0x7fff => {
+                let n = self.prg_ram.len();
+                self.prg_ram[(addr as usize - 0x6000) & (n - 1)] = val;
+            }
+            0x8000..=0xffff => self.write_serial(addr, val),
+            _ => {}
+        }
+    }
+
+    fn ppu_read(&mut self, addr: u16) -> u8 {
+        let off = self.chr_offset(addr);
+        self.chr[off]
+    }
+
+    fn ppu_write(&mut self, addr: u16, val: u8) {
+        if self.chr_is_ram {
+            let off = self.chr_offset(addr);
+            self.chr[off] = val;
+        }
+    }
+
+    fn mirroring(&self) -> Mirroring {
+        match self.control & 0x03 {
+            0 => Mirroring::SingleScreenA,
+            1 => Mirroring::SingleScreenB,
+            2 => Mirroring::Vertical,
+            _ => Mirroring::Horizontal,
+        }
+    }
+}
+
+impl SaveState for Mmc1 {
+    fn save(&self, w: &mut WriteCursor) {
+        w.bytes(&self.prg_ram);
+        if self.chr_is_ram {
+            w.bytes(&self.chr);
+        }
+        w.u8(self.shift);
+        w.u8(self.control);
+        w.u8(self.chr0);
+        w.u8(self.chr1);
+        w.u8(self.prg_bank);
+    }
+
+    fn load(&mut self, r: &mut ReadCursor) -> Result<(), LoadError> {
+        let mut ram = vec![0u8; self.prg_ram.len()];
+        r.bytes(&mut ram)?;
+        self.prg_ram = ram;
+        if self.chr_is_ram {
+            let mut chr = vec![0u8; self.chr.len()];
+            r.bytes(&mut chr)?;
+            self.chr = chr;
+        }
+        self.shift = r.u8()?;
+        self.control = r.u8()?;
+        self.chr0 = r.u8()?;
+        self.chr1 = r.u8()?;
+        self.prg_bank = r.u8()?;
+        Ok(())
+    }
+}
+
 /// Construct the mapper implementation for a parsed cart.
 pub fn make_mapper(cart: Cartridge) -> Result<Box<dyn Mapper>, CartError> {
     match cart.mapper {
         0 => Ok(Box::new(Nrom::new(cart))),
+        1 => Ok(Box::new(Mmc1::new(cart))),
         other => Err(CartError::UnsupportedMapper(other)),
     }
 }

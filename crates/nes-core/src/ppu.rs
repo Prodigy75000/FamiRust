@@ -154,6 +154,8 @@ impl Ppu {
         let bank = match mirroring {
             Mirroring::Horizontal => (slot >> 1) & 1, // 0,1->A ; 2,3->B
             Mirroring::Vertical => slot & 1,          // 0,2->A ; 1,3->B
+            Mirroring::SingleScreenA => 0,
+            Mirroring::SingleScreenB => 1,
             // Four-screen would need cartridge VRAM; approximate with vertical.
             Mirroring::FourScreen => slot & 1,
         };
