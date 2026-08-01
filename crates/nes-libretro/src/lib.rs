@@ -286,14 +286,23 @@ pub extern "C" fn retro_run() {
             unsafe { poll() };
         }
         if let (Some(core), Some(input)) = (&mut s.core, s.input_state) {
-            let mut buttons = 0u8;
-            for &(id, bit) in NES_MAP {
-                if unsafe { input(0, RETRO_DEVICE_JOYPAD, 0, id) } != 0 {
-                    buttons |= bit;
+            // BOTH pads. The core has always had two ($4016 -> controllers[0],
+            // $4017 -> controllers[1], both strobed together and both saved), but
+            // this poll used to read port 0 only, so player 2 was dead in every
+            // frontend -- including netplay, where the joiner's input arrives on
+            // libretro port 1 and was silently discarded here.
+            for port in 0..2u32 {
+                let mut buttons = 0u8;
+                for &(id, bit) in NES_MAP {
+                    if unsafe { input(port, RETRO_DEVICE_JOYPAD, 0, id) } != 0 {
+                        buttons |= bit;
+                    }
+                }
+                core.set_buttons(port as usize, buttons);
+                if port == 0 {
+                    s.last_buttons = buttons;
                 }
             }
-            core.set_buttons(0, buttons);
-            s.last_buttons = buttons;
         }
 
         if let Some(core) = &mut s.core {
