@@ -2130,7 +2130,17 @@ impl Rambo1 {
             prg_banks8,
             chr_banks1,
             bank_select: 0,
-            regs: [0; 16],
+            // Power-on with a linear PRG map ($8000=bank0, $A000=1, $C000=2,
+            // $E000=last). Games that program their own banks overwrite this at
+            // once; ones that don't (Mystery Quest) rely on the sequential
+            // default -- all-zero registers stack bank 0 across the window, so the
+            // game jumps into the wrong bank and JAMs.
+            regs: {
+                let mut r = [0u8; 16];
+                r[7] = 1;
+                r[15] = 2;
+                r
+            },
             mirroring: cart.mirroring,
             irq_latch: 0,
             irq_counter: 0,
