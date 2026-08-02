@@ -2130,15 +2130,17 @@ impl Rambo1 {
             prg_banks8,
             chr_banks1,
             bank_select: 0,
-            // Power-on with a linear PRG map ($8000=bank0, $A000=1, $C000=2,
-            // $E000=last). Games that program their own banks overwrite this at
-            // once; ones that don't (Mystery Quest) rely on the sequential
-            // default -- all-zero registers stack bank 0 across the window, so the
-            // game jumps into the wrong bank and JAMs.
+            // Power-on with a LINEAR PRG and CHR map, like NROM: PRG $8000=bank0,
+            // $A000=1, $C000=2, $E000=last (R6=0/R7=1/R15=2); CHR slots 0..7 = banks
+            // 0..7 (R0=0/R1=2/R2=4/R3=5/R4=6/R5=7, since R0/R1 are 2 KiB). Games
+            // that program their own banks overwrite this at once; ones that don't
+            // (Mystery Quest is NROM-on-RAMBO-1) rely on the sequential default --
+            // all-zero registers stack bank 0/1 across each window, so PRG jumps
+            // into the wrong bank and JAMs and CHR shows the wrong, repeated tiles.
             regs: {
                 let mut r = [0u8; 16];
-                r[7] = 1;
-                r[15] = 2;
+                r[1] = 2; r[2] = 4; r[3] = 5; r[4] = 6; r[5] = 7;
+                r[7] = 1; r[15] = 2;
                 r
             },
             mirroring: cart.mirroring,
@@ -2167,7 +2169,9 @@ impl Rambo1 {
     }
     fn chr_bank(&self, slot: usize) -> usize {
         let r = &self.regs;
-        (if self.bank_select & 0x80 == 0 {
+        // CHR mode is bank_select bit 5 (K), NOT bit 7. Klax sets K=1 for its
+        // all-1 KiB playfield; reading the wrong bit garbled the bottom of screen.
+        (if self.bank_select & 0x20 == 0 {
             // 2 KiB + 1 KiB layout.
             match slot {
                 0 => r[0] & 0xfe,
