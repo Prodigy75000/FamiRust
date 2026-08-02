@@ -114,6 +114,10 @@ impl Nes {
         self.cpu.pc
     }
 
+    pub fn dbg_halted(&self) -> bool {
+        self.cpu.halted
+    }
+
     /// Serialize the entire machine to a byte-identical snapshot. The layout is
     /// `MAGIC(8) || format_version(u16 LE) || cpu || bus`. Two machines in the
     /// same logical state produce an equal `Vec<u8>` on any target triple.

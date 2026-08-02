@@ -7,6 +7,9 @@ fn main() {
     let rom = std::fs::read(a.next().expect("rom")).unwrap();
     let mut nes = nes_core::Nes::from_rom(&rom).unwrap();
     let steps: u64 = a.next().and_then(|s| s.parse().ok()).unwrap_or(30_000_000);
+    // Optional 3rd arg "start" -> pulse the Start button so we reach gameplay.
+    let press_start = a.next().map(|s| s == "start").unwrap_or(false);
+    let mut frame_cyc = 0u64;
     let mut hist: HashMap<u16, u64> = HashMap::new();
     let mut last = 0u16;
     let mut ring = [0u16; 16];
@@ -26,8 +29,21 @@ fn main() {
         ring[ri % 16] = last;
         ri += 1;
         *hist.entry(last & 0xff00).or_insert(0) += 1;
+        // ~29780 CPU cyc/frame; pulse Start every other "frame" once past boot.
+        if press_start {
+            frame_cyc += 1;
+            if frame_cyc > 30_000 * 60 {
+                nes.set_buttons(0, if (frame_cyc / 90_000) % 2 == 0 { 0x08 } else { 0 });
+            }
+        }
         nes.step();
     }
+    eprintln!("final ppu_mask={:02X} rendering={} CPU_HALTED={}", nes.dbg_ppu_mask(), nes.dbg_ppu_mask() & 0x18 != 0, nes.dbg_halted());
+    eprint!("last 16 PCs:");
+    for k in 0..16 {
+        eprint!(" {:04X}", ring[(ri + k) % 16]);
+    }
+    eprintln!();
     let mut v: Vec<_> = hist.into_iter().collect();
     v.sort_by(|a, b| b.1.cmp(&a.1));
     eprintln!("top PC buckets over {steps} steps (final pc={:04X}):", last);
