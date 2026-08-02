@@ -69,22 +69,29 @@ impl Cartridge {
             chr_banks |= ((rom[9] as usize) & 0xf0) << 4;
         }
 
-        // Header-correction DB: many old dumps carry the wrong mapper number.
-        // Override it by the ROM-data checksum (see `header_db`). Trust NES 2.0
-        // headers, which are modern and curated -- the mislabels are all iNES.
-        if !is_nes2 {
-            if let Some(fixed) = crate::header_db::corrected_mapper(crate::header_db::rom_data_crc32(rom)) {
-                mapper = fixed;
-            }
+        // Header-correction DB: old dumps get the mapper (and sometimes mirroring,
+        // RAM sizing, or battery) wrong. Look the whole cart up by ROM-data
+        // checksum (see `header_db`) and apply each provided field at its site.
+        // NES 2.0 headers are modern/curated, so we only correct plain iNES.
+        let fix = if is_nes2 {
+            None
+        } else {
+            crate::header_db::correction(crate::header_db::rom_data_crc32(rom))
+        };
+        if let Some(m) = fix.and_then(|f| f.mapper) {
+            mapper = m;
         }
 
-        let mirroring = if flags6 & 0x08 != 0 {
+        let mut mirroring = if flags6 & 0x08 != 0 {
             Mirroring::FourScreen
         } else if flags6 & 0x01 != 0 {
             Mirroring::Vertical
         } else {
             Mirroring::Horizontal
         };
+        if let Some(mir) = fix.and_then(|f| f.mirroring) {
+            mirroring = mir;
+        }
         let has_trainer = flags6 & 0x04 != 0;
 
         // RAM sizing. Plain iNES cannot express work-RAM / CHR-RAM sizes, so we
@@ -97,7 +104,7 @@ impl Cartridge {
         // buffer -- getting the SIZE right is what keeps save-state bytes matched
         // across clients whose dumps disagree (SXROM's 32 KiB, MMC5, ...).
         let ram_bytes = |nibble: u8| -> usize { if nibble == 0 { 0 } else { 64usize << nibble } };
-        let (prg_ram_size, chr_ram_size, prg_nvram) = if is_nes2 {
+        let (mut prg_ram_size, mut chr_ram_size, prg_nvram) = if is_nes2 {
             let prg = ram_bytes(rom[10] & 0x0f) + ram_bytes(rom[10] >> 4);
             let chr = ram_bytes(rom[11] & 0x0f) + ram_bytes(rom[11] >> 4);
             (
@@ -108,8 +115,21 @@ impl Cartridge {
         } else {
             (8 * 1024, CHR_BANK, false)
         };
-        // Battery-backed if the iNES flag says so or NES 2.0 declares PRG-NVRAM.
-        let has_battery = (flags6 & 0x02 != 0) || prg_nvram;
+        // DB may override the RAM sizes for iNES dumps the header can't describe
+        // (an iNES-headered SXROM needs 32 KiB work RAM, not the 8 KiB default).
+        // Keep the same power-of-two / minimum invariant the mappers rely on.
+        if let Some(sz) = fix.and_then(|f| f.prg_ram) {
+            prg_ram_size = sz.max(8 * 1024).next_power_of_two();
+        }
+        if let Some(sz) = fix.and_then(|f| f.chr_ram) {
+            chr_ram_size = sz.max(CHR_BANK).next_power_of_two();
+        }
+        // Battery-backed if the iNES flag says so, NES 2.0 declares PRG-NVRAM, or
+        // the DB corrects a dump whose battery bit is wrong.
+        let mut has_battery = (flags6 & 0x02 != 0) || prg_nvram;
+        if let Some(b) = fix.and_then(|f| f.battery) {
+            has_battery = b;
+        }
 
         let mut off = HEADER_LEN;
         if has_trainer {

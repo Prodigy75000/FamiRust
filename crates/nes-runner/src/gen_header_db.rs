@@ -108,7 +108,7 @@ fn main() {
 
     println!("    // {added} entries generated from {tested} candidates ({dir})");
     for (crc, (m, name)) in &fixes {
-        println!("    (0x{crc:08x}, {m}), // {name}");
+        println!("    (0x{crc:08x}, HeaderFix::mapper({m})), // {name}");
     }
     eprintln!("\n=== {added} added, {skipped} skipped, {tested} candidates, {} unique ROMs ===", fixes.len());
 }
