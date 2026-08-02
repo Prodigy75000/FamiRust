@@ -288,6 +288,7 @@ impl Ppu {
                 // PPUCTRL: nametable select -> t bits 10-11.
                 self.ctrl = val;
                 self.t = (self.t & 0xf3ff) | (((val as u16) & 0x03) << 10);
+                mapper.ppu_ctrl(val); // MMC5 tracks the 8x16-sprite bit
             }
             1 => self.mask = val,
             3 => self.oam_addr = val,
@@ -499,8 +500,8 @@ impl Ppu {
                     base + t * 16 + row
                 };
 
-                let mut lo = self.mem_read(addr, mapper);
-                let mut hi = self.mem_read(addr + 8, mapper);
+                let mut lo = mapper.ppu_read_sprite(addr & 0x1fff);
+                let mut hi = mapper.ppu_read_sprite((addr + 8) & 0x1fff);
                 if attr & 0x40 != 0 {
                     lo = lo.reverse_bits();
                     hi = hi.reverse_bits();
@@ -514,8 +515,8 @@ impl Ppu {
                 // table (result discarded; only the bus access matters for A12).
                 let base = if height == 16 || self.ctrl & 0x08 != 0 { 0x1000 } else { 0x0000 };
                 let addr = base | 0x0ff0;
-                self.mem_read(addr, mapper);
-                self.mem_read(addr + 8, mapper);
+                mapper.ppu_read_sprite(addr & 0x1fff);
+                mapper.ppu_read_sprite((addr + 8) & 0x1fff);
             }
         }
     }
@@ -601,6 +602,11 @@ impl Ppu {
         let rendering = self.rendering_enabled();
         let visible = self.scanline < 240;
         let prerender = self.scanline == 261;
+
+        // Notify the mapper at the start of each scanline (MMC5 scanline IRQ).
+        if self.dot == 0 {
+            mapper.ppu_scanline(self.scanline, rendering);
+        }
 
         if (visible || prerender) && rendering {
             // Background fetch + shift on the fetch dots.

@@ -185,6 +185,21 @@ pub trait Mapper: SaveState {
     /// Called once per CPU cycle, for mappers with a CPU-cycle IRQ counter
     /// (Irem H3001, Sunsoft FME-7, ...). Default no-op.
     fn tick_cpu(&mut self) {}
+
+    /// CHR read for a SPRITE pattern fetch (as opposed to a background tile).
+    /// Defaults to a plain [`Mapper::ppu_read`]; MMC5 overrides it because it
+    /// banks sprite CHR separately from background CHR in 8x16-sprite mode.
+    fn ppu_read_sprite(&mut self, addr: u16) -> u8 {
+        self.ppu_read(addr)
+    }
+
+    /// PPUCTRL ($2000) was written. MMC5 needs the 8x16-sprite bit to pick which
+    /// CHR bank set a background fetch uses. Default no-op.
+    fn ppu_ctrl(&mut self, _ctrl: u8) {}
+
+    /// Start of PPU scanline `scanline` (0..=261); `rendering` = BG or sprites
+    /// enabled. MMC5 clocks its in-frame scanline IRQ counter here. Default no-op.
+    fn ppu_scanline(&mut self, _scanline: u16, _rendering: bool) {}
 }
 
 /// Mapper 0: fixed PRG (16 or 32 KiB), fixed CHR. The bring-up mapper.
@@ -1571,6 +1586,315 @@ impl SaveState for Vrc3 {
     }
 }
 
+/// Mapper 5: MMC5 / ExROM — Nintendo's most complex mapper. This is a pragmatic
+/// subset that covers what the library actually renders: flexible PRG banking
+/// (4 modes, per-bank ROM/RAM select) and PRG-RAM banking, CHR banking (4 modes)
+/// with the 8x16-sprite BG/sprite CHR split, nametable control ($5105, mapped to
+/// our mirroring set), the hardware multiplier, and the in-frame scanline IRQ.
+/// Deferred until a game needs them: the two extra audio channels + PCM, the
+/// extended-attribute nametable mode, and the vertical split screen.
+const MMC5_PRG_RAM: usize = 64 * 1024;
+pub struct Mmc5 {
+    prg: Vec<u8>,
+    chr: Vec<u8>,
+    chr_is_ram: bool,
+    prg_ram: Vec<u8>,
+    exram: [u8; 0x400],
+    prg_banks8: usize,
+    chr_banks1: usize,
+    prg_ram_banks8: usize,
+
+    prg_mode: u8,
+    chr_mode: u8,
+    prg_regs: [u8; 5], // $5113 (RAM bank) .. $5117
+    chr_spr: [u8; 8],  // $5120-$5127 (sprite CHR)
+    chr_bg: [u8; 4],   // $5128-$512B (background CHR in 8x16 mode)
+    chr_upper: u8,     // $5130 high bank bits
+    nt_map: u8,        // $5105
+
+    mult_a: u8, // $5205
+    mult_b: u8, // $5206
+
+    irq_scanline: u8, // $5203
+    irq_enable: bool, // $5204 bit7
+    irq_pending: bool,
+    in_frame: bool,
+    scan_counter: u16,
+
+    tall_sprites: bool, // PPUCTRL bit5
+}
+impl Mmc5 {
+    pub fn new(cart: Cartridge) -> Self {
+        let prg_banks8 = (cart.prg_rom.len() / 0x2000).max(1);
+        let chr_banks1 = (cart.chr_rom.len() / 0x400).max(1);
+        Mmc5 {
+            prg: cart.prg_rom,
+            chr: cart.chr_rom,
+            chr_is_ram: cart.chr_is_ram,
+            prg_ram: vec![0u8; MMC5_PRG_RAM],
+            exram: [0u8; 0x400],
+            prg_banks8,
+            chr_banks1,
+            prg_ram_banks8: MMC5_PRG_RAM / 0x2000,
+            prg_mode: 3, // power-on: 8 KiB banks (matches most reset code)
+            chr_mode: 0,
+            prg_regs: [0, 0, 0, 0, 0xff], // $5117 -> last ROM bank at reset
+            chr_spr: [0; 8],
+            chr_bg: [0; 4],
+            chr_upper: 0,
+            nt_map: 0,
+            mult_a: 0,
+            mult_b: 0,
+            irq_scanline: 0,
+            irq_enable: false,
+            irq_pending: false,
+            in_frame: false,
+            scan_counter: 0,
+            tall_sprites: false,
+        }
+    }
+
+    /// (8 KiB bank number, is_rom) for a CPU $8000-$FFFF slot 0..3.
+    fn prg_slot(&self, slot: usize) -> (usize, bool) {
+        let r = &self.prg_regs;
+        let bank = |reg: u8| (reg & 0x7f) as usize;
+        let rom = |reg: u8| reg & 0x80 != 0;
+        match self.prg_mode {
+            0 => ((bank(r[4]) & !3) + slot, true), // 32 KiB from $5117
+            1 => {
+                if slot < 2 {
+                    ((bank(r[2]) & !1) + (slot & 1), rom(r[2])) // $5115 16K
+                } else {
+                    ((bank(r[4]) & !1) + (slot & 1), true) // $5117 16K
+                }
+            }
+            2 => match slot {
+                0 | 1 => ((bank(r[2]) & !1) + (slot & 1), rom(r[2])), // $5115 16K
+                2 => (bank(r[3]), rom(r[3])),                        // $5116 8K
+                _ => (bank(r[4]), true),                             // $5117 8K
+            },
+            _ => match slot {
+                0 => (bank(r[1]), rom(r[1])), // $5114
+                1 => (bank(r[2]), rom(r[2])), // $5115
+                2 => (bank(r[3]), rom(r[3])), // $5116
+                _ => (bank(r[4]), true),      // $5117 (always ROM)
+            },
+        }
+    }
+
+    fn prg_read(&self, addr: u16) -> u8 {
+        if addr < 0x8000 {
+            // $6000-$7FFF: PRG-RAM bank from $5113.
+            let bank = self.prg_regs[0] as usize & (self.prg_ram_banks8 - 1);
+            return self.prg_ram[bank * 0x2000 + (addr as usize - 0x6000)];
+        }
+        let slot = (addr as usize - 0x8000) >> 13;
+        let (bank, is_rom) = self.prg_slot(slot);
+        let off = addr as usize & 0x1fff;
+        if is_rom {
+            self.prg[(bank % self.prg_banks8) * 0x2000 + off]
+        } else {
+            self.prg_ram[(bank % self.prg_ram_banks8) * 0x2000 + off]
+        }
+    }
+
+    fn prg_write(&mut self, addr: u16, val: u8) {
+        if addr < 0x8000 {
+            let bank = self.prg_regs[0] as usize & (self.prg_ram_banks8 - 1);
+            self.prg_ram[bank * 0x2000 + (addr as usize - 0x6000)] = val;
+            return;
+        }
+        let slot = (addr as usize - 0x8000) >> 13;
+        let (bank, is_rom) = self.prg_slot(slot);
+        if !is_rom {
+            let off = addr as usize & 0x1fff;
+            self.prg_ram[(bank % self.prg_ram_banks8) * 0x2000 + off] = val;
+        }
+    }
+
+    /// 1 KiB CHR bank for a 1 KiB slot 0..7 given a register set and the CHR mode.
+    fn chr_1k(&self, slot: usize, regs: &[u8]) -> usize {
+        let mask = regs.len() - 1;
+        let (reg, sub, sz) = match self.chr_mode {
+            0 => (7 & mask, slot, 8usize),           // 8 KiB
+            1 => ((if slot < 4 { 3 } else { 7 }) & mask, slot & 3, 4), // 4 KiB
+            2 => ((slot | 1) & mask, slot & 1, 2),   // 2 KiB
+            _ => (slot & mask, 0, 1),                // 1 KiB
+        };
+        let bank = ((self.chr_upper as usize) << 8) | regs[reg] as usize;
+        bank * sz + sub
+    }
+
+    fn chr_byte(&self, bank1k: usize, addr: u16) -> u8 {
+        let idx = (bank1k % self.chr_banks1) * 0x400 + (addr as usize & 0x3ff);
+        if self.chr_is_ram {
+            self.chr[idx % self.chr.len()]
+        } else {
+            self.chr[idx]
+        }
+    }
+}
+impl Mapper for Mmc5 {
+    fn cpu_read(&mut self, addr: u16) -> u8 {
+        match addr {
+            0x5204 => {
+                let s = (self.irq_pending as u8) << 7 | (self.in_frame as u8) << 6;
+                self.irq_pending = false;
+                s
+            }
+            0x5205 => (self.mult_a as u16 * self.mult_b as u16) as u8,
+            0x5206 => ((self.mult_a as u16 * self.mult_b as u16) >> 8) as u8,
+            0x5c00..=0x5fff => self.exram[addr as usize - 0x5c00],
+            0x6000..=0xffff => self.prg_read(addr),
+            _ => 0,
+        }
+    }
+
+    fn cpu_write(&mut self, addr: u16, val: u8) {
+        match addr {
+            0x5100 => self.prg_mode = val & 3,
+            0x5101 => self.chr_mode = val & 3,
+            0x5105 => self.nt_map = val,
+            0x5113 => self.prg_regs[0] = val,
+            0x5114..=0x5117 => self.prg_regs[(addr - 0x5113) as usize] = val,
+            0x5120..=0x5127 => self.chr_spr[(addr - 0x5120) as usize] = val,
+            0x5128..=0x512b => self.chr_bg[(addr - 0x5128) as usize] = val,
+            0x5130 => self.chr_upper = val & 3,
+            0x5203 => self.irq_scanline = val,
+            0x5204 => self.irq_enable = val & 0x80 != 0,
+            0x5205 => self.mult_a = val,
+            0x5206 => self.mult_b = val,
+            0x5c00..=0x5fff => self.exram[addr as usize - 0x5c00] = val,
+            0x6000..=0xffff => self.prg_write(addr, val),
+            _ => {} // $5102/3 RAM protect, $5104/6/7 exram/fill, audio -> ignored
+        }
+    }
+
+    fn ppu_read(&mut self, addr: u16) -> u8 {
+        // Background fetch: 8x16 mode uses the BG CHR set, else the sprite set.
+        let slot = (addr >> 10) as usize & 7;
+        let bank = if self.tall_sprites {
+            self.chr_1k(slot, &self.chr_bg)
+        } else {
+            self.chr_1k(slot, &self.chr_spr)
+        };
+        self.chr_byte(bank, addr)
+    }
+
+    fn ppu_read_sprite(&mut self, addr: u16) -> u8 {
+        let slot = (addr >> 10) as usize & 7;
+        let bank = self.chr_1k(slot, &self.chr_spr);
+        self.chr_byte(bank, addr)
+    }
+
+    fn ppu_write(&mut self, addr: u16, val: u8) {
+        if self.chr_is_ram {
+            let slot = (addr >> 10) as usize & 7;
+            let bank = self.chr_1k(slot, &self.chr_spr);
+            let n = self.chr.len();
+            let idx = ((bank % self.chr_banks1) * 0x400 + (addr as usize & 0x3ff)) % n;
+            self.chr[idx] = val;
+        }
+    }
+
+    fn ppu_ctrl(&mut self, ctrl: u8) {
+        self.tall_sprites = ctrl & 0x20 != 0;
+    }
+
+    fn ppu_scanline(&mut self, scanline: u16, rendering: bool) {
+        if !rendering || scanline >= 240 {
+            self.in_frame = false;
+            return;
+        }
+        if !self.in_frame {
+            self.in_frame = true;
+            self.scan_counter = 0;
+        } else {
+            self.scan_counter += 1;
+        }
+        if self.scan_counter as u8 == self.irq_scanline && self.irq_scanline != 0 {
+            self.irq_pending = true;
+        }
+    }
+
+    fn irq(&self) -> bool {
+        self.irq_pending && self.irq_enable
+    }
+
+    fn mirroring(&self) -> Mirroring {
+        let m = self.nt_map;
+        let s = [m & 3, (m >> 2) & 3, (m >> 4) & 3, (m >> 6) & 3];
+        match s {
+            [0, 0, 1, 1] => Mirroring::Horizontal,
+            [0, 1, 0, 1] => Mirroring::Vertical,
+            [0, 0, 0, 0] => Mirroring::SingleScreenA,
+            [1, 1, 1, 1] => Mirroring::SingleScreenB,
+            _ => Mirroring::Horizontal, // ExRAM / fill-mode NTs approximated
+        }
+    }
+}
+impl SaveState for Mmc5 {
+    fn save(&self, w: &mut WriteCursor) {
+        w.bytes(&self.prg_ram);
+        if self.chr_is_ram {
+            w.bytes(&self.chr);
+        }
+        w.bytes(&self.exram);
+        w.u8(self.prg_mode);
+        w.u8(self.chr_mode);
+        for &b in &self.prg_regs {
+            w.u8(b);
+        }
+        for &b in &self.chr_spr {
+            w.u8(b);
+        }
+        for &b in &self.chr_bg {
+            w.u8(b);
+        }
+        w.u8(self.chr_upper);
+        w.u8(self.nt_map);
+        w.u8(self.mult_a);
+        w.u8(self.mult_b);
+        w.u8(self.irq_scanline);
+        w.bool(self.irq_enable);
+        w.bool(self.irq_pending);
+        w.bool(self.in_frame);
+        w.u16(self.scan_counter);
+        w.bool(self.tall_sprites);
+    }
+    fn load(&mut self, r: &mut ReadCursor) -> Result<(), LoadError> {
+        r.bytes(&mut self.prg_ram)?;
+        if self.chr_is_ram {
+            let mut chr = vec![0u8; self.chr.len()];
+            r.bytes(&mut chr)?;
+            self.chr = chr;
+        }
+        r.bytes(&mut self.exram)?;
+        self.prg_mode = r.u8()?;
+        self.chr_mode = r.u8()?;
+        for b in &mut self.prg_regs {
+            *b = r.u8()?;
+        }
+        for b in &mut self.chr_spr {
+            *b = r.u8()?;
+        }
+        for b in &mut self.chr_bg {
+            *b = r.u8()?;
+        }
+        self.chr_upper = r.u8()?;
+        self.nt_map = r.u8()?;
+        self.mult_a = r.u8()?;
+        self.mult_b = r.u8()?;
+        self.irq_scanline = r.u8()?;
+        self.irq_enable = r.bool()?;
+        self.irq_pending = r.bool()?;
+        self.in_frame = r.bool()?;
+        self.scan_counter = r.u16()?;
+        self.tall_sprites = r.bool()?;
+        Ok(())
+    }
+}
+
 /// Construct the mapper implementation for a parsed cart.
 pub fn make_mapper(cart: Cartridge) -> Result<Box<dyn Mapper>, CartError> {
     match cart.mapper {
@@ -1579,6 +1903,7 @@ pub fn make_mapper(cart: Cartridge) -> Result<Box<dyn Mapper>, CartError> {
         2 => Ok(Box::new(Uxrom::new(cart))),
         3 => Ok(Box::new(Cnrom::new(cart))),
         4 => Ok(Box::new(Mmc3::new(cart))),
+        5 => Ok(Box::new(Mmc5::new(cart))),
         7 => Ok(Box::new(Axrom::new(cart))),
         9 => Ok(Box::new(Mmc2::new(cart, false))),
         11 => Ok(Box::new(BankSwap::new(cart, BankSwapKind::ColorDreams))),
