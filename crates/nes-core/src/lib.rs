@@ -22,6 +22,7 @@ pub mod bus;
 pub mod cart;
 pub mod controller;
 pub mod cpu;
+pub mod header_db;
 pub mod ppu;
 pub mod save;
 

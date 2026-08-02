@@ -69,6 +69,15 @@ impl Cartridge {
             chr_banks |= ((rom[9] as usize) & 0xf0) << 4;
         }
 
+        // Header-correction DB: many old dumps carry the wrong mapper number.
+        // Override it by the ROM-data checksum (see `header_db`). Trust NES 2.0
+        // headers, which are modern and curated -- the mislabels are all iNES.
+        if !is_nes2 {
+            if let Some(fixed) = crate::header_db::corrected_mapper(crate::header_db::rom_data_crc32(rom)) {
+                mapper = fixed;
+            }
+        }
+
         let mirroring = if flags6 & 0x08 != 0 {
             Mirroring::FourScreen
         } else if flags6 & 0x01 != 0 {
