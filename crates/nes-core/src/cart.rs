@@ -80,10 +80,21 @@ impl Cartridge {
         let flags6 = rom[6];
         let flags7 = rom[7];
         let is_nes2 = (flags7 & 0x0c) == 0x08;
+        // Byte 7's upper nibble is the mapper's high 4 bits ONLY in a well-formed
+        // header. "Archaic" iNES dumps (byte 7's reserved bits 2-3 nonzero) had
+        // byte 7 clobbered -- most infamously by the "DiskDude!" ripper, whose 'D'
+        // (0x44) lands in byte 7 and fakes a "4" mapper nibble. Whole ROM sets of
+        // MMC1 games (Blaster Master, Willow, Iron Tank, ...) get misread as mapper
+        // 65 otherwise. When byte 7 is unreliable, the mapper is byte 6's nibble only.
+        let flags7_reliable = is_nes2 || (flags7 & 0x0c) == 0;
 
         let mut prg_banks = rom[4] as usize;
         let mut chr_banks = rom[5] as usize;
-        let mut mapper = ((flags7 & 0xf0) | (flags6 >> 4)) as u16;
+        let mut mapper = if flags7_reliable {
+            ((flags7 & 0xf0) | (flags6 >> 4)) as u16
+        } else {
+            (flags6 >> 4) as u16
+        };
         if is_nes2 {
             // NES 2.0 widens mapper to 12 bits and PRG/CHR sizes to 12 bits.
             mapper |= ((rom[8] as u16) & 0x0f) << 8;
@@ -1237,8 +1248,21 @@ impl SaveState for Mmc2 {
     }
 }
 
-/// Mapper 65 (Irem H3001): three switchable 8 KiB PRG banks + fixed last, eight
-/// 1 KiB CHR banks, and a 16-bit CPU-cycle IRQ counter.
+/// Mapper 65 (Irem H3001): two switchable 8 KiB PRG banks with a layout bit,
+/// eight 1 KiB CHR banks, and a 16-bit down-counter IRQ that ticks every CPU
+/// cycle. Per the NESdev wiki register map:
+///   $8000       PRG Reg 0 -> 8k window that is either $8000 (layout 0) or $C000 (layout 1)
+///   $A000       PRG Reg 1 -> 8k @ $A000 (always)
+///   $9000 b7    PRG layout: 0 => $C000 fixed to bank $3E; 1 => $8000 fixed to bank $3E
+///   $E000       always fixed to bank $3F (holds the reset/IRQ vectors)
+///   $9001 b7-6  mirroring: %00=Vert %10=Horz %01/%11=1scA
+///   $9003 b7    IRQ enable (write also acks)
+///   $9004       reload counter from latch (write also acks)
+///   $9005/$9006 high/low byte of the 16-bit reload latch
+///   $B000-$B007 eight 1 KiB CHR banks
+/// The fixed banks $3E/$3F are masked against ROM size, i.e. second-to-last and
+/// last 8 KiB banks. Getting $E000 wrong reads a garbage reset vector -> CPU JAM,
+/// which is what an earlier three-register guess did to Blaster Master.
 #[allow(dead_code)]
 pub struct H3001 {
     prg: Vec<u8>,
@@ -1247,7 +1271,8 @@ pub struct H3001 {
     chr_is_ram: bool,
     prg_banks8: usize,
     chr_banks1: usize,
-    prg_regs: [u8; 3], // banks at $8000, $A000, $C000
+    prg_regs: [u8; 2], // $8000 -> Reg0, $A000 -> Reg1
+    prg_mode: bool,    // $9000 bit 7: false => Reg0 @ $8000, true => Reg0 @ $C000
     chr_regs: [u8; 8],
     mirroring: Mirroring,
     irq_counter: u16,
@@ -1264,7 +1289,8 @@ impl H3001 {
             chr: cart.chr_rom,
             prg_ram: cart.prg_ram,
             chr_is_ram: cart.chr_is_ram,
-            prg_regs: [0; 3],
+            prg_regs: [0, 1], // power-on: $8000=$00, $A000=$01
+            prg_mode: false,
             chr_regs: [0; 8],
             mirroring: cart.mirroring,
             irq_counter: 0,
@@ -1281,10 +1307,22 @@ impl Mapper for H3001 {
             0x8000..=0xffff => {
                 let region = (addr as usize - 0x8000) / 0x2000; // 0..3
                 let bank = match region {
-                    0 => self.prg_regs[0] as usize,
-                    1 => self.prg_regs[1] as usize,
-                    2 => self.prg_regs[2] as usize,
-                    _ => self.prg_banks8 - 1, // fixed last
+                    0 => {
+                        if self.prg_mode {
+                            0x3e
+                        } else {
+                            self.prg_regs[0] as usize
+                        }
+                    } // $8000
+                    1 => self.prg_regs[1] as usize, // $A000
+                    2 => {
+                        if self.prg_mode {
+                            self.prg_regs[0] as usize
+                        } else {
+                            0x3e
+                        }
+                    } // $C000
+                    _ => 0x3f,                       // $E000 fixed last (reset vectors)
                 };
                 self.prg[(bank % self.prg_banks8) * 0x2000 + (addr as usize & 0x1fff)]
             }
@@ -1298,13 +1336,12 @@ impl Mapper for H3001 {
                 self.prg_ram[(addr as usize - 0x6000) & (n - 1)] = val;
             }
             0x8000..=0x8fff => self.prg_regs[0] = val,
-            0xa000..=0xafff => self.prg_regs[1] = val,
-            0xc000..=0xcfff => self.prg_regs[2] = val,
+            0x9000 => self.prg_mode = val & 0x80 != 0,
             0x9001 => {
-                self.mirroring = if val & 0x80 != 0 {
-                    Mirroring::Horizontal
-                } else {
-                    Mirroring::Vertical
+                self.mirroring = match val >> 6 {
+                    0b00 => Mirroring::Vertical,
+                    0b10 => Mirroring::Horizontal,
+                    _ => Mirroring::SingleScreenA, // %01, %11
                 };
             }
             0x9003 => {
@@ -1317,6 +1354,7 @@ impl Mapper for H3001 {
             }
             0x9005 => self.irq_latch = (self.irq_latch & 0x00ff) | ((val as u16) << 8),
             0x9006 => self.irq_latch = (self.irq_latch & 0xff00) | val as u16,
+            0xa000..=0xafff => self.prg_regs[1] = val,
             0xb000..=0xb007 => self.chr_regs[(addr & 0x0007) as usize] = val,
             _ => {}
         }
@@ -1356,11 +1394,9 @@ impl SaveState for H3001 {
             w.bytes(&self.chr);
         }
         w.bytes(&self.prg_regs);
+        w.bool(self.prg_mode);
         w.bytes(&self.chr_regs);
-        w.u8(match self.mirroring {
-            Mirroring::Horizontal => 0,
-            _ => 1,
-        });
+        w.u8(mirroring_code(self.mirroring));
         w.u16(self.irq_counter);
         w.u16(self.irq_latch);
         w.bool(self.irq_enable);
@@ -1376,12 +1412,9 @@ impl SaveState for H3001 {
             self.chr = chr;
         }
         r.bytes(&mut self.prg_regs)?;
+        self.prg_mode = r.bool()?;
         r.bytes(&mut self.chr_regs)?;
-        self.mirroring = if r.u8()? == 0 {
-            Mirroring::Horizontal
-        } else {
-            Mirroring::Vertical
-        };
+        self.mirroring = mirroring_from_code(r.u8()?)?;
         self.irq_counter = r.u16()?;
         self.irq_latch = r.u16()?;
         self.irq_enable = r.bool()?;
@@ -2359,13 +2392,13 @@ pub fn make_mapper(cart: Cartridge) -> Result<Box<dyn Mapper>, CartError> {
         // Mapper 34: NINA-001 (CHR ROM) vs BNROM (CHR RAM).
         34 if !cart.chr_is_ram => Ok(Box::new(Nina001::new(cart))),
         34 => Ok(Box::new(BankSwap::new(cart, BankSwapKind::Bnrom))),
+        65 => Ok(Box::new(H3001::new(cart))),
         66 => Ok(Box::new(BankSwap::new(cart, BankSwapKind::Gxrom))),
         71 => Ok(Box::new(Camerica::new(cart))),
         79 => Ok(Box::new(Nina03::new(cart))),
-        // 65 (Irem H3001) and 73 (Konami VRC3) have complete impls below but both
-        // hang their boot -- a CPU-cycle-counted IRQ + reset-bank subtlety we have
-        // not cracked. Left unwired (report unsupported) until the IRQ-mapper pass,
-        // rather than shipping a frozen black screen.
+        // 73 (Konami VRC3) has a complete impl below but hangs its boot -- a
+        // CPU-cycle-counted IRQ subtlety we have not cracked. Left unwired
+        // (report unsupported) rather than shipping a frozen black screen.
         other => Err(CartError::UnsupportedMapper(other)),
     }
 }
