@@ -2094,6 +2094,240 @@ impl SaveState for Fme7 {
     }
 }
 
+/// Mapper 64: Tengen RAMBO-1 (800032). An MMC3 relative: the same $8000/$8001
+/// select/data pair, but 16 registers, a 1 KiB *or* 2 KiB CHR mode, THREE
+/// switchable 8 KiB PRG banks (R6/R7/R15) plus the fixed last bank, and a
+/// dual-mode IRQ counter — either clocked by PPU A12 like MMC3 (scanline) or by
+/// a CPU-cycle prescaler. Klax, Shinobi, Skull & Crossbones, Gyruss, ...
+pub struct Rambo1 {
+    prg: Vec<u8>,
+    chr: Vec<u8>,
+    chr_is_ram: bool,
+    prg_ram: Vec<u8>,
+    prg_banks8: usize,
+    chr_banks1: usize,
+    bank_select: u8, // $8000
+    regs: [u8; 16],
+    mirroring: Mirroring,
+    irq_latch: u8,
+    irq_counter: u8,
+    irq_reload: bool,
+    irq_enable: bool,
+    irq_flag: bool,
+    irq_cycle_mode: bool,
+    cycle_prescaler: u8,
+    prev_a12: bool,
+}
+impl Rambo1 {
+    pub fn new(cart: Cartridge) -> Self {
+        let prg_banks8 = (cart.prg_rom.len() / 0x2000).max(1);
+        let chr_banks1 = (cart.chr_rom.len() / 0x400).max(1);
+        Rambo1 {
+            prg: cart.prg_rom,
+            chr: cart.chr_rom,
+            chr_is_ram: cart.chr_is_ram,
+            prg_ram: cart.prg_ram,
+            prg_banks8,
+            chr_banks1,
+            bank_select: 0,
+            regs: [0; 16],
+            mirroring: cart.mirroring,
+            irq_latch: 0,
+            irq_counter: 0,
+            irq_reload: false,
+            irq_enable: false,
+            irq_flag: false,
+            irq_cycle_mode: false,
+            cycle_prescaler: 0,
+            prev_a12: false,
+        }
+    }
+    fn prg_bank(&self, region: usize) -> usize {
+        let p = self.bank_select & 0x40 != 0;
+        let r = &self.regs;
+        (match (region, p) {
+            (0, false) => r[6],
+            (0, true) => r[15],
+            (1, false) => r[7],
+            (1, true) => r[6],
+            (2, false) => r[15],
+            (2, true) => r[7],
+            _ => return self.prg_banks8 - 1, // $E000 fixed to last
+        }) as usize
+    }
+    fn chr_bank(&self, slot: usize) -> usize {
+        let r = &self.regs;
+        (if self.bank_select & 0x80 == 0 {
+            // 2 KiB + 1 KiB layout.
+            match slot {
+                0 => r[0] & 0xfe,
+                1 => (r[0] & 0xfe) + 1,
+                2 => r[1] & 0xfe,
+                3 => (r[1] & 0xfe) + 1,
+                4 => r[2],
+                5 => r[3],
+                6 => r[4],
+                _ => r[5],
+            }
+        } else {
+            // All 1 KiB (R8/R9 fill in for the split 2 KiB slots).
+            match slot {
+                0 => r[0],
+                1 => r[8],
+                2 => r[1],
+                3 => r[9],
+                4 => r[2],
+                5 => r[3],
+                6 => r[4],
+                _ => r[5],
+            }
+        }) as usize
+    }
+    fn clock_irq(&mut self) {
+        if self.irq_counter == 0 || self.irq_reload {
+            self.irq_counter = self.irq_latch;
+            self.irq_reload = false;
+        } else {
+            self.irq_counter -= 1;
+        }
+        if self.irq_counter == 0 && self.irq_enable {
+            self.irq_flag = true;
+        }
+    }
+}
+impl Mapper for Rambo1 {
+    fn cpu_read(&mut self, addr: u16) -> u8 {
+        match addr {
+            0x6000..=0x7fff => {
+                let n = self.prg_ram.len();
+                self.prg_ram[(addr as usize - 0x6000) & (n - 1)]
+            }
+            0x8000..=0xffff => {
+                let region = (addr as usize - 0x8000) / 0x2000;
+                let bank = self.prg_bank(region) % self.prg_banks8;
+                self.prg[bank * 0x2000 + (addr as usize & 0x1fff)]
+            }
+            _ => 0,
+        }
+    }
+    fn cpu_write(&mut self, addr: u16, val: u8) {
+        match addr {
+            0x6000..=0x7fff => {
+                let n = self.prg_ram.len();
+                self.prg_ram[(addr as usize - 0x6000) & (n - 1)] = val;
+            }
+            0x8000..=0x9fff => {
+                if addr & 1 == 0 {
+                    self.bank_select = val;
+                } else {
+                    self.regs[(self.bank_select & 0x0f) as usize] = val;
+                }
+            }
+            0xa000..=0xbfff => {
+                if addr & 1 == 0 {
+                    self.mirroring = if val & 1 != 0 {
+                        Mirroring::Horizontal
+                    } else {
+                        Mirroring::Vertical
+                    };
+                }
+            }
+            0xc000..=0xdfff => {
+                if addr & 1 == 0 {
+                    self.irq_latch = val;
+                } else {
+                    self.irq_cycle_mode = val & 1 != 0;
+                    self.irq_reload = true;
+                    self.cycle_prescaler = 0;
+                }
+            }
+            0xe000..=0xffff => {
+                if addr & 1 == 0 {
+                    self.irq_enable = false;
+                    self.irq_flag = false;
+                } else {
+                    self.irq_enable = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    fn ppu_read(&mut self, addr: u16) -> u8 {
+        let a12 = addr & 0x1000 != 0;
+        if !self.irq_cycle_mode && a12 && !self.prev_a12 {
+            self.clock_irq();
+        }
+        self.prev_a12 = a12;
+        let bank = self.chr_bank((addr >> 10) as usize & 7) % self.chr_banks1;
+        self.chr[bank * 0x400 + (addr as usize & 0x3ff)]
+    }
+    fn ppu_write(&mut self, addr: u16, val: u8) {
+        if self.chr_is_ram {
+            let bank = self.chr_bank((addr >> 10) as usize & 7) % self.chr_banks1;
+            let n = self.chr.len();
+            self.chr[(bank * 0x400 + (addr as usize & 0x3ff)) % n] = val;
+        }
+    }
+    fn mirroring(&self) -> Mirroring {
+        self.mirroring
+    }
+    fn irq(&self) -> bool {
+        self.irq_flag
+    }
+    fn tick_cpu(&mut self) {
+        if self.irq_cycle_mode {
+            self.cycle_prescaler += 1;
+            if self.cycle_prescaler >= 4 {
+                self.cycle_prescaler = 0;
+                self.clock_irq();
+            }
+        }
+    }
+}
+impl SaveState for Rambo1 {
+    fn save(&self, w: &mut WriteCursor) {
+        w.bytes(&self.prg_ram);
+        if self.chr_is_ram {
+            w.bytes(&self.chr);
+        }
+        w.u8(self.bank_select);
+        for &b in &self.regs {
+            w.u8(b);
+        }
+        w.u8(mirroring_code(self.mirroring));
+        w.u8(self.irq_latch);
+        w.u8(self.irq_counter);
+        w.bool(self.irq_reload);
+        w.bool(self.irq_enable);
+        w.bool(self.irq_flag);
+        w.bool(self.irq_cycle_mode);
+        w.u8(self.cycle_prescaler);
+        w.bool(self.prev_a12);
+    }
+    fn load(&mut self, r: &mut ReadCursor) -> Result<(), LoadError> {
+        r.bytes(&mut self.prg_ram)?;
+        if self.chr_is_ram {
+            let mut chr = vec![0u8; self.chr.len()];
+            r.bytes(&mut chr)?;
+            self.chr = chr;
+        }
+        self.bank_select = r.u8()?;
+        for b in &mut self.regs {
+            *b = r.u8()?;
+        }
+        self.mirroring = mirroring_from_code(r.u8()?)?;
+        self.irq_latch = r.u8()?;
+        self.irq_counter = r.u8()?;
+        self.irq_reload = r.bool()?;
+        self.irq_enable = r.bool()?;
+        self.irq_flag = r.bool()?;
+        self.irq_cycle_mode = r.bool()?;
+        self.cycle_prescaler = r.u8()?;
+        self.prev_a12 = r.bool()?;
+        Ok(())
+    }
+}
+
 /// Construct the mapper implementation for a parsed cart.
 pub fn make_mapper(cart: Cartridge) -> Result<Box<dyn Mapper>, CartError> {
     match cart.mapper {
@@ -2104,6 +2338,7 @@ pub fn make_mapper(cart: Cartridge) -> Result<Box<dyn Mapper>, CartError> {
         4 => Ok(Box::new(Mmc3::new(cart))),
         5 => Ok(Box::new(Mmc5::new(cart))),
         7 => Ok(Box::new(Axrom::new(cart))),
+        64 => Ok(Box::new(Rambo1::new(cart))),
         69 => Ok(Box::new(Fme7::new(cart))),
         9 => Ok(Box::new(Mmc2::new(cart, false))),
         11 => Ok(Box::new(BankSwap::new(cart, BankSwapKind::ColorDreams))),
