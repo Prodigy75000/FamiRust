@@ -23,6 +23,28 @@ pub enum Mirroring {
     SingleScreenB,
 }
 
+/// Serialize a [`Mirroring`] to a stable byte (for mappers with runtime-switchable
+/// mirroring across all four modes, e.g. FME-7).
+fn mirroring_code(m: Mirroring) -> u8 {
+    match m {
+        Mirroring::Horizontal => 0,
+        Mirroring::Vertical => 1,
+        Mirroring::FourScreen => 2,
+        Mirroring::SingleScreenA => 3,
+        Mirroring::SingleScreenB => 4,
+    }
+}
+fn mirroring_from_code(c: u8) -> Result<Mirroring, LoadError> {
+    Ok(match c {
+        0 => Mirroring::Horizontal,
+        1 => Mirroring::Vertical,
+        2 => Mirroring::FourScreen,
+        3 => Mirroring::SingleScreenA,
+        4 => Mirroring::SingleScreenB,
+        _ => return Err(LoadError::BadValue("mirroring")),
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CartError {
     BadMagic,
@@ -1895,6 +1917,183 @@ impl SaveState for Mmc5 {
     }
 }
 
+/// Mapper 69: Sunsoft FME-7 (a.k.a. Sunsoft-5). A command/parameter register pair
+/// ($8000 = command 0-F, $A000 = parameter): 8x 1 KiB CHR banks, three switchable
+/// 8 KiB PRG banks ($8000/$A000/$C000) + a fixed last bank at $E000 + a RAM/ROM
+/// bank at $6000, mirroring control, and a 16-bit down-counting CPU-cycle IRQ.
+/// (The optional Sunsoft-5B audio channels are deferred.)
+pub struct Fme7 {
+    prg: Vec<u8>,
+    chr: Vec<u8>,
+    chr_is_ram: bool,
+    prg_ram: Vec<u8>,
+    prg_banks8: usize,
+    chr_banks1: usize,
+    command: u8,
+    chr_bank: [u8; 8],
+    prg6000: u8, // bit7 = map at $6000, bit6 = RAM(1)/ROM(0), bits5-0 = bank
+    prg8000: u8,
+    prg_a000: u8,
+    prg_c000: u8,
+    mirroring: Mirroring,
+    irq_counter: u16,
+    counter_enable: bool,
+    irq_enable: bool,
+    irq_flag: bool,
+}
+impl Fme7 {
+    pub fn new(cart: Cartridge) -> Self {
+        let prg_banks8 = (cart.prg_rom.len() / 0x2000).max(1);
+        let chr_banks1 = (cart.chr_rom.len() / 0x400).max(1);
+        Fme7 {
+            prg: cart.prg_rom,
+            chr: cart.chr_rom,
+            chr_is_ram: cart.chr_is_ram,
+            prg_ram: cart.prg_ram,
+            prg_banks8,
+            chr_banks1,
+            command: 0,
+            chr_bank: [0; 8],
+            prg6000: 0,
+            prg8000: 0,
+            prg_a000: 0,
+            prg_c000: 0,
+            mirroring: cart.mirroring,
+            irq_counter: 0,
+            counter_enable: false,
+            irq_enable: false,
+            irq_flag: false,
+        }
+    }
+    fn rom8(&self, bank: usize, addr: u16) -> u8 {
+        self.prg[(bank % self.prg_banks8) * 0x2000 + (addr as usize & 0x1fff)]
+    }
+}
+impl Mapper for Fme7 {
+    fn cpu_read(&mut self, addr: u16) -> u8 {
+        match addr {
+            0x6000..=0x7fff => {
+                if self.prg6000 & 0x80 == 0 {
+                    0 // not mapped -> open bus
+                } else if self.prg6000 & 0x40 != 0 {
+                    let n = self.prg_ram.len();
+                    self.prg_ram[(addr as usize - 0x6000) & (n - 1)]
+                } else {
+                    self.rom8((self.prg6000 & 0x3f) as usize, addr)
+                }
+            }
+            0x8000..=0x9fff => self.rom8(self.prg8000 as usize & 0x3f, addr),
+            0xa000..=0xbfff => self.rom8(self.prg_a000 as usize & 0x3f, addr),
+            0xc000..=0xdfff => self.rom8(self.prg_c000 as usize & 0x3f, addr),
+            0xe000..=0xffff => self.rom8(self.prg_banks8 - 1, addr),
+            _ => 0,
+        }
+    }
+    fn cpu_write(&mut self, addr: u16, val: u8) {
+        match addr {
+            0x6000..=0x7fff => {
+                if self.prg6000 & 0xc0 == 0xc0 {
+                    let n = self.prg_ram.len();
+                    self.prg_ram[(addr as usize - 0x6000) & (n - 1)] = val;
+                }
+            }
+            0x8000..=0x9fff => self.command = val & 0x0f,
+            0xa000..=0xbfff => match self.command {
+                0..=7 => self.chr_bank[self.command as usize] = val,
+                8 => self.prg6000 = val,
+                9 => self.prg8000 = val,
+                0xa => self.prg_a000 = val,
+                0xb => self.prg_c000 = val,
+                0xc => {
+                    self.mirroring = match val & 3 {
+                        0 => Mirroring::Vertical,
+                        1 => Mirroring::Horizontal,
+                        2 => Mirroring::SingleScreenA,
+                        _ => Mirroring::SingleScreenB,
+                    };
+                }
+                0xd => {
+                    self.counter_enable = val & 0x80 != 0;
+                    self.irq_enable = val & 0x01 != 0;
+                    self.irq_flag = false; // writing IRQ control acknowledges
+                }
+                0xe => self.irq_counter = (self.irq_counter & 0xff00) | val as u16,
+                _ => self.irq_counter = (self.irq_counter & 0x00ff) | ((val as u16) << 8),
+            },
+            _ => {}
+        }
+    }
+    fn ppu_read(&mut self, addr: u16) -> u8 {
+        let bank = self.chr_bank[(addr >> 10) as usize & 7] as usize;
+        self.chr[(bank % self.chr_banks1) * 0x400 + (addr as usize & 0x3ff)]
+    }
+    fn ppu_write(&mut self, addr: u16, val: u8) {
+        if self.chr_is_ram {
+            let bank = self.chr_bank[(addr >> 10) as usize & 7] as usize;
+            let n = self.chr.len();
+            self.chr[((bank % self.chr_banks1) * 0x400 + (addr as usize & 0x3ff)) % n] = val;
+        }
+    }
+    fn mirroring(&self) -> Mirroring {
+        self.mirroring
+    }
+    fn irq(&self) -> bool {
+        self.irq_flag
+    }
+    fn tick_cpu(&mut self) {
+        if self.counter_enable {
+            let (n, under) = self.irq_counter.overflowing_sub(1);
+            self.irq_counter = n;
+            if under && self.irq_enable {
+                self.irq_flag = true;
+            }
+        }
+    }
+}
+impl SaveState for Fme7 {
+    fn save(&self, w: &mut WriteCursor) {
+        w.bytes(&self.prg_ram);
+        if self.chr_is_ram {
+            w.bytes(&self.chr);
+        }
+        w.u8(self.command);
+        for &b in &self.chr_bank {
+            w.u8(b);
+        }
+        w.u8(self.prg6000);
+        w.u8(self.prg8000);
+        w.u8(self.prg_a000);
+        w.u8(self.prg_c000);
+        w.u8(mirroring_code(self.mirroring));
+        w.u16(self.irq_counter);
+        w.bool(self.counter_enable);
+        w.bool(self.irq_enable);
+        w.bool(self.irq_flag);
+    }
+    fn load(&mut self, r: &mut ReadCursor) -> Result<(), LoadError> {
+        r.bytes(&mut self.prg_ram)?;
+        if self.chr_is_ram {
+            let mut chr = vec![0u8; self.chr.len()];
+            r.bytes(&mut chr)?;
+            self.chr = chr;
+        }
+        self.command = r.u8()?;
+        for b in &mut self.chr_bank {
+            *b = r.u8()?;
+        }
+        self.prg6000 = r.u8()?;
+        self.prg8000 = r.u8()?;
+        self.prg_a000 = r.u8()?;
+        self.prg_c000 = r.u8()?;
+        self.mirroring = mirroring_from_code(r.u8()?)?;
+        self.irq_counter = r.u16()?;
+        self.counter_enable = r.bool()?;
+        self.irq_enable = r.bool()?;
+        self.irq_flag = r.bool()?;
+        Ok(())
+    }
+}
+
 /// Construct the mapper implementation for a parsed cart.
 pub fn make_mapper(cart: Cartridge) -> Result<Box<dyn Mapper>, CartError> {
     match cart.mapper {
@@ -1905,6 +2104,7 @@ pub fn make_mapper(cart: Cartridge) -> Result<Box<dyn Mapper>, CartError> {
         4 => Ok(Box::new(Mmc3::new(cart))),
         5 => Ok(Box::new(Mmc5::new(cart))),
         7 => Ok(Box::new(Axrom::new(cart))),
+        69 => Ok(Box::new(Fme7::new(cart))),
         9 => Ok(Box::new(Mmc2::new(cart, false))),
         11 => Ok(Box::new(BankSwap::new(cart, BankSwapKind::ColorDreams))),
         // Mapper 34: NINA-001 (CHR ROM) vs BNROM (CHR RAM).
