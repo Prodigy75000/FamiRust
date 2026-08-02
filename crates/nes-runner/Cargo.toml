@@ -26,6 +26,11 @@ path = "src/testrom.rs"
 name = "classify"
 path = "src/classify.rs"
 
+# Cross-platform save-state fingerprint (netplay byte-parity proof).
+[[bin]]
+name = "fingerprint"
+path = "src/fingerprint.rs"
+
 [dependencies]
 nes-core = { path = "../nes-core" }
 png = "0.17"
