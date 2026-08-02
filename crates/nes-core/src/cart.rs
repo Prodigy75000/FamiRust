@@ -85,8 +85,31 @@ impl Cartridge {
         } else {
             Mirroring::Horizontal
         };
-        let has_battery = flags6 & 0x02 != 0;
         let has_trainer = flags6 & 0x04 != 0;
+
+        // RAM sizing. Plain iNES cannot express work-RAM / CHR-RAM sizes, so we
+        // keep the historical 8 KiB defaults. NES 2.0 gives them precisely in
+        // bytes 10 (PRG) and 11 (CHR): each nibble is a shift count, size =
+        // 64 << shift bytes (0 => none), split into a volatile half (low nibble)
+        // and a battery/NVRAM half (high nibble). We keep the buffer a power of
+        // two and at least the 8 KiB the mappers assume, so their `& (len-1)`
+        // mirroring stays valid and no cart gets a zero-length (un-maskable)
+        // buffer -- getting the SIZE right is what keeps save-state bytes matched
+        // across clients whose dumps disagree (SXROM's 32 KiB, MMC5, ...).
+        let ram_bytes = |nibble: u8| -> usize { if nibble == 0 { 0 } else { 64usize << nibble } };
+        let (prg_ram_size, chr_ram_size, prg_nvram) = if is_nes2 {
+            let prg = ram_bytes(rom[10] & 0x0f) + ram_bytes(rom[10] >> 4);
+            let chr = ram_bytes(rom[11] & 0x0f) + ram_bytes(rom[11] >> 4);
+            (
+                prg.max(8 * 1024).next_power_of_two(),
+                chr.max(CHR_BANK).next_power_of_two(),
+                rom[10] >> 4 != 0,
+            )
+        } else {
+            (8 * 1024, CHR_BANK, false)
+        };
+        // Battery-backed if the iNES flag says so or NES 2.0 declares PRG-NVRAM.
+        let has_battery = (flags6 & 0x02 != 0) || prg_nvram;
 
         let mut off = HEADER_LEN;
         if has_trainer {
@@ -106,8 +129,8 @@ impl Cartridge {
             return Err(CartError::Truncated);
         }
         let (chr_rom, chr_is_ram) = if chr_banks == 0 {
-            // No CHR ROM -> the cart wires 8 KiB of CHR RAM instead.
-            (vec![0u8; CHR_BANK], true)
+            // No CHR ROM -> the cart wires CHR RAM instead (size from NES 2.0).
+            (vec![0u8; chr_ram_size], true)
         } else {
             (rom[prg_end..chr_end].to_vec(), false)
         };
@@ -119,7 +142,7 @@ impl Cartridge {
             prg_rom,
             chr_rom,
             chr_is_ram,
-            prg_ram: vec![0u8; 8 * 1024],
+            prg_ram: vec![0u8; prg_ram_size],
         })
     }
 }
@@ -1585,6 +1608,33 @@ mod tests {
     #[test]
     fn rejects_bad_magic() {
         assert_eq!(Cartridge::from_ines(b"not a rom really").err(), Some(CartError::BadMagic));
+    }
+
+    #[test]
+    fn ines_ram_defaults_to_8k() {
+        // Plain iNES can't express RAM size -> the historical 8 KiB defaults.
+        let cart = Cartridge::from_ines(&synth_ines(0x00)).unwrap();
+        assert_eq!(cart.prg_ram.len(), 8 * 1024);
+        assert_eq!(cart.chr_rom.len(), CHR_BANK); // CHR ROM present here
+    }
+
+    #[test]
+    fn nes2_ram_sizes_from_header() {
+        // NES 2.0 image: PRG-NVRAM 32 KiB (byte10 hi nibble = 9 -> 64<<9), CHR-RAM
+        // 16 KiB (byte11 lo nibble = 8 -> 64<<8), CHR ROM absent (byte5 = 0).
+        let mut v = vec![0u8; HEADER_LEN];
+        v[0..4].copy_from_slice(b"NES\x1a");
+        v[4] = 1; // 16 KiB PRG
+        v[5] = 0; // no CHR ROM -> CHR RAM
+        v[7] = 0x08; // NES 2.0 marker (bits 3:2 == 10)
+        v[10] = 0x90; // PRG: volatile 0, NVRAM shift 9 => 32 KiB battery RAM
+        v[11] = 0x08; // CHR: volatile shift 8 => 16 KiB CHR RAM
+        v.extend(std::iter::repeat(0xa5).take(PRG_BANK));
+        let cart = Cartridge::from_ines(&v).unwrap();
+        assert_eq!(cart.prg_ram.len(), 32 * 1024, "PRG-RAM sized from NES 2.0");
+        assert!(cart.chr_is_ram);
+        assert_eq!(cart.chr_rom.len(), 16 * 1024, "CHR-RAM sized from NES 2.0");
+        assert!(cart.has_battery, "PRG-NVRAM implies battery-backed");
     }
 
     #[test]
