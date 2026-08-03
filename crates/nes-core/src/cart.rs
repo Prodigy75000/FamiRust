@@ -234,6 +234,13 @@ pub trait Mapper: SaveState {
     /// enabled. MMC5 clocks its in-frame scanline IRQ counter here. Default no-op.
     fn ppu_scanline(&mut self, _scanline: u16, _rendering: bool) {}
 
+    /// Cartridge work/save RAM ($6000-$7FFF) for RetroAchievements' SAVE_RAM and
+    /// battery saves. `None` = the cart has no work RAM. Mappers with a `prg_ram`
+    /// buffer return it here.
+    fn save_ram(&mut self) -> Option<&mut [u8]> {
+        None
+    }
+
     /// Per-nametable CIRAM bank override (0 or 1), for mappers that pick the
     /// nametable from a bank register instead of a fixed mirroring mode (TxSROM).
     /// `nt` is the logical nametable 0..3. `None` = use [`Mapper::mirroring`].
@@ -499,6 +506,9 @@ impl Mapper for Mmc1 {
             2 => Mirroring::Vertical,
             _ => Mirroring::Horizontal,
         }
+    }
+    fn save_ram(&mut self) -> Option<&mut [u8]> {
+        (!self.prg_ram.is_empty()).then(|| self.prg_ram.as_mut_slice())
     }
 }
 
@@ -947,6 +957,9 @@ impl Mapper for Mmc3 {
         } else {
             None
         }
+    }
+    fn save_ram(&mut self) -> Option<&mut [u8]> {
+        (!self.prg_ram.is_empty()).then(|| self.prg_ram.as_mut_slice())
     }
     fn irq(&self) -> bool {
         self.irq_flag
@@ -2308,6 +2321,11 @@ impl Mapper for Mmc5 {
 
     fn dbg_force_ext_attr(&mut self) {
         self.exram_mode = 1;
+    }
+
+    fn save_ram(&mut self) -> Option<&mut [u8]> {
+        // MMC5's 64 KiB PRG-RAM; RA/battery see the $6000-$7FFF window at offset 0.
+        (!self.prg_ram.is_empty()).then(|| self.prg_ram.as_mut_slice())
     }
 
     fn mirroring(&self) -> Mirroring {

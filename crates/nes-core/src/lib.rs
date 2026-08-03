@@ -122,6 +122,19 @@ impl Nes {
         self.bus.mapper.debug_dump()
     }
 
+    /// The 2 KiB internal RAM ($0000-$07FF). This is RetroAchievements'
+    /// `RETRO_MEMORY_SYSTEM_RAM` for the NES -- the region almost every
+    /// achievement set reads.
+    pub fn system_ram(&mut self) -> &mut [u8] {
+        &mut self.bus.ram
+    }
+
+    /// Cartridge work/save RAM ($6000-$7FFF) if the mapper provides it, else
+    /// `None`. This is RA's `RETRO_MEMORY_SAVE_RAM` and the battery save.
+    pub fn save_ram(&mut self) -> Option<&mut [u8]> {
+        self.bus.mapper.save_ram()
+    }
+
     /// Test hook: force MMC5 extended-attribute mode (to validate a captured state
     /// whose format predates the `$5104` field).
     pub fn dbg_force_ext_attr(&mut self) {
@@ -216,6 +229,19 @@ mod tests {
         v.extend(std::iter::repeat(0u8).take(16 * 1024));
         v.extend(std::iter::repeat(0u8).take(8 * 1024));
         v
+    }
+
+    #[test]
+    fn exposes_system_ram_for_retroachievements() {
+        // SYSTEM_RAM is exactly the 2 KiB internal RAM and aliases bus.ram, so RA
+        // reads the live emulated memory (not a copy).
+        let mut nes = Nes::from_rom(&synth_rom()).unwrap();
+        assert_eq!(nes.system_ram().len(), 2048);
+        nes.system_ram()[0x321] = 0xab;
+        assert_eq!(nes.bus.ram[0x321], 0xab);
+        // NROM has no battery work RAM, so SAVE_RAM is absent. (MMC1/MMC3/MMC5
+        // expose their 8 KiB+ PRG-RAM here -- verified against Zelda/SMB3 dumps.)
+        assert!(nes.save_ram().is_none());
     }
 
     #[test]
