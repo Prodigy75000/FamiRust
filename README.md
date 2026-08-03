@@ -85,13 +85,38 @@ cargo run --release -p nes-runner --bin nes -- path/to/game.nes 300 out.png
 #   target/release/libnescore_libretro.dylib (macOS)
 ```
 
-**Android (arm64)** with the NDK, 16 KB-page-aligned:
+**Android (arm64)** with the NDK, 16 KB-page-aligned (required by Google Play for
+apps targeting API 35+):
 
 ```sh
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=<ndk>/.../aarch64-linux-android21-clang
 RUSTFLAGS="-C link-arg=-Wl,-z,max-page-size=16384" \
   cargo build --release -p nes-libretro --target aarch64-linux-android
 ```
+
+**macOS** — native build:
+
+```sh
+cargo build --release -p nes-libretro
+# -> target/release/libnescore_libretro.dylib
+```
+
+Universal (Intel + Apple Silicon) binary:
+
+```sh
+rustup target add x86_64-apple-darwin aarch64-apple-darwin
+cargo build --release -p nes-libretro --target x86_64-apple-darwin
+cargo build --release -p nes-libretro --target aarch64-apple-darwin
+lipo -create -output libnescore_libretro.dylib \
+  target/x86_64-apple-darwin/release/libnescore_libretro.dylib \
+  target/aarch64-apple-darwin/release/libnescore_libretro.dylib
+```
+
+> **On 16 KB pages / macOS:** the `max-page-size=16384` flag above is an *Android*
+> requirement. macOS needs no equivalent — Apple Silicon uses 16 KB pages
+> natively and Apple's linker (`ld64`) already aligns Mach-O segments to the
+> target page size by default, so the plain `cargo build` above is correctly
+> aligned for both arm64 (16 KB) and x86_64 (4 KB) Macs.
 
 Nothing here includes or requires copyrighted ROMs or BIOS images — supply your
 own legally obtained dumps.
