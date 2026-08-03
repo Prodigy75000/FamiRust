@@ -133,6 +133,37 @@ impl Nes {
         self.bus.ppu.ctrl
     }
 
+    /// Scroll/mask registers + a coarse map of which columns of nametable 0 hold
+    /// non-zero tiles (helps tell a rendering bug from a partly-written nametable).
+    pub fn dbg_ppu_scroll(&self) -> String {
+        let p = &self.bus.ppu;
+        // Per-column count of non-zero tile bytes in physical CIRAM bank A (0x000..0x3c0).
+        let mut cols = [0u16; 32];
+        for row in 0..30usize {
+            for col in 0..32usize {
+                if p.ciram[row * 32 + col] != 0 {
+                    cols[col] += 1;
+                }
+            }
+        }
+        let colmap: String = cols
+            .iter()
+            .map(|&c| if c == 0 { '.' } else { std::char::from_digit((c as u32).min(35), 36).unwrap() })
+            .collect();
+        // Tile indices of one mid-screen row (row 18) to see if cols 12..31 are a
+        // distinct "blank" tile or real varied indices.
+        let row: String = (0..32).map(|c| format!("{:02x} ", p.ciram[18 * 32 + c])).collect();
+        // Attribute row covering tile-row 18 (attr row 4 = CIRAM 0x3c0 + 4*8) + palette.
+        let attr: String = (0..8).map(|c| format!("{:02x} ", p.ciram[0x3c0 + 4 * 8 + c])).collect();
+        let pal: String = (0..32).map(|i| format!("{:02x} ", p.palette[i])).collect();
+        format!(
+            "v=${:04x} t=${:04x} fineX={} mask=${:02x} ctrl=${:02x}  coarseX={} coarseY={} ntbase={}  NT0 col-fill[{}]\n  NT0 row18 tiles: {}",
+            p.v, p.t, p.x_fine, p.mask, p.ctrl,
+            p.v & 0x1f, (p.v >> 5) & 0x1f, (p.v >> 10) & 3,
+            colmap, row,
+        ) + &format!("\n  NT0 row18 attr(8): {}\n  palette: {}", attr, pal)
+    }
+
     /// Serialize the entire machine to a byte-identical snapshot. The layout is
     /// `MAGIC(8) || format_version(u16 LE) || cpu || bus`. Two machines in the
     /// same logical state produce an equal `Vec<u8>` on any target triple.

@@ -88,6 +88,7 @@ fn main() -> ExitCode {
                         println!("(forced MMC5 extended-attribute mode)");
                     }
                     println!("PPUCTRL=${:02x}  {}", nes.dbg_ppu_ctrl(), nes.dbg_mapper());
+                    println!("{}", nes.dbg_ppu_scroll());
                 }
                 Err(e) => {
                     eprintln!("state load failed: {e:?}");
