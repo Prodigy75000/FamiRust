@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Prodigy75000
+
 //! Batch outlier classifier: run every `.nes` in a directory headless and sort
 //! the ones that DON'T boot into labelled subfolders, so the owner can Nestopia-
 //! check them and prune bad dumps from the true-outlier list.

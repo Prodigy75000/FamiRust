@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Prodigy75000
+
 //! Ricoh 2A03 CPU — an NMOS 6502 with decimal mode fused off.
 //!
 //! Cycle-stepped: the CPU talks to memory only through [`CpuBus`], and **every

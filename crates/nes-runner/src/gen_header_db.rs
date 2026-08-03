@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Prodigy75000
+
 //! Generate the `header_db::HEADER_FIXES` table by boot-verifying mapper
 //! corrections against this core. For every ROM whose iNES header matches a
 //! known-mislabel PATTERN, we render it both under the header's mapper and under

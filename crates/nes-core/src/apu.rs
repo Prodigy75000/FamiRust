@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Prodigy75000
+
 //! 2A03 APU — two pulse channels, triangle, noise, and the DMC sample channel,
 //! plus the frame sequencer and the non-linear mixer.
 //!

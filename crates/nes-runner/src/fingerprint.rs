@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Prodigy75000
+
 //! Cross-platform save-state fingerprint — the offline proof behind cross-engine
 //! netplay. Run the SAME rom + frame count on every build (Android .so, iOS
 //! .dylib, Windows .dll, this native harness) and compare the printed size +

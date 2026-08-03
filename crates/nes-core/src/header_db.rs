@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Prodigy75000
+
 //! iNES header-correction database.
 //!
 //! Old dump sets (the euroemu/GoodNES-era `.nes` files a lot of libraries are

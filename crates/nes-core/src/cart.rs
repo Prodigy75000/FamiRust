@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Prodigy75000
+
 //! Cartridge image parsing (iNES / NES 2.0) and the mapper boundary.
 //!
 //! This decodes the 16-byte header that fronts every `.nes` file into the

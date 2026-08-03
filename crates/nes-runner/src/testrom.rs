@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Prodigy75000
+
 //! Blargg test-ROM harness (the `$6000` status protocol).
 //!
 //! Blargg's test ROMs report via battery RAM: `$6000` holds `$80` while running

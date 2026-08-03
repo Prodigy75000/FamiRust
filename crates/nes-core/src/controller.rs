@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Prodigy75000
+
 //! Standard NES controller (the shift-register joypad at $4016/$4017).
 //!
 //! Button state is latched on a write to $4016 with the strobe bit set, then

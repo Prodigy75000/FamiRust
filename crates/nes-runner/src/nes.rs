@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Prodigy75000
+
 //! Headless dev harness: load a `.nes`, run N frames, dump the last frame as a
 //! PNG. Mirrors the `snes` / `n64` bins in the sibling cores. Reports pixel
 //! statistics (the user judges the render; the harness reports measurable facts).

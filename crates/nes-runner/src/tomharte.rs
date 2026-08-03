@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Prodigy75000
+
 //! TomHarte `nes6502` single-step conformance harness.
 //!
 //! Each vector fully specifies an initial CPU + flat-memory state, runs exactly

@@ -1,28 +1,16 @@
 /target
 
-# Commercial cart images and any BIOS-ish dumps stay out of git. The NES has no
-# boot ROM, but disk-system (FDS) BIOS and vendored test ROMs are gitignored too.
-/dumps/*.nes
-/dumps/*.unf
-/dumps/*.unif
-/dumps/*.fds
-/dumps/*.nsf
-/dumps/fds*.bin
-/dumps/disksys*.rom
+# Commercial cart images, BIOS-ish dumps, save states, classifier output — ALL of
+# it stays out of git. Blanket-ignore the whole dumps/ tree: no copyrighted ROM
+# can ever be committed, regardless of subfolder. (The NES has no boot ROM;
+# FDS BIOS + bulk ROM corpora live here too.) Bring your own dumps.
+/dumps/
 
 # Vendored TomHarte 6502 single-step vector clone (the CPU conformance corpus).
 /tests/vendor/
 
 # Headless render / audio dumps from the dev harnesses.
 /out/
-/dumps/*.state
-
-# Bulk ROM corpora (pulled from device) + classifier output. Data, never tracked;
-# the `.nes` glob above only catches loose files at dumps/ root, not these trees.
-/dumps/*.zip
-/dumps/fullset/
-/dumps/fullset_10785/
-/dumps/classify_usa/
 
 # Local convenience junction -> TrophyHubAndroid app jniLibs (deploy target)
 android-jnilibs/

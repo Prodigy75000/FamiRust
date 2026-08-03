@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Prodigy75000
+
 //! Byte-identical save-state backbone.
 //!
 //! Netplay across two engines (and rewind, and cross-device transfer) is only

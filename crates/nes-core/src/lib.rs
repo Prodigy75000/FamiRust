@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Prodigy75000
+
 //! FamiRust — a clean-room NES / Famicom emulator core in Rust.
 //!
 //! Design priorities, in order:

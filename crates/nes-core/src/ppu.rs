@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Prodigy75000
+
 //! 2C02 Picture Processing Unit — dot-accurate.
 //!
 //! Implemented from `docs/notes/ppu-2c02.md` (clean-room notes distilled from the

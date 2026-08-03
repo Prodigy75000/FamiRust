@@ -12,6 +12,10 @@
 
 #![allow(non_camel_case_types)]
 #![allow(clippy::missing_safety_doc)]
+// The `retro_*` entry points are `pub extern "C"` but take/return the libretro
+// C-ABI structs, which are intentionally module-private (the ABI is the C layout,
+// not Rust visibility). Silence the private-interface lint for the whole crate.
+#![allow(private_interfaces)]
 
 use nes_core::controller::button;
 use nes_core::Nes;

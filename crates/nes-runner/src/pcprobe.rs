@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Prodigy75000
+
 //! Where is a hanging ROM stuck? Histogram the CPU PC into 256-byte buckets.
 //!   cargo run --release -p nes-runner --bin pcprobe -- <rom.nes> [steps]
 use std::collections::HashMap;

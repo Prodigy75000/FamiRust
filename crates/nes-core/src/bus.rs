@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Prodigy75000
+
 //! CPU address bus and the system memory map.
 //!
 //! Routes the 6502's 16-bit address space to the right device:

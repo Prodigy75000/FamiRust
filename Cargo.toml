@@ -1,0 +1,10 @@
+# FamiRust — a clean-room NES / Famicom emulator core, written from scratch in Rust.
+# Standalone workspace (this repo builds on its own; no sibling cores needed).
+[workspace]
+resolver = "2"
+members = ["crates/nes-core", "crates/nes-libretro", "crates/nes-runner"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
