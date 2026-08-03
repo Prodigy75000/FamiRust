@@ -370,6 +370,83 @@ pub extern "C" fn retro_get_memory_size(id: u32) -> usize {
         }
     })
 }
+// --- Debug harness (see FamiRust docs/DEBUG_HARNESS.md) ----------------------
+// Custom exports the app's native bridge calls (it already dlopen's the .so).
+// The app owns PNG encoding / gallery / share; the core hands over decoded
+// pixels + structured data. Buffers are app-allocated (sizes below).
+
+/// Turn per-layer capture on/off. Off in normal play (zero cost); the frontend
+/// enables it while the Core Debug overlay is open.
+#[no_mangle]
+pub extern "C" fn nes_dbg_enable(on: u32) {
+    with_state(|s| {
+        if let Some(c) = &mut s.core {
+            c.dbg_set_capture(on != 0);
+        }
+    });
+}
+/// Composite-layer mask for live toggles: bit0=BG, bit1=OBJ (0b11 = normal).
+#[no_mangle]
+pub extern "C" fn nes_dbg_set_layer_mask(mask: u32) {
+    with_state(|s| {
+        if let Some(c) = &mut s.core {
+            c.dbg_set_layer_mask(mask as u8);
+        }
+    });
+}
+/// Copy a layer of the LAST rendered frame into `out` (256*240 XRGB8888).
+/// which: 0 = BG-only (backdrop fill), 1 = OBJ-only (magenta = transparent).
+#[no_mangle]
+pub unsafe extern "C" fn nes_dbg_layer(which: u32, out: *mut u32) {
+    if out.is_null() {
+        return;
+    }
+    with_state(|s| {
+        let Some(c) = &s.core else { return };
+        let src = if which == 1 { c.dbg_obj_layer() } else { c.dbg_bg_layer() };
+        ptr::copy_nonoverlapping(src.as_ptr(), out, src.len());
+    });
+}
+/// Copy the pattern-table tile sheet into `out` (128*256 XRGB8888).
+#[no_mangle]
+pub unsafe extern "C" fn nes_dbg_tiles(out: *mut u32) {
+    if out.is_null() {
+        return;
+    }
+    with_state(|s| {
+        let Some(c) = &mut s.core else { return };
+        let t = c.dbg_tiles_argb();
+        ptr::copy_nonoverlapping(t.as_ptr(), out, t.len());
+    });
+}
+/// Copy the 32 palette entries into `out` (32 XRGB8888).
+#[no_mangle]
+pub unsafe extern "C" fn nes_dbg_palette(out: *mut u32) {
+    if out.is_null() {
+        return;
+    }
+    with_state(|s| {
+        let Some(c) = &s.core else { return };
+        let p = c.dbg_palette_argb();
+        ptr::copy_nonoverlapping(p.as_ptr(), out, p.len());
+    });
+}
+/// Write OAM as a JSON array into `buf` (UTF-8, up to `cap` bytes). Returns the
+/// number of bytes written (0 if no core; may truncate if `cap` too small).
+#[no_mangle]
+pub unsafe extern "C" fn nes_dbg_oam_json(buf: *mut u8, cap: u32) -> u32 {
+    if buf.is_null() {
+        return 0;
+    }
+    with_state(|s| {
+        let Some(c) = &s.core else { return 0 };
+        let j = c.dbg_oam_json();
+        let n = j.len().min(cap as usize);
+        ptr::copy_nonoverlapping(j.as_ptr(), buf, n);
+        n as u32
+    })
+}
+
 #[no_mangle]
 pub extern "C" fn retro_serialize_size() -> usize {
     with_state(|s| s.core.as_ref().map(|c| c.state_size()).unwrap_or(0))

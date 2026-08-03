@@ -16,6 +16,9 @@ use crate::save::{LoadError, ReadCursor, SaveState, WriteCursor};
 
 pub const FRAME_W: usize = 256;
 pub const FRAME_H: usize = 240;
+/// Debug tile-sheet dimensions (both pattern tables, 16 tiles wide).
+pub const DBG_TILES_W: usize = 128;
+pub const DBG_TILES_H: usize = 256;
 
 /// 64-entry NTSC master palette as ARGB8888. This is the FirebrandX
 /// "unsaturated-v6" decode (measured 2C02 composite colors), the de-facto
@@ -98,6 +101,18 @@ pub struct Ppu {
 
     /// ARGB8888 framebuffer, handed to the frontend each completed frame.
     pub framebuffer: Vec<u32>,
+
+    // --- debug harness (not serialized; runtime-only) ---
+    /// Which layers to composite into the visible framebuffer: bit0=BG, bit1=OBJ.
+    /// Default 0b11 (both) => identical to normal rendering. Sprite-0 hit still
+    /// uses the real pixels, so toggling never changes game logic.
+    pub dbg_layer_mask: u8,
+    /// When set, each rendered pixel is also written to the per-layer buffers.
+    pub dbg_capture: bool,
+    /// BG-only frame (backdrop where transparent) and OBJ-only frame (magenta
+    /// where transparent), captured during rendering when `dbg_capture`.
+    pub bg_layer: Vec<u32>,
+    pub obj_layer: Vec<u32>,
 }
 
 impl Default for Ppu {
@@ -141,6 +156,10 @@ impl Default for Ppu {
             sprite_x: [0; 8],
             sprite_zero_present: false,
             framebuffer: vec![0; FRAME_W * FRAME_H],
+            dbg_layer_mask: 0b11,
+            dbg_capture: false,
+            bg_layer: vec![0; FRAME_W * FRAME_H],
+            obj_layer: vec![0; FRAME_W * FRAME_H],
         }
     }
 }
@@ -586,23 +605,41 @@ impl Ppu {
 
         let (sp_pixel, sp_palette, sp_behind, is_sprite0) = self.sprite_pixel(x);
 
-        // Multiplex background and sprite (see notes §11).
-        let pal_addr = match (bg_pixel != 0, sp_pixel != 0) {
+        // Sprite-0 hit is hardware behavior on the REAL pixels -- independent of
+        // any debug layer toggle, so game logic never changes when a layer is off.
+        if bg_pixel != 0 && sp_pixel != 0 && is_sprite0 && x != 255 {
+            if self.status & 0x40 == 0 {
+                self.dbg_s0_scanline = self.scanline as i32;
+            }
+            self.status |= 0x40;
+        }
+
+        // Debug per-layer capture: the raw BG-only and OBJ-only images (ignores
+        // the layer mask, so each layer is viewable independently).
+        if self.dbg_capture {
+            let i = y * FRAME_W + x;
+            let bg_idx = self.mem_read(0x3f00 | ((bg_palette as u16) << 2) | bg_pixel as u16, mapper) & 0x3f;
+            self.bg_layer[i] = 0xff00_0000 | MASTER_PALETTE[bg_idx as usize];
+            self.obj_layer[i] = if sp_pixel != 0 {
+                let si = self.mem_read(0x3f10 | ((sp_palette as u16) << 2) | sp_pixel as u16, mapper) & 0x3f;
+                0xff00_0000 | MASTER_PALETTE[si as usize]
+            } else {
+                0xffff_00ff // magenta = transparent
+            };
+        }
+
+        // Composite honoring the debug layer mask (default 0b11 => normal).
+        let bg_show = if self.dbg_layer_mask & 1 != 0 { bg_pixel } else { 0 };
+        let sp_show = if self.dbg_layer_mask & 2 != 0 { sp_pixel } else { 0 };
+        let pal_addr = match (bg_show != 0, sp_show != 0) {
             (false, false) => 0x3f00, // backdrop
-            (false, true) => 0x3f10 | ((sp_palette as u16) << 2) | sp_pixel as u16,
-            (true, false) => 0x3f00 | ((bg_palette as u16) << 2) | bg_pixel as u16,
+            (false, true) => 0x3f10 | ((sp_palette as u16) << 2) | sp_show as u16,
+            (true, false) => 0x3f00 | ((bg_palette as u16) << 2) | bg_show as u16,
             (true, true) => {
-                // Sprite-0 hit: both opaque, from sprite 0, not at x=255.
-                if is_sprite0 && x != 255 {
-                    if self.status & 0x40 == 0 {
-                        self.dbg_s0_scanline = self.scanline as i32;
-                    }
-                    self.status |= 0x40;
-                }
                 if sp_behind {
-                    0x3f00 | ((bg_palette as u16) << 2) | bg_pixel as u16
+                    0x3f00 | ((bg_palette as u16) << 2) | bg_show as u16
                 } else {
-                    0x3f10 | ((sp_palette as u16) << 2) | sp_pixel as u16
+                    0x3f10 | ((sp_palette as u16) << 2) | sp_show as u16
                 }
             }
         };
@@ -616,6 +653,66 @@ impl Ppu {
     // ---------------- the per-dot clock ----------------
 
     /// Advance one PPU dot. `mapper` supplies CHR + mirroring.
+    // ---- debug harness emitters (see docs/DEBUG_HARNESS.md) ----
+
+    /// OAM as a JSON array of the 64 sprites, for the on-device inspector.
+    pub fn dbg_oam_json(&self) -> String {
+        let tall = self.ctrl & 0x20 != 0;
+        let mut s = String::with_capacity(64 * 96);
+        s.push('[');
+        for i in 0..64 {
+            let b = i * 4;
+            let (y, tile, attr, x) = (self.oam[b], self.oam[b + 1], self.oam[b + 2], self.oam[b + 3]);
+            if i > 0 {
+                s.push(',');
+            }
+            s.push_str(&format!(
+                "{{\"index\":{i},\"x\":{x},\"y\":{y},\"tile\":{tile},\"palette\":{},\"priority\":{},\"flipH\":{},\"flipV\":{},\"size\":\"{}\"}}",
+                attr & 3,
+                (attr >> 5) & 1,
+                (attr >> 6) & 1,
+                (attr >> 7) & 1,
+                if tall { "8x16" } else { "8x8" },
+            ));
+        }
+        s.push(']');
+        s
+    }
+
+    /// The 32 palette entries ($3F00-$3F1F) as ARGB8888 (16 BG + 16 sprite).
+    pub fn dbg_palette_argb(&self) -> [u32; 32] {
+        let mut out = [0u32; 32];
+        for (i, o) in out.iter_mut().enumerate() {
+            *o = 0xff00_0000 | MASTER_PALETTE[(self.palette[i] & 0x3f) as usize];
+        }
+        out
+    }
+
+    /// Both pattern tables (512 tiles) as a 128x256 ARGB sheet, 16 tiles wide,
+    /// coloured with BG palette 0. `DBG_TILES_W`/`_H` describe the dimensions.
+    pub fn dbg_tiles_argb(&self, mapper: &mut dyn Mapper) -> Vec<u32> {
+        const COLS: usize = 16;
+        let w = COLS * 8; // 128
+        let h = (512 / COLS) * 8; // 256
+        let mut out = vec![0xff00_0000u32; w * h];
+        let pal = [self.palette[0], self.palette[1], self.palette[2], self.palette[3]];
+        for t in 0..512usize {
+            let base = (t as u16) * 16;
+            let (tx, ty) = ((t % COLS) * 8, (t / COLS) * 8);
+            for row in 0..8u16 {
+                let lo = mapper.ppu_read(base + row);
+                let hi = mapper.ppu_read(base + row + 8);
+                for col in 0..8usize {
+                    let bit = 7 - col;
+                    let p = (((hi >> bit) & 1) << 1) | ((lo >> bit) & 1);
+                    let ci = (pal[p as usize] & 0x3f) as usize;
+                    out[(ty + row as usize) * w + tx + col] = 0xff00_0000 | MASTER_PALETTE[ci];
+                }
+            }
+        }
+        out
+    }
+
     pub fn tick(&mut self, mapper: &mut dyn Mapper) {
         // `vbl_just_set` is a one-dot flag: it is true only immediately after the
         // dot that set the vblank flag, so a $2002 read (which samples after this

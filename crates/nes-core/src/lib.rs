@@ -135,6 +135,38 @@ impl Nes {
         self.bus.mapper.save_ram()
     }
 
+    // ---- debug harness (see docs/DEBUG_HARNESS.md) ----
+
+    /// Enable/disable per-layer capture. Off by default (zero cost in normal
+    /// play); the frontend turns it on while the Core Debug overlay is open.
+    pub fn dbg_set_capture(&mut self, on: bool) {
+        self.bus.ppu.dbg_capture = on;
+    }
+    /// Which layers composite into the visible frame: bit0=BG, bit1=OBJ.
+    pub fn dbg_set_layer_mask(&mut self, mask: u8) {
+        self.bus.ppu.dbg_layer_mask = mask;
+    }
+    /// The BG-only frame from the last rendered frame (needs capture on).
+    pub fn dbg_bg_layer(&self) -> &[u32] {
+        &self.bus.ppu.bg_layer
+    }
+    /// The OBJ-only frame (magenta = transparent) from the last rendered frame.
+    pub fn dbg_obj_layer(&self) -> &[u32] {
+        &self.bus.ppu.obj_layer
+    }
+    /// OAM as a JSON array of 64 sprites, for the on-device inspector.
+    pub fn dbg_oam_json(&self) -> String {
+        self.bus.ppu.dbg_oam_json()
+    }
+    /// The 32 palette entries as ARGB8888.
+    pub fn dbg_palette_argb(&self) -> [u32; 32] {
+        self.bus.ppu.dbg_palette_argb()
+    }
+    /// The pattern-table tile sheet (`DBG_TILES_W` x `DBG_TILES_H` ARGB8888).
+    pub fn dbg_tiles_argb(&mut self) -> Vec<u32> {
+        self.bus.ppu.dbg_tiles_argb(&mut *self.bus.mapper)
+    }
+
     /// Test hook: force MMC5 extended-attribute mode (to validate a captured state
     /// whose format predates the `$5104` field).
     pub fn dbg_force_ext_attr(&mut self) {
