@@ -627,6 +627,9 @@ impl Mapper for Cnrom {
     fn mirroring(&self) -> Mirroring {
         self.mirroring
     }
+    fn debug_dump(&self) -> String {
+        format!("CNROM: chr_bank={} chr_banks={} prg={}KB", self.chr_bank, self.chr.len() / CHR_BANK, self.prg.len() / 1024)
+    }
 }
 impl SaveState for Cnrom {
     fn save(&self, w: &mut WriteCursor) {

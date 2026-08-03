@@ -79,11 +79,14 @@ static HEADER_FIXES: &[(u32, HeaderFix)] = &[
     (0x1d0f4d6b, HeaderFix::mapper(2)), // Black Bass USA, The (U).nes
     // CNROM (mapper 3) carts wearing a "DiskDude!" header: byte 7 is the string's
     // 'D' (0x44) and byte 6's nibble is 0, so BOTH nibbles are wrong -- the archaic
-    // heuristic can't recover these (it would give mapper 0/NROM, which boots with
-    // dead CHR banking: text renders but banked graphics garble). Boot-verified as
-    // CNROM (32 KiB PRG fixed + 32 KiB CHR banked). Real mapper, not the header's.
-    (0x1d41cc8c, HeaderFix::mapper(3)), // Gyruss (U).nes
-    (0x1d5b03a5, HeaderFix::mapper(2)), // Jackal (U).nes
+    // heuristic can't recover these (it would give mapper 0/NROM, whose dead CHR
+    // banking garbles banked graphics). Boot-verified as CNROM (32 KiB PRG fixed +
+    // 32 KiB CHR banked): CNROM renders Gyruss' solar-system + intro clean, whereas
+    // RAMBO-1 (which the naive header suggests) garbles the borders. NOTE: Gyruss'
+    // in-game score/stage HUD is still missing under CNROM -- a separate rendering
+    // bug (not a mapper mismatch), left for a gameplay-focused pass.
+    (0x1d41cc8c, HeaderFix::mapper(3)),  // Gyruss (U).nes
+    (0x1d5b03a5, HeaderFix::mapper(2)),  // Jackal (U).nes
     (0x35b6febf, HeaderFix::mapper(2)), // NFL Football (U).nes
     (0x3be244ef, HeaderFix::mapper(2)), // Little Mermaid, The (U).nes
     (0x3efa7e44, HeaderFix::mapper(2)), // Mega Girl (Hack).nes
