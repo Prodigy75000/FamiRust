@@ -79,6 +79,8 @@ pub struct Ppu {
     nmi_delayed: bool,
     /// Debug: scanline at which sprite-0 hit was set this frame (-1 = none yet).
     pub dbg_s0_scanline: i32,
+    /// Debug: dot at which sprite-0 hit was set this frame (-1 = none yet).
+    pub dbg_s0_dot: i32,
 
     // ---- background fetch pipeline ----
     bg_next_id: u8,
@@ -113,6 +115,12 @@ pub struct Ppu {
     /// where transparent), captured during rendering when `dbg_capture`.
     pub bg_layer: Vec<u32>,
     pub obj_layer: Vec<u32>,
+    /// Dot at which the second $2006 write last set `v` (−1 = none this scanline).
+    /// Used to make a $2006 write coincident with the dot-256 vertical increment
+    /// "win" over the increment, as on hardware (fixes mid-frame split jitter).
+    v_write_dot: i32,
+    /// Scanline of that write, so the guard only applies on the same line.
+    v_write_line: u16,
 }
 
 impl Default for Ppu {
@@ -141,6 +149,7 @@ impl Default for Ppu {
             vbl_just_cleared: false,
             nmi_delayed: false,
             dbg_s0_scanline: -1,
+            dbg_s0_dot: -1,
             bg_next_id: 0,
             bg_next_attr: 0,
             bg_next_lo: 0,
@@ -160,6 +169,8 @@ impl Default for Ppu {
             dbg_capture: false,
             bg_layer: vec![0; FRAME_W * FRAME_H],
             obj_layer: vec![0; FRAME_W * FRAME_H],
+            v_write_dot: -1,
+            v_write_line: 0,
         }
     }
 }
@@ -344,6 +355,11 @@ impl Ppu {
                     self.t = (self.t & 0xff00) | val as u16;
                     self.v = self.t;
                     self.w = false;
+                    // Remember this write so a coincident dot-256 Y-increment does
+                    // not clobber it (hardware: the write wins). `self.dot` here is
+                    // the dot AFTER this CPU cycle's three PPU ticks.
+                    self.v_write_dot = self.dot as i32;
+                    self.v_write_line = self.scanline;
                 }
             }
             7 => {
@@ -610,6 +626,7 @@ impl Ppu {
         if bg_pixel != 0 && sp_pixel != 0 && is_sprite0 && x != 255 {
             if self.status & 0x40 == 0 {
                 self.dbg_s0_scanline = self.scanline as i32;
+                self.dbg_s0_dot = self.dot as i32;
             }
             self.status |= 0x40;
         }
@@ -735,9 +752,18 @@ impl Ppu {
                 self.fetch_bg(mapper);
             }
             if self.dot == 256 {
-                self.increment_y();
+                // A $2006 write that landed on this exact dot (this scanline) has
+                // just set `v` for the split; the coincident increment must not
+                // re-bump it (matches hardware — fixes Bart/Micro Machines status-
+                // bar jitter). Otherwise the vertical position advances normally.
+                let coincident_write =
+                    self.v_write_line == self.scanline && self.v_write_dot == 256;
+                if !coincident_write {
+                    self.increment_y();
+                }
             }
             if self.dot == 257 {
+                self.v_write_dot = -1; // consumed; do not carry to the next line
                 self.load_shifters();
                 self.copy_horizontal();
                 // Evaluate + fetch sprites for the next scanline.
@@ -766,6 +792,7 @@ impl Ppu {
             self.status &= !0xe0; // clear vblank, sprite-0, overflow
             self.vbl_just_cleared = true;
             self.dbg_s0_scanline = -1;
+            self.dbg_s0_dot = -1;
         }
 
         // Propagate the NMI line with a one-tick delay.
@@ -876,5 +903,53 @@ impl SaveState for Ppu {
         r.bytes(&mut self.sprite_x)?;
         self.sprite_zero_present = r.bool()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cart;
+
+    /// A minimal NROM cart, just to satisfy `tick`'s CHR/mirroring needs.
+    fn nrom_mapper() -> Box<dyn cart::Mapper> {
+        let mut rom = vec![0u8; 16];
+        rom[0..4].copy_from_slice(b"NES\x1a");
+        rom[4] = 1; // 16 KiB PRG
+        rom[5] = 1; // 8 KiB CHR
+        rom.extend(std::iter::repeat(0u8).take(16 * 1024 + 8 * 1024));
+        cart::make_mapper(cart::Cartridge::from_ines(&rom).unwrap()).unwrap()
+    }
+
+    /// Positions the PPU at (scanline 175, dot 256) with rendering on and fine Y 0,
+    /// then performs the second $2006 write (v <- t) exactly as the bus would after
+    /// that CPU cycle's three ticks, and ticks the coincident dot-256 once.
+    fn run_split_write(coincident: bool) -> u16 {
+        let mut ppu = Ppu::new();
+        let mut mapper = nrom_mapper();
+        ppu.mask = 0x08; // show background => rendering enabled
+        ppu.scanline = 175;
+        ppu.dot = 256;
+        ppu.v = 0x72a6; // mid-render address, fine Y = 7
+        ppu.t = 0x02c0; // target: coarse Y 22, fine Y 0 (the status-bar scroll)
+        ppu.w = true; // next $2006 write is the second byte
+        ppu.write_register(6, 0xc0, &mut *mapper); // v <- t = 0x02c0, records dot 256
+        if !coincident {
+            // Simulate the write having landed a couple dots earlier, so the dot-256
+            // increment is *not* coincident and must apply normally.
+            ppu.v_write_dot = -1;
+        }
+        ppu.tick(&mut *mapper); // processes dot 256 (the Y increment)
+        (ppu.v >> 12) & 0x7 // resulting fine Y
+    }
+
+    /// Regression: a second $2006 write coincident with the dot-256 vertical
+    /// increment must win — fine Y stays 0 (the value the game wrote). This is the
+    /// Bart vs. the Space Mutants / Micro Machines status-bar jitter fix.
+    #[test]
+    fn dot256_coincident_2006_write_survives_y_increment() {
+        assert_eq!(run_split_write(true), 0, "coincident write must not be re-incremented");
+        // And with no coincident write, the dot-256 increment applies as usual.
+        assert_eq!(run_split_write(false), 1, "non-coincident increment must still fire");
     }
 }

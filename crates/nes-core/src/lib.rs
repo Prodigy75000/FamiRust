@@ -104,6 +104,16 @@ impl Nes {
         self.bus.ppu.dbg_s0_scanline
     }
 
+    /// Debug: the dot (0..340) at which sprite-0 hit was set this frame (-1 = none).
+    pub fn dbg_sprite0_dot(&self) -> i32 {
+        self.bus.ppu.dbg_s0_dot
+    }
+
+    /// Debug: absolute PPU frame counter.
+    pub fn dbg_frame(&self) -> u64 {
+        self.bus.ppu.frame
+    }
+
     /// Debug: current PPUMASK (bit1 = show BG left-8, bit2 = show sprites left-8).
     pub fn dbg_ppu_mask(&self) -> u8 {
         self.bus.ppu.mask

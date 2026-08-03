@@ -144,13 +144,36 @@ fn main() -> ExitCode {
             let hud: u32 = (190..240)
                 .map(|y| (0..256).filter(|&x| fb[y * 256 + x] != prev[y * 256 + x]).count() as u32)
                 .sum();
+            // Separator probe: in rows 170..185, find the row that is most "white"
+            // (near-white px count). Reports the white line's Y and how solid it is.
+            let is_white = |p: u32| {
+                let (r, g, b) = ((p >> 16) & 0xff, (p >> 8) & 0xff, p & 0xff);
+                r > 0xd0 && g > 0xd0 && b > 0xd0
+            };
+            let (mut sep_y, mut sep_n) = (0usize, 0u32);
+            for y in 168..186 {
+                let n = (0..256).filter(|&x| is_white(fb[y * 256 + x])).count() as u32;
+                if n > sep_n {
+                    sep_n = n;
+                    sep_y = y;
+                }
+            }
+            // Also: the exact rows in 168..214 that changed vs prev, with count.
+            let hud_rows: Vec<String> = (168..214)
+                .filter_map(|y| {
+                    let c = (0..256).filter(|&x| fb[y * 256 + x] != prev[y * 256 + x]).count();
+                    (c > 0).then(|| format!("r{y}={c}"))
+                })
+                .collect();
+            let flag = if sep_y != 176 || hud > 500 { " <<GLITCH" } else { "" };
             println!(
-                "frame +{k}: s0_hit={}, changed_rows={}, HUD_band_changed_px={}, top: {}",
+                "frame +{k} (abs f{}): s0_hit=({},{}), sep_y={sep_y}(white={sep_n}), HUD_px={hud}{flag}",
+                nes.dbg_frame(),
                 nes.dbg_sprite0_scanline(),
-                worst.len(),
-                hud,
-                top.join(" ")
+                nes.dbg_sprite0_dot(),
             );
+            let _ = &hud_rows;
+            let _ = (worst.len(), &top);
             // Dump frames where the HUD band churns hard (the flicker), plus the
             // clean frame right before it, so the HUD can be compared directly.
             if hud > 500 {
