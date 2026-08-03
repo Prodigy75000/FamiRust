@@ -1265,6 +1265,75 @@ impl SaveState for Nina113 {
     }
 }
 
+/// Mapper 232: Camerica/Codemasters BF9096 (the Quattro multicarts). Two-level
+/// PRG banking: a write to $8000-$BFFF sets the 64 KiB block (bits 4-3), a write
+/// to $C000-$FFFF sets the inner 16 KiB bank (bits 1-0). $8000 shows block*4+inner;
+/// $C000 shows the block's last 16 KiB (block*4+3). 8 KiB CHR-RAM.
+pub struct Bf9096 {
+    prg: Vec<u8>,
+    chr: Vec<u8>, // 8 KiB CHR-RAM
+    prg_banks16: usize,
+    block: u8, // outer 64 KiB block
+    inner: u8, // inner 16 KiB bank
+    mirroring: Mirroring,
+}
+impl Bf9096 {
+    pub fn new(cart: Cartridge) -> Self {
+        Bf9096 {
+            prg_banks16: (cart.prg_rom.len() / PRG_BANK).max(1),
+            prg: cart.prg_rom,
+            chr: if cart.chr_rom.is_empty() { vec![0u8; CHR_BANK] } else { cart.chr_rom },
+            block: 0,
+            inner: 0,
+            mirroring: cart.mirroring,
+        }
+    }
+    #[inline]
+    fn bank16(&self, low: bool) -> usize {
+        let b = ((self.block as usize) << 2) | if low { self.inner as usize } else { 3 };
+        b % self.prg_banks16
+    }
+}
+impl Mapper for Bf9096 {
+    fn cpu_read(&mut self, addr: u16) -> u8 {
+        match addr {
+            0x8000..=0xbfff => self.prg[self.bank16(true) * PRG_BANK + (addr as usize - 0x8000)],
+            0xc000..=0xffff => self.prg[self.bank16(false) * PRG_BANK + (addr as usize - 0xc000)],
+            _ => 0,
+        }
+    }
+    fn cpu_write(&mut self, addr: u16, val: u8) {
+        match addr {
+            0x8000..=0xbfff => self.block = (val >> 3) & 3,
+            0xc000..=0xffff => self.inner = val & 3,
+            _ => {}
+        }
+    }
+    fn ppu_read(&mut self, addr: u16) -> u8 {
+        self.chr[addr as usize & (self.chr.len() - 1)]
+    }
+    fn ppu_write(&mut self, addr: u16, val: u8) {
+        let n = self.chr.len();
+        self.chr[addr as usize & (n - 1)] = val;
+    }
+    fn mirroring(&self) -> Mirroring {
+        self.mirroring
+    }
+}
+impl SaveState for Bf9096 {
+    fn save(&self, w: &mut WriteCursor) {
+        w.bytes(&self.chr);
+        w.u8(self.block);
+        w.u8(self.inner);
+    }
+    fn load(&mut self, r: &mut ReadCursor) -> Result<(), LoadError> {
+        r.bytes(&mut self.chr)?;
+        self.block = r.u8()?;
+        self.inner = r.u8()?;
+        Ok(())
+    }
+}
+
 /// Mappers 9 (MMC2, Punch-Out) and 10 (MMC4, Fire Emblem). Both use a pair of
 /// CHR "latches" that flip when the PPU fetches tile $FD vs $FE, selecting which
 /// 4 KiB CHR bank shows. MMC2 switches 8 KiB PRG at $8000 (three fixed banks
@@ -2600,6 +2669,7 @@ pub fn make_mapper(cart: Cartridge) -> Result<Box<dyn Mapper>, CartError> {
         11 => Ok(Box::new(BankSwap::new(cart, BankSwapKind::ColorDreams))),
         13 => Ok(Box::new(Cprom::new(cart))),
         113 => Ok(Box::new(Nina113::new(cart))),
+        232 => Ok(Box::new(Bf9096::new(cart))),
         // Mapper 34: NINA-001 (CHR ROM) vs BNROM (CHR RAM).
         34 if !cart.chr_is_ram => Ok(Box::new(Nina001::new(cart))),
         34 => Ok(Box::new(BankSwap::new(cart, BankSwapKind::Bnrom))),
