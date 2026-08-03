@@ -719,6 +719,11 @@ pub struct Mmc3 {
     regs: [u8; 8],   // R0..R7 bank values
     mirroring: Mirroring,
 
+    // TQROM (mapper 119): CHR ROM + a separate 8 KiB CHR-RAM; each 1 KiB bank's
+    // bit 6 selects RAM (empty + not `tqrom` for plain TxROM, so identical there).
+    tqrom: bool,
+    chr_ram: Vec<u8>,
+
     // scanline IRQ
     irq_latch: u8,
     irq_counter: u8,
@@ -729,6 +734,13 @@ pub struct Mmc3 {
 }
 impl Mmc3 {
     pub fn new(cart: Cartridge) -> Self {
+        Self::with_kind(cart, false)
+    }
+    /// TQROM (mapper 119): MMC3 with 64 KiB CHR ROM + 8 KiB CHR RAM.
+    pub fn new_tqrom(cart: Cartridge) -> Self {
+        Self::with_kind(cart, true)
+    }
+    fn with_kind(cart: Cartridge, tqrom: bool) -> Self {
         let prg_banks8 = (cart.prg_rom.len() / (8 * 1024)).max(1);
         let chr_banks1 = (cart.chr_rom.len() / 1024).max(1);
         Mmc3 {
@@ -741,6 +753,8 @@ impl Mmc3 {
             bank_select: 0,
             regs: [0; 8],
             mirroring: cart.mirroring,
+            tqrom,
+            chr_ram: if tqrom { vec![0u8; 8 * 1024] } else { Vec::new() },
             irq_latch: 0,
             irq_counter: 0,
             irq_reload: false,
@@ -767,23 +781,32 @@ impl Mmc3 {
         bank(b) + off
     }
 
-    fn chr_offset(&self, addr: u16) -> usize {
+    /// Map a PPU pattern address to `(is_ram, index)`. `is_ram` is always false
+    /// unless this is a TQROM cart whose selected bank has bit 6 set.
+    fn chr_map(&self, addr: u16) -> (bool, usize) {
         let a = addr as usize & 0x1fff;
         let inv = self.bank_select & 0x80 != 0; // CHR A12 inversion
         let region = a / 0x400; // 0..7 (1 KiB windows)
         let r = if inv { region ^ 4 } else { region };
-        // R0/R1 are 2 KiB banks (low bit ignored); R2..R5 are 1 KiB.
-        let bank1 = match r {
-            0 => (self.regs[0] & 0xfe) as usize,
-            1 => (self.regs[0] & 0xfe) as usize + 1,
-            2 => (self.regs[1] & 0xfe) as usize,
-            3 => (self.regs[1] & 0xfe) as usize + 1,
-            4 => self.regs[2] as usize,
-            5 => self.regs[3] as usize,
-            6 => self.regs[4] as usize,
-            _ => self.regs[5] as usize,
+        // The 7-bit bank value the MMC3 drives for this 1 KiB slot. R0/R1 are
+        // 2 KiB banks (low bit forced by the sub-slot); R2..R5 are 1 KiB.
+        let v = match r {
+            0 => self.regs[0] & 0xfe,
+            1 => (self.regs[0] & 0xfe) | 1,
+            2 => self.regs[1] & 0xfe,
+            3 => (self.regs[1] & 0xfe) | 1,
+            4 => self.regs[2],
+            5 => self.regs[3],
+            6 => self.regs[4],
+            _ => self.regs[5],
         };
-        (bank1 % self.chr_banks1) * 0x400 + (a & 0x3ff)
+        let off = a & 0x3ff;
+        if self.tqrom && v & 0x40 != 0 {
+            (true, (v as usize & 0x07) * 0x400 + off) // 8 KiB CHR-RAM
+        } else {
+            let bank = if self.tqrom { (v & 0x3f) as usize } else { v as usize };
+            (false, (bank % self.chr_banks1) * 0x400 + off)
+        }
     }
 
     /// Clock the IRQ counter on a filtered A12 rising edge.
@@ -860,8 +883,10 @@ impl Mapper for Mmc3 {
             self.clock_irq();
         }
         self.prev_a12 = a12;
-        let off = self.chr_offset(addr);
-        self.chr[off % self.chr.len()]
+        match self.chr_map(addr) {
+            (true, off) => self.chr_ram[off % self.chr_ram.len()],
+            (false, off) => self.chr[off % self.chr.len()],
+        }
     }
     fn ppu_write(&mut self, addr: u16, val: u8) {
         let a12 = addr & 0x1000 != 0;
@@ -869,9 +894,16 @@ impl Mapper for Mmc3 {
             self.clock_irq();
         }
         self.prev_a12 = a12;
-        if self.chr_is_ram {
-            let off = self.chr_offset(addr) % self.chr.len();
-            self.chr[off] = val;
+        match self.chr_map(addr) {
+            (true, off) => {
+                let n = self.chr_ram.len();
+                self.chr_ram[off % n] = val;
+            }
+            (false, off) if self.chr_is_ram => {
+                let n = self.chr.len();
+                self.chr[off % n] = val;
+            }
+            _ => {}
         }
     }
     fn mirroring(&self) -> Mirroring {
@@ -886,6 +918,9 @@ impl SaveState for Mmc3 {
         w.bytes(&self.prg_ram);
         if self.chr_is_ram {
             w.bytes(&self.chr);
+        }
+        if self.tqrom {
+            w.bytes(&self.chr_ram);
         }
         w.u8(self.bank_select);
         w.bytes(&self.regs);
@@ -908,6 +943,9 @@ impl SaveState for Mmc3 {
             let mut chr = vec![0u8; self.chr.len()];
             r.bytes(&mut chr)?;
             self.chr = chr;
+        }
+        if self.tqrom {
+            r.bytes(&mut self.chr_ram)?;
         }
         self.bank_select = r.u8()?;
         r.bytes(&mut self.regs)?;
@@ -2668,6 +2706,7 @@ pub fn make_mapper(cart: Cartridge) -> Result<Box<dyn Mapper>, CartError> {
         9 => Ok(Box::new(Mmc2::new(cart, false))),
         11 => Ok(Box::new(BankSwap::new(cart, BankSwapKind::ColorDreams))),
         13 => Ok(Box::new(Cprom::new(cart))),
+        119 => Ok(Box::new(Mmc3::new_tqrom(cart))),
         113 => Ok(Box::new(Nina113::new(cart))),
         232 => Ok(Box::new(Bf9096::new(cart))),
         // Mapper 34: NINA-001 (CHR ROM) vs BNROM (CHR RAM).
