@@ -408,25 +408,42 @@ impl Ppu {
                 self.bg_next_id = self.mem_read(0x2000 | (self.v & 0x0fff), mapper);
             }
             2 => {
-                let addr = 0x23c0
-                    | (self.v & 0x0c00)
-                    | ((self.v >> 4) & 0x38)
-                    | ((self.v >> 2) & 0x07);
-                let attr = self.mem_read(addr, mapper);
-                let shift = ((self.v >> 4) & 4) | (self.v & 2);
-                self.bg_next_attr = (attr >> shift) & 0x3;
+                // MMC5 extended-attribute mode overrides the palette per tile.
+                let nt_tile = self.v & 0x03ff;
+                self.bg_next_attr = match mapper.ppu_ext_attr(nt_tile) {
+                    Some(pal) => pal,
+                    None => {
+                        let addr = 0x23c0
+                            | (self.v & 0x0c00)
+                            | ((self.v >> 4) & 0x38)
+                            | ((self.v >> 2) & 0x07);
+                        let attr = self.mem_read(addr, mapper);
+                        let shift = ((self.v >> 4) & 4) | (self.v & 2);
+                        (attr >> shift) & 0x3
+                    }
+                };
             }
             4 => {
-                let base = if self.ctrl & 0x10 != 0 { 0x1000 } else { 0 };
                 let fine_y = (self.v >> 12) & 7;
-                let addr = base + (self.bg_next_id as u16) * 16 + fine_y;
-                self.bg_next_lo = self.mem_read(addr, mapper);
+                let nt_tile = self.v & 0x03ff;
+                self.bg_next_lo = match mapper.ppu_ext_pattern(nt_tile, self.bg_next_id, fine_y, false) {
+                    Some(b) => b,
+                    None => {
+                        let base = if self.ctrl & 0x10 != 0 { 0x1000 } else { 0 };
+                        self.mem_read(base + (self.bg_next_id as u16) * 16 + fine_y, mapper)
+                    }
+                };
             }
             6 => {
-                let base = if self.ctrl & 0x10 != 0 { 0x1000 } else { 0 };
                 let fine_y = (self.v >> 12) & 7;
-                let addr = base + (self.bg_next_id as u16) * 16 + fine_y + 8;
-                self.bg_next_hi = self.mem_read(addr, mapper);
+                let nt_tile = self.v & 0x03ff;
+                self.bg_next_hi = match mapper.ppu_ext_pattern(nt_tile, self.bg_next_id, fine_y, true) {
+                    Some(b) => b,
+                    None => {
+                        let base = if self.ctrl & 0x10 != 0 { 0x1000 } else { 0 };
+                        self.mem_read(base + (self.bg_next_id as u16) * 16 + fine_y + 8, mapper)
+                    }
+                };
             }
             7 => self.increment_coarse_x(),
             _ => {}

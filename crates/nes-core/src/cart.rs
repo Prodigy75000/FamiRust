@@ -233,6 +233,31 @@ pub trait Mapper: SaveState {
     /// Start of PPU scanline `scanline` (0..=261); `rendering` = BG or sprites
     /// enabled. MMC5 clocks its in-frame scanline IRQ counter here. Default no-op.
     fn ppu_scanline(&mut self, _scanline: u16, _rendering: bool) {}
+
+    /// MMC5 extended-attribute mode: per-tile background palette (2 bits) read from
+    /// ExRAM, indexed by the tile's position within the nametable (`v & 0x3FF`).
+    /// `None` = use the normal attribute-table byte. Default `None`.
+    fn ppu_ext_attr(&mut self, _nt_tile: u16) -> Option<u8> {
+        None
+    }
+
+    /// MMC5 extended-attribute mode: one background pattern byte for the tile at
+    /// nametable position `nt_tile`, fetched from that tile's ExRAM-selected 4 KiB
+    /// CHR bank. `tile_id` is the nametable byte, `fine_y` 0..7, `hi` selects the
+    /// upper bit-plane. `None` = use the normal pattern-table fetch. Default `None`.
+    fn ppu_ext_pattern(&mut self, _nt_tile: u16, _tile_id: u8, _fine_y: u16, _hi: bool) -> Option<u8> {
+        None
+    }
+
+    /// Human-readable dump of mapper-internal registers, for headless diagnosis.
+    /// Default empty.
+    fn debug_dump(&self) -> String {
+        String::new()
+    }
+
+    /// Test hook: force MMC5 extended-attribute mode on (to validate a captured
+    /// state whose format predates the `$5104` field). Default no-op.
+    fn dbg_force_ext_attr(&mut self) {}
 }
 
 /// Mapper 0: fixed PRG (16 or 32 KiB), fixed CHR. The bring-up mapper.
@@ -1666,6 +1691,7 @@ pub struct Mmc5 {
     chr_bg: [u8; 4],   // $5128-$512B (background CHR in 8x16 mode)
     chr_upper: u8,     // $5130 high bank bits
     nt_map: u8,        // $5105
+    exram_mode: u8,    // $5104: 0/1 PPU (extra-NT / extended-attr), 2/3 CPU RAM
 
     mult_a: u8, // $5205
     mult_b: u8, // $5206
@@ -1698,6 +1724,7 @@ impl Mmc5 {
             chr_bg: [0; 4],
             chr_upper: 0,
             nt_map: 0,
+            exram_mode: 0,
             mult_a: 0,
             mult_b: 0,
             irq_scanline: 0,
@@ -1809,6 +1836,7 @@ impl Mapper for Mmc5 {
         match addr {
             0x5100 => self.prg_mode = val & 3,
             0x5101 => self.chr_mode = val & 3,
+            0x5104 => self.exram_mode = val & 3,
             0x5105 => self.nt_map = val,
             0x5113 => self.prg_regs[0] = val,
             0x5114..=0x5117 => self.prg_regs[(addr - 0x5113) as usize] = val,
@@ -1821,7 +1849,7 @@ impl Mapper for Mmc5 {
             0x5206 => self.mult_b = val,
             0x5c00..=0x5fff => self.exram[addr as usize - 0x5c00] = val,
             0x6000..=0xffff => self.prg_write(addr, val),
-            _ => {} // $5102/3 RAM protect, $5104/6/7 exram/fill, audio -> ignored
+            _ => {} // $5102/3 RAM protect, $5106/7 fill-mode, audio -> ignored
         }
     }
 
@@ -1876,6 +1904,33 @@ impl Mapper for Mmc5 {
         self.irq_pending && self.irq_enable
     }
 
+    fn ppu_ext_attr(&mut self, nt_tile: u16) -> Option<u8> {
+        // Mode 1 = extended attribute: each ExRAM byte's top 2 bits are the tile's
+        // palette. (Modes 0/2/3 use the normal attribute table.)
+        if self.exram_mode != 1 {
+            return None;
+        }
+        Some((self.exram[nt_tile as usize & 0x3ff] >> 6) & 3)
+    }
+
+    fn ppu_ext_pattern(&mut self, nt_tile: u16, tile_id: u8, fine_y: u16, hi: bool) -> Option<u8> {
+        // Mode 1: the low 6 bits of the tile's ExRAM byte (plus $5130's 2 high bits)
+        // select a 4 KiB CHR bank for THAT background tile, so a screen can use far
+        // more than 256 distinct tiles -- exactly how Koei's dense menus are drawn.
+        if self.exram_mode != 1 {
+            return None;
+        }
+        let ex = self.exram[nt_tile as usize & 0x3ff] as usize;
+        let bank4k = ((self.chr_upper as usize) << 6) | (ex & 0x3f);
+        let off = tile_id as usize * 16 + fine_y as usize + if hi { 8 } else { 0 };
+        let idx = (bank4k * 0x1000 + off) % self.chr.len().max(1);
+        Some(self.chr[idx])
+    }
+
+    fn dbg_force_ext_attr(&mut self) {
+        self.exram_mode = 1;
+    }
+
     fn mirroring(&self) -> Mirroring {
         let m = self.nt_map;
         let s = [m & 3, (m >> 2) & 3, (m >> 4) & 3, (m >> 6) & 3];
@@ -1886,6 +1941,28 @@ impl Mapper for Mmc5 {
             [1, 1, 1, 1] => Mirroring::SingleScreenB,
             _ => Mirroring::Horizontal, // ExRAM / fill-mode NTs approximated
         }
+    }
+
+    fn debug_dump(&self) -> String {
+        let m = self.nt_map;
+        let nt = [m & 3, (m >> 2) & 3, (m >> 4) & 3, (m >> 6) & 3];
+        let ex_nz = self.exram.iter().filter(|&&b| b != 0).count();
+        format!(
+            "MMC5: prg_mode={} chr_mode={} tall_sprites={} nt_map=${:02x} quads={:?} \
+             chr_spr={:02x?} chr_bg={:02x?} chr_upper={} prg_regs={:02x?} \
+             exram_nonzero={}/1024 exram[0..16]={:02x?}",
+            self.prg_mode,
+            self.chr_mode,
+            self.tall_sprites,
+            m,
+            nt,
+            self.chr_spr,
+            self.chr_bg,
+            self.chr_upper,
+            self.prg_regs,
+            ex_nz,
+            &self.exram[..16],
+        )
     }
 }
 impl SaveState for Mmc5 {
@@ -1908,6 +1985,7 @@ impl SaveState for Mmc5 {
         }
         w.u8(self.chr_upper);
         w.u8(self.nt_map);
+        w.u8(self.exram_mode);
         w.u8(self.mult_a);
         w.u8(self.mult_b);
         w.u8(self.irq_scanline);
@@ -1938,6 +2016,7 @@ impl SaveState for Mmc5 {
         }
         self.chr_upper = r.u8()?;
         self.nt_map = r.u8()?;
+        self.exram_mode = r.u8()?;
         self.mult_a = r.u8()?;
         self.mult_b = r.u8()?;
         self.irq_scanline = r.u8()?;

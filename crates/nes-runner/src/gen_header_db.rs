@@ -72,19 +72,33 @@ fn main() {
             continue; // trust curated NES 2.0 headers
         }
         let hmap = ((d[7] & 0xf0) | (d[6] >> 4)) as u16;
+        let low = (d[6] >> 4) as u16;
         let chr_ram = d[5] == 0;
-        let Some(&(_, _, cm)) = PATTERNS
-            .iter()
-            .find(|&&(m, needs_ram, _)| m == hmap && (!needs_ram || chr_ram))
-        else {
+        // Two sources of a correction candidate:
+        //  (a) a known mislabel PATTERN keyed on the naive (both-nibble) mapper;
+        //  (b) DiskDude/archaic recovery: byte 7 is clobbered ('D'=0x44), so the
+        //      core now parses mapper = low nibble only. That's right when the real
+        //      mapper is <16, but wrong for >=16 carts (RAMBO-1=64, ...) where the
+        //      high nibble was real. Recover it by testing 0x40|low (the value the
+        //      corrupt 'D' nibble encodes) and keep it only if it boots and the
+        //      default low-nibble parse does not.
+        let archaic = (d[7] & 0x0c) != 0;
+        let cm: u16 = if let Some(&(_, _, c)) =
+            PATTERNS.iter().find(|&&(m, needs_ram, _)| m == hmap && (!needs_ram || chr_ram))
+        {
+            c
+        } else if archaic && (0x40 | low) != low {
+            0x40 | low
+        } else {
             continue;
         };
         tested += 1;
 
-        // Render under the correction (header patched) and under the header mapper.
+        // Render under the correction (forced via a CLEAN header) and under the
+        // core's current default parse of the raw bytes.
         let mut fixed = d.clone();
         fixed[6] = (fixed[6] & 0x0f) | (((cm as u8) & 0x0f) << 4);
-        fixed[7] = (fixed[7] & 0x0f) | ((cm as u8) & 0xf0);
+        fixed[7] = (cm as u8) & 0xf0; // clean byte 7 (low bits 0 => reliable, no archaic drop)
         let corrected_px = peak_px(&fixed, frames);
         let header_px = peak_px(&d, frames);
 

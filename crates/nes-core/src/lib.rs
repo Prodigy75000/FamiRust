@@ -40,7 +40,7 @@ pub const STATE_MAGIC: &[u8; 8] = b"FAMIRST1";
 /// Save-state layout version. Bump on ANY change to the serialized field set or
 /// order; older builds refuse a newer version cleanly (never panic, never guess).
 /// v2: added the PPU vbl_just_cleared field (sub-cycle timing rework).
-pub const STATE_VERSION: u16 = 2;
+pub const STATE_VERSION: u16 = 3;
 
 /// A whole NES: CPU plus the bus that owns every other device.
 pub struct Nes {
@@ -116,6 +116,21 @@ impl Nes {
 
     pub fn dbg_halted(&self) -> bool {
         self.cpu.halted
+    }
+
+    pub fn dbg_mapper(&self) -> String {
+        self.bus.mapper.debug_dump()
+    }
+
+    /// Test hook: force MMC5 extended-attribute mode (to validate a captured state
+    /// whose format predates the `$5104` field).
+    pub fn dbg_force_ext_attr(&mut self) {
+        self.bus.mapper.dbg_force_ext_attr();
+    }
+
+    /// PPUCTRL byte (for diagnosing which nametable/pattern table is selected).
+    pub fn dbg_ppu_ctrl(&self) -> u8 {
+        self.bus.ppu.ctrl
     }
 
     /// Serialize the entire machine to a byte-identical snapshot. The layout is
@@ -197,7 +212,7 @@ mod tests {
         let nes = Nes::from_rom(&synth_rom()).unwrap();
         let snap = nes.save_state();
         assert_eq!(&snap[0..8], b"FAMIRST1");
-        assert_eq!(&snap[8..10], &[0x02, 0x00]); // format_version = 2, LE
+        assert_eq!(&snap[8..10], &[0x03, 0x00]); // format_version = 3, LE
         // NROM 16K PRG + CHR ROM (no CHR RAM): size is deterministic.
         // header(10) + cpu(15) + ram(2048) + ppu + apu + 2 pads + mapper(prg_ram
         // 8192) + open_bus(1). Assert it is fixed and matches state_size().

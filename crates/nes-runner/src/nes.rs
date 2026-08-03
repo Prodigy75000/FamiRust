@@ -81,7 +81,14 @@ fn main() -> ExitCode {
     if let Some(state_path) = args.next() {
         match std::fs::read(&state_path) {
             Ok(bytes) => match nes.load_state(&bytes) {
-                Ok(()) => println!("loaded state {state_path} ({} bytes)", bytes.len()),
+                Ok(()) => {
+                    println!("loaded state {state_path} ({} bytes)", bytes.len());
+                    if std::env::var("MMC5_EXTATTR").is_ok() {
+                        nes.dbg_force_ext_attr();
+                        println!("(forced MMC5 extended-attribute mode)");
+                    }
+                    println!("PPUCTRL=${:02x}  {}", nes.dbg_ppu_ctrl(), nes.dbg_mapper());
+                }
                 Err(e) => {
                     eprintln!("state load failed: {e:?}");
                     return ExitCode::FAILURE;
