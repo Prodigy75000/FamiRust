@@ -23,3 +23,6 @@
 /dumps/fullset/
 /dumps/fullset_10785/
 /dumps/classify_usa/
+
+# Local convenience junction -> TrophyHubAndroid app jniLibs (deploy target)
+android-jnilibs/
