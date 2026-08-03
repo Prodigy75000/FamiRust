@@ -1408,6 +1408,109 @@ impl SaveState for Bf9096 {
     }
 }
 
+/// Mapper 68: Sunsoft-4. Four 2 KiB CHR banks ($8000/$9000/$A000/$B000), a 16 KiB
+/// PRG bank at $8000 ($F000, last 16 KiB fixed at $C000), and a mirroring/control
+/// register ($E000: bits 1-0 = V/H/1scA/1scB). The CHR-ROM-as-nametable feature
+/// ($E000.4 with the $C000/$D000 banks) is deferred -- After Burner's title menu
+/// uses plain CIRAM; add it if a game needs ROM nametables.
+#[allow(dead_code)]
+pub struct Sunsoft4 {
+    prg: Vec<u8>,
+    chr: Vec<u8>,
+    prg_ram: Vec<u8>,
+    prg_banks16: usize,
+    chr_banks2k: usize,
+    chr_regs: [u8; 4],
+    nt_regs: [u8; 2],
+    control: u8,
+    prg_bank: u8,
+    mirroring: Mirroring,
+}
+impl Sunsoft4 {
+    pub fn new(cart: Cartridge) -> Self {
+        Sunsoft4 {
+            prg_banks16: (cart.prg_rom.len() / PRG_BANK).max(1),
+            chr_banks2k: (cart.chr_rom.len() / 0x800).max(1),
+            prg: cart.prg_rom,
+            chr: cart.chr_rom,
+            prg_ram: cart.prg_ram,
+            chr_regs: [0; 4],
+            nt_regs: [0; 2],
+            control: 0,
+            prg_bank: 0,
+            mirroring: cart.mirroring,
+        }
+    }
+}
+impl Mapper for Sunsoft4 {
+    fn cpu_read(&mut self, addr: u16) -> u8 {
+        match addr {
+            0x6000..=0x7fff => self.prg_ram[(addr as usize - 0x6000) & (self.prg_ram.len() - 1)],
+            0x8000..=0xbfff => {
+                let bank = self.prg_bank as usize % self.prg_banks16;
+                self.prg[bank * PRG_BANK + (addr as usize - 0x8000)]
+            }
+            0xc000..=0xffff => self.prg[(self.prg_banks16 - 1) * PRG_BANK + (addr as usize - 0xc000)],
+            _ => 0,
+        }
+    }
+    fn cpu_write(&mut self, addr: u16, val: u8) {
+        match addr {
+            0x6000..=0x7fff => {
+                let n = self.prg_ram.len();
+                self.prg_ram[(addr as usize - 0x6000) & (n - 1)] = val;
+            }
+            0x8000..=0x8fff => self.chr_regs[0] = val,
+            0x9000..=0x9fff => self.chr_regs[1] = val,
+            0xa000..=0xafff => self.chr_regs[2] = val,
+            0xb000..=0xbfff => self.chr_regs[3] = val,
+            0xc000..=0xcfff => self.nt_regs[0] = val & 0x7f,
+            0xd000..=0xdfff => self.nt_regs[1] = val & 0x7f,
+            0xe000..=0xefff => {
+                self.control = val;
+                self.mirroring = match val & 3 {
+                    0 => Mirroring::Vertical,
+                    1 => Mirroring::Horizontal,
+                    2 => Mirroring::SingleScreenA,
+                    _ => Mirroring::SingleScreenB,
+                };
+            }
+            0xf000..=0xffff => self.prg_bank = val & 0x0f,
+            _ => {}
+        }
+    }
+    fn ppu_read(&mut self, addr: u16) -> u8 {
+        let w = ((addr >> 11) & 3) as usize; // 2 KiB window 0..3
+        let bank = self.chr_regs[w] as usize % self.chr_banks2k;
+        self.chr[(bank * 0x800 + (addr as usize & 0x7ff)) % self.chr.len()]
+    }
+    fn ppu_write(&mut self, _addr: u16, _val: u8) {}
+    fn mirroring(&self) -> Mirroring {
+        self.mirroring
+    }
+}
+impl SaveState for Sunsoft4 {
+    fn save(&self, w: &mut WriteCursor) {
+        w.bytes(&self.prg_ram);
+        w.bytes(&self.chr_regs);
+        w.bytes(&self.nt_regs);
+        w.u8(self.control);
+        w.u8(self.prg_bank);
+        w.u8(mirroring_code(self.mirroring));
+    }
+    fn load(&mut self, r: &mut ReadCursor) -> Result<(), LoadError> {
+        let mut ram = vec![0u8; self.prg_ram.len()];
+        r.bytes(&mut ram)?;
+        self.prg_ram = ram;
+        r.bytes(&mut self.chr_regs)?;
+        r.bytes(&mut self.nt_regs)?;
+        self.control = r.u8()?;
+        self.prg_bank = r.u8()?;
+        self.mirroring = mirroring_from_code(r.u8()?)?;
+        Ok(())
+    }
+}
+
 /// Mappers 9 (MMC2, Punch-Out) and 10 (MMC4, Fire Emblem). Both use a pair of
 /// CHR "latches" that flip when the PPU fetches tile $FD vs $FE, selecting which
 /// 4 KiB CHR bank shows. MMC2 switches 8 KiB PRG at $8000 (three fixed banks
@@ -2750,6 +2853,9 @@ pub fn make_mapper(cart: Cartridge) -> Result<Box<dyn Mapper>, CartError> {
         34 if !cart.chr_is_ram => Ok(Box::new(Nina001::new(cart))),
         34 => Ok(Box::new(BankSwap::new(cart, BankSwapKind::Bnrom))),
         65 => Ok(Box::new(H3001::new(cart))),
+        // 68 (Sunsoft-4) has a complete impl below, but its one USA game
+        // (After Burner) stalls at boot in an NMI-timed wait loop -- it needs
+        // the deferred CHR-ROM-as-nametable feature. Left unwired until it runs.
         66 => Ok(Box::new(BankSwap::new(cart, BankSwapKind::Gxrom))),
         71 => Ok(Box::new(Camerica::new(cart))),
         79 => Ok(Box::new(Nina03::new(cart))),
