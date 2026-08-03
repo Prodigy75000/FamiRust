@@ -176,18 +176,24 @@ impl Ppu {
 
     // ---------------- PPU-internal memory access ----------------
 
-    /// Map a nametable address ($2000-$3EFF) to a CIRAM byte index per mirroring.
+    /// Map a nametable address ($2000-$3EFF) to a CIRAM byte index. The mapper may
+    /// override the CIRAM bank per nametable (TxSROM); otherwise it's fixed by the
+    /// mirroring mode.
     #[inline]
-    fn ciram_index(&self, addr: u16, mirroring: Mirroring) -> usize {
+    fn ciram_index(&self, addr: u16, mapper: &dyn Mapper) -> usize {
         let addr = addr & 0x2fff; // fold $3000-$3EFF onto $2000-$2EFF
         let slot = (addr >> 10) & 0x3; // which logical nametable (0..3)
-        let bank = match mirroring {
-            Mirroring::Horizontal => (slot >> 1) & 1, // 0,1->A ; 2,3->B
-            Mirroring::Vertical => slot & 1,          // 0,2->A ; 1,3->B
-            Mirroring::SingleScreenA => 0,
-            Mirroring::SingleScreenB => 1,
-            // Four-screen would need cartridge VRAM; approximate with vertical.
-            Mirroring::FourScreen => slot & 1,
+        let bank: u16 = if let Some(b) = mapper.nt_ciram_bank(slot as usize) {
+            (b & 1) as u16
+        } else {
+            match mapper.mirroring() {
+                Mirroring::Horizontal => (slot >> 1) & 1, // 0,1->A ; 2,3->B
+                Mirroring::Vertical => slot & 1,          // 0,2->A ; 1,3->B
+                Mirroring::SingleScreenA => 0,
+                Mirroring::SingleScreenB => 1,
+                // Four-screen would need cartridge VRAM; approximate with vertical.
+                Mirroring::FourScreen => slot & 1,
+            }
         };
         (bank as usize) * 0x400 + (addr as usize & 0x3ff)
     }
@@ -205,7 +211,7 @@ impl Ppu {
     fn mem_read(&self, addr: u16, mapper: &mut dyn Mapper) -> u8 {
         match addr & 0x3fff {
             0x0000..=0x1fff => mapper.ppu_read(addr & 0x1fff),
-            0x2000..=0x3eff => self.ciram[self.ciram_index(addr, mapper.mirroring())],
+            0x2000..=0x3eff => self.ciram[self.ciram_index(addr, &*mapper)],
             0x3f00..=0x3fff => self.palette[Self::palette_index(addr)],
             _ => unreachable!(),
         }
@@ -215,7 +221,7 @@ impl Ppu {
         match addr & 0x3fff {
             0x0000..=0x1fff => mapper.ppu_write(addr & 0x1fff, val),
             0x2000..=0x3eff => {
-                let i = self.ciram_index(addr, mapper.mirroring());
+                let i = self.ciram_index(addr, &*mapper);
                 self.ciram[i] = val;
             }
             0x3f00..=0x3fff => self.palette[Self::palette_index(addr)] = val & 0x3f,

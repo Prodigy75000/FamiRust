@@ -234,6 +234,13 @@ pub trait Mapper: SaveState {
     /// enabled. MMC5 clocks its in-frame scanline IRQ counter here. Default no-op.
     fn ppu_scanline(&mut self, _scanline: u16, _rendering: bool) {}
 
+    /// Per-nametable CIRAM bank override (0 or 1), for mappers that pick the
+    /// nametable from a bank register instead of a fixed mirroring mode (TxSROM).
+    /// `nt` is the logical nametable 0..3. `None` = use [`Mapper::mirroring`].
+    fn nt_ciram_bank(&self, _nt: usize) -> Option<u8> {
+        None
+    }
+
     /// MMC5 extended-attribute mode: per-tile background palette (2 bits) read from
     /// ExRAM, indexed by the tile's position within the nametable (`v & 0x3FF`).
     /// `None` = use the normal attribute-table byte. Default `None`.
@@ -723,6 +730,9 @@ pub struct Mmc3 {
     // bit 6 selects RAM (empty + not `tqrom` for plain TxROM, so identical there).
     tqrom: bool,
     chr_ram: Vec<u8>,
+    // TxSROM (mapper 118): per-nametable CIRAM bank driven by CHR-bank bit 7
+    // instead of the $A000 mirroring register.
+    txsrom: bool,
 
     // scanline IRQ
     irq_latch: u8,
@@ -734,13 +744,17 @@ pub struct Mmc3 {
 }
 impl Mmc3 {
     pub fn new(cart: Cartridge) -> Self {
-        Self::with_kind(cart, false)
+        Self::with_kind(cart, false, false)
     }
     /// TQROM (mapper 119): MMC3 with 64 KiB CHR ROM + 8 KiB CHR RAM.
     pub fn new_tqrom(cart: Cartridge) -> Self {
-        Self::with_kind(cart, true)
+        Self::with_kind(cart, true, false)
     }
-    fn with_kind(cart: Cartridge, tqrom: bool) -> Self {
+    /// TxSROM (mapper 118): MMC3 with CHR-bank-driven nametable mirroring.
+    pub fn new_txsrom(cart: Cartridge) -> Self {
+        Self::with_kind(cart, false, true)
+    }
+    fn with_kind(cart: Cartridge, tqrom: bool, txsrom: bool) -> Self {
         let prg_banks8 = (cart.prg_rom.len() / (8 * 1024)).max(1);
         let chr_banks1 = (cart.chr_rom.len() / 1024).max(1);
         Mmc3 {
@@ -755,6 +769,7 @@ impl Mmc3 {
             mirroring: cart.mirroring,
             tqrom,
             chr_ram: if tqrom { vec![0u8; 8 * 1024] } else { Vec::new() },
+            txsrom,
             irq_latch: 0,
             irq_counter: 0,
             irq_reload: false,
@@ -807,6 +822,20 @@ impl Mmc3 {
             let bank = if self.tqrom { (v & 0x3f) as usize } else { v as usize };
             (false, (bank % self.chr_banks1) * 0x400 + off)
         }
+    }
+
+    /// TxSROM (mapper 118) nametable → CIRAM bank: bit 7 of the CHR bank register
+    /// that governs the region this nametable maps to. In the non-inverted CHR
+    /// mode the 2 KiB banks R0/R1 drive NT0-1 / NT2-3; inverted, R2..R5 drive the
+    /// four nametables independently.
+    fn txsrom_nt_bank(&self, nt: usize) -> u8 {
+        let inv = self.bank_select & 0x80 != 0;
+        let reg = if !inv {
+            if nt < 2 { self.regs[0] } else { self.regs[1] }
+        } else {
+            self.regs[2 + (nt & 3)]
+        };
+        (reg >> 7) & 1
     }
 
     /// Clock the IRQ counter on a filtered A12 rising edge.
@@ -908,6 +937,13 @@ impl Mapper for Mmc3 {
     }
     fn mirroring(&self) -> Mirroring {
         self.mirroring
+    }
+    fn nt_ciram_bank(&self, nt: usize) -> Option<u8> {
+        if self.txsrom {
+            Some(self.txsrom_nt_bank(nt))
+        } else {
+            None
+        }
     }
     fn irq(&self) -> bool {
         self.irq_flag
@@ -2706,6 +2742,7 @@ pub fn make_mapper(cart: Cartridge) -> Result<Box<dyn Mapper>, CartError> {
         9 => Ok(Box::new(Mmc2::new(cart, false))),
         11 => Ok(Box::new(BankSwap::new(cart, BankSwapKind::ColorDreams))),
         13 => Ok(Box::new(Cprom::new(cart))),
+        118 => Ok(Box::new(Mmc3::new_txsrom(cart))),
         119 => Ok(Box::new(Mmc3::new_tqrom(cart))),
         113 => Ok(Box::new(Nina113::new(cart))),
         232 => Ok(Box::new(Bf9096::new(cart))),
