@@ -587,6 +587,9 @@ pub struct Apu {
     samples: Vec<f32>,
     hp_prev_in: f32,
     hp_prev_out: f32,
+    /// Latest expansion-audio level from the mapper (FDS channel); summed in
+    /// `mix`. Not part of APU state (sampled from the mapper each tick).
+    ext_audio: f32,
 }
 
 impl Default for Apu {
@@ -630,6 +633,7 @@ impl Default for Apu {
             samples: Vec::new(),
             hp_prev_in: 0.0,
             hp_prev_out: 0.0,
+            ext_audio: 0.0,
         }
     }
 }
@@ -714,6 +718,8 @@ impl Apu {
 
     /// Advance one CPU cycle.
     pub fn tick(&mut self, mapper: &mut dyn Mapper) {
+        // Sample the mapper's expansion audio (FDS channel) for this cycle's mix.
+        self.ext_audio = mapper.audio_sample();
         self.clock_frame_sequencer();
 
         // Triangle + DMC timers run every CPU cycle (the DMC rate table is in
@@ -740,7 +746,11 @@ impl Apu {
     fn mix(&mut self) -> f32 {
         let p = (self.pulse1.output() + self.pulse2.output()) as usize;
         let t = (3 * self.triangle.output() + 2 * self.noise.output() + self.dmc.output()) as usize;
-        let raw = self.pulse_table[p] + self.tnd_table[t];
+        // Cartridge/adapter expansion audio (FDS wavetable channel) sums in on top
+        // of the 2A03 mix. The FDS peaks at ~2.4x an APU square on a Famicom, same
+        // polarity; FDS_MIX scales its ~0..1 level to that. DC is removed below.
+        const FDS_MIX: f32 = 0.35;
+        let raw = self.pulse_table[p] + self.tnd_table[t] + self.ext_audio * FDS_MIX;
         // First-order DC-blocking high-pass for pleasant output.
         let out = raw - self.hp_prev_in + 0.9995 * self.hp_prev_out;
         self.hp_prev_in = raw;

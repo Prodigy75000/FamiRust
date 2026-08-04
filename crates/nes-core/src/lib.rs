@@ -25,6 +25,7 @@ pub mod bus;
 pub mod cart;
 pub mod controller;
 pub mod cpu;
+pub mod fds;
 pub mod header_db;
 pub mod ppu;
 pub mod save;
@@ -43,7 +44,10 @@ pub const STATE_MAGIC: &[u8; 8] = b"FAMIRST1";
 /// Save-state layout version. Bump on ANY change to the serialized field set or
 /// order; older builds refuse a newer version cleanly (never panic, never guess).
 /// v2: added the PPU vbl_just_cleared field (sub-cycle timing rework).
-pub const STATE_VERSION: u16 = 3;
+/// v3: sub-cycle timing rework.
+/// v4: FDS RAM Adapter mapper (new serialized field set for disk games; carts
+/// on the older mappers are unaffected and their v3 states still load).
+pub const STATE_VERSION: u16 = 4;
 
 /// A whole NES: CPU plus the bus that owns every other device.
 pub struct Nes {
@@ -63,6 +67,49 @@ impl Nes {
         };
         nes.cpu.reset(&mut nes.bus);
         Ok(nes)
+    }
+
+    /// Build a machine from an FDS disk image (`.fds`, headered or raw) plus the
+    /// 8 KiB FDS BIOS (`disksys.rom`, user-supplied). The RAM Adapter is the
+    /// mapper; the BIOS drives boot from its reset vector. The disk is not a
+    /// cartridge, so it does not go through [`cart::from_ines`].
+    pub fn from_fds(disk_image: &[u8], bios: &[u8]) -> Result<Self, fds::FdsError> {
+        let disk = fds::FdsDisk::parse(disk_image)?;
+        let mapper = fds::Fds::new(disk, bios.to_vec());
+        let mut nes = Nes {
+            cpu: Cpu::new(),
+            bus: Bus::new(Box::new(mapper)),
+        };
+        nes.cpu.reset(&mut nes.bus);
+        Ok(nes)
+    }
+
+    /// True if `data` looks like an FDS disk image (so a frontend knows to call
+    /// [`Nes::from_fds`] with a BIOS instead of [`Nes::from_rom`]).
+    pub fn is_fds(data: &[u8]) -> bool {
+        fds::FdsDisk::is_fds(data)
+    }
+
+    // ---- FDS disk-control (side/disk swap) ----
+
+    /// Number of FDS disk sides (0 if this is not an FDS machine).
+    pub fn fds_side_count(&self) -> usize {
+        self.bus.mapper.fds_side_count()
+    }
+
+    /// Insert FDS `side` (0-based), which also re-inserts the disk after an eject.
+    pub fn fds_insert_side(&mut self, side: usize) {
+        self.bus.mapper.fds_insert_side(side);
+    }
+
+    /// Eject the FDS disk (the drive reports "no disk" until a side is inserted).
+    pub fn fds_eject(&mut self) {
+        self.bus.mapper.fds_eject();
+    }
+
+    /// Currently inserted FDS side (255 = ejected; 0 for non-FDS machines).
+    pub fn fds_current_side(&self) -> usize {
+        self.bus.mapper.fds_current_side()
     }
 
     /// Run one instruction. Returns the CPU cycles it consumed.
@@ -289,6 +336,55 @@ mod tests {
         assert!(nes.save_ram().is_none());
     }
 
+    /// A minimal one-side FDS image (block 1 + file-count + one small file) and a
+    /// dummy BIOS, enough to build an FDS machine for the save-state round-trip.
+    fn synth_fds() -> Vec<u8> {
+        let mut s = vec![0u8; 65500];
+        s[0] = 0x01;
+        s[1..15].copy_from_slice(b"*NINTENDO-HVC*");
+        s[56] = 0x02; // file-amount block
+        s[57] = 1;
+        s[58] = 0x03; // file header, size 2
+        s[71] = 2;
+        s[74] = 0x04; // file body
+        s
+    }
+
+    #[test]
+    fn fds_machine_state_round_trips_byte_identically() {
+        let disk = synth_fds();
+        let bios = vec![0u8; fds::BIOS_LEN];
+        let mut nes = Nes::from_fds(&disk, &bios).unwrap();
+        assert_eq!(nes.fds_side_count(), 1);
+        // Drive the disk registers so the RAM Adapter carries non-trivial state.
+        nes.bus.write(0x4023, 0x01); // enable disk I/O
+        nes.bus.write(0x4025, 0x05); // motor start, read
+        for _ in 0..64 {
+            nes.step();
+        }
+        let snap = nes.save_state();
+        assert_eq!(&snap[8..10], &[0x04, 0x00]); // format_version = 4 (FDS)
+
+        let mut other = Nes::from_fds(&disk, &bios).unwrap();
+        other.load_state(&snap).unwrap();
+        assert_eq!(snap, other.save_state());
+    }
+
+    /// A cross-side transfer must be refused: a state whose side count does not
+    /// match this machine's disk is rejected, never guessed.
+    #[test]
+    fn fds_load_rejects_mismatched_disk() {
+        let one_side = synth_fds();
+        let bios = vec![0u8; fds::BIOS_LEN];
+        let nes = Nes::from_fds(&one_side, &bios).unwrap();
+        let snap = nes.save_state();
+        // A two-side disk has a different serialized shape; loading the one-side
+        // state into it must fail rather than corrupt the drive.
+        let two_side = [one_side.clone(), one_side].concat();
+        let mut other = Nes::from_fds(&two_side, &bios).unwrap();
+        assert!(other.load_state(&snap).is_err());
+    }
+
     #[test]
     fn machine_state_round_trips_byte_identically() {
         let mut nes = Nes::from_rom(&synth_rom()).unwrap();
@@ -314,7 +410,7 @@ mod tests {
         let nes = Nes::from_rom(&synth_rom()).unwrap();
         let snap = nes.save_state();
         assert_eq!(&snap[0..8], b"FAMIRST1");
-        assert_eq!(&snap[8..10], &[0x03, 0x00]); // format_version = 3, LE
+        assert_eq!(&snap[8..10], &[0x04, 0x00]); // format_version = 4, LE
         // NROM 16K PRG + CHR ROM (no CHR RAM): size is deterministic.
         // header(10) + cpu(15) + ram(2048) + ppu + apu + 2 pads + mapper(prg_ram
         // 8192) + open_bus(1). Assert it is fixed and matches state_size().

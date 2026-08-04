@@ -72,11 +72,42 @@ fn main() -> ExitCode {
         }
     };
 
-    let mut nes = match nes_core::Nes::from_rom(&rom) {
-        Ok(n) => n,
-        Err(e) => {
-            eprintln!("failed to load {path}: {e:?}");
-            return ExitCode::FAILURE;
+    // FDS disk images are not cartridges: they need the 8 KiB BIOS (disksys.rom,
+    // user-supplied). Look it up next to the disk or via $FDS_BIOS.
+    let mut nes = if nes_core::Nes::is_fds(&rom) {
+        let bios_path = std::env::var("FDS_BIOS").unwrap_or_else(|_| {
+            std::path::Path::new(&path)
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .join("disksys.rom")
+                .to_string_lossy()
+                .into_owned()
+        });
+        let bios = match std::fs::read(&bios_path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("FDS image needs a BIOS; cannot read {bios_path}: {e}");
+                eprintln!("(set $FDS_BIOS or place disksys.rom next to the .fds)");
+                return ExitCode::FAILURE;
+            }
+        };
+        match nes_core::Nes::from_fds(&rom, &bios) {
+            Ok(n) => {
+                println!("FDS disk: {} side(s), BIOS {} bytes", n.fds_side_count(), bios.len());
+                n
+            }
+            Err(e) => {
+                eprintln!("failed to load FDS {path}: {e:?}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        match nes_core::Nes::from_rom(&rom) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("failed to load {path}: {e:?}");
+                return ExitCode::FAILURE;
+            }
         }
     };
 
@@ -105,9 +136,23 @@ fn main() -> ExitCode {
         }
     }
 
+    let fds_pc = std::env::var("FDS_PC").is_ok();
+    // Optional headless FDS side-flip: at frame $FDS_FLIP_AT, replay the exact
+    // libretro swap (eject then insert side $FDS_FLIP_SIDE) to test disk-change
+    // detection from a save state parked at an "insert side B" prompt.
+    let flip_at: i64 = std::env::var("FDS_FLIP_AT").ok().and_then(|s| s.parse().ok()).unwrap_or(-1);
+    let flip_side: usize = std::env::var("FDS_FLIP_SIDE").ok().and_then(|s| s.parse().ok()).unwrap_or(1);
     let mut last: Vec<u32> = Vec::new();
     let mut audio: Vec<f32> = Vec::new();
     for f in 0..frames {
+        if flip_at >= 0 && f as i64 == flip_at {
+            println!("--- FDS flip: eject -> insert side {flip_side} (frame {f}) ---");
+            nes.fds_eject();
+            nes.fds_insert_side(flip_side);
+        }
+        if fds_pc && f % 10 == 0 {
+            println!("f{f}: pc=${:04x}  {}", nes.dbg_pc(), nes.dbg_mapper());
+        }
         // Pulse the held buttons (press/release alternating so menus that need a
         // fresh edge advance) once we're a little past boot.
         if buttons != 0 && f > 20 {
@@ -212,6 +257,24 @@ fn main() -> ExitCode {
             prev = fb.clone();
             last = fb;
         }
+    }
+
+    // Dev: disassembly peek -- dump raw bytes around an address (hex) to decode a
+    // stuck loop. $FDS_PEEK=a350 prints [a350..a380).
+    if let Ok(hx) = std::env::var("FDS_PEEK") {
+        if let Ok(base) = u16::from_str_radix(hx.trim_start_matches("0x"), 16) {
+            print!("peek ${base:04x}:");
+            for i in 0..48u16 {
+                print!(" {:02x}", nes.peek(base.wrapping_add(i)));
+            }
+            println!();
+        }
+    }
+
+    // Dev: dump mapper-internal state (FDS drive position, IRQ flags, etc.).
+    if std::env::var("DBG_MAPPER").is_ok() {
+        println!("mapper: {}", nes.dbg_mapper());
+        println!("pc=${:04x} halted={}", nes.dbg_pc(), nes.dbg_halted());
     }
 
     // Write the audio track as a 16-bit PCM mono WAV next to the PNG.

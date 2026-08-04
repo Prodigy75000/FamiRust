@@ -181,6 +181,12 @@ impl<'a> ReadCursor<'a> {
         dst.copy_from_slice(self.take(n)?);
         Ok(())
     }
+
+    /// Advance the cursor past `n` bytes without reading them.
+    pub fn skip(&mut self, n: usize) -> Result<(), LoadError> {
+        self.take(n)?;
+        Ok(())
+    }
 }
 
 /// Every serializable subsystem implements this. `save` and `load` must visit

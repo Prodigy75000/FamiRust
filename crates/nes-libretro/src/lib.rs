@@ -80,6 +80,26 @@ struct retro_game_info {
 const RETRO_ENVIRONMENT_SET_PIXEL_FORMAT: u32 = 10;
 const RETRO_PIXEL_FORMAT_XRGB8888: i32 = 1;
 
+/// The frontend gives us the path to its `system/` directory here; the FDS BIOS
+/// (`disksys.rom`) lives there (it is copyrighted, so it is never shipped in the
+/// core, exactly like every other console BIOS).
+const RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY: u32 = 9;
+
+/// Classic disk-control interface: how a frontend drives the FDS disk/side swap
+/// (Trophy Hub's "SIDE" button). Registered only when an FDS disk is loaded.
+const RETRO_ENVIRONMENT_SET_DISK_CONTROL_INTERFACE: u32 = 13;
+
+#[repr(C)]
+struct retro_disk_control_callback {
+    set_eject_state: Option<unsafe extern "C" fn(bool) -> bool>,
+    get_eject_state: Option<unsafe extern "C" fn() -> bool>,
+    get_image_index: Option<unsafe extern "C" fn() -> u32>,
+    set_image_index: Option<unsafe extern "C" fn(u32) -> bool>,
+    get_num_images: Option<unsafe extern "C" fn() -> u32>,
+    replace_image_index: Option<unsafe extern "C" fn(u32, *const retro_game_info) -> bool>,
+    add_image_index: Option<unsafe extern "C" fn() -> bool>,
+}
+
 const RETRO_DEVICE_JOYPAD: u32 = 1;
 
 /// RetroPad button id -> NES pad bit (see `nes_core::controller::button`).
@@ -106,6 +126,12 @@ const AUDIO_GAIN: f32 = 3.0;
 struct State {
     core: Option<Nes>,
     rom: Vec<u8>, // kept so retro_reset can rebuild the machine
+    // FDS: the 8 KiB BIOS and disk-control state. `is_fds` selects the FDS build
+    // path in retro_reset; `bios` is empty for cartridges.
+    is_fds: bool,
+    bios: Vec<u8>,
+    disk_index: u32,
+    disk_ejected: bool,
     frame: Vec<u32>,
     audio: Vec<i16>, // scratch: interleaved stereo i16 for the host
     env: retro_environment_t,
@@ -122,6 +148,10 @@ impl State {
         State {
             core: None,
             rom: Vec::new(),
+            is_fds: false,
+            bios: Vec::new(),
+            disk_index: 0,
+            disk_ejected: false,
             frame: Vec::new(),
             audio: Vec::new(),
             env: None,
@@ -157,6 +187,109 @@ fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> R {
     unsafe { f(&mut *STATE.0.get()) }
 }
 
+/// Ask the frontend for its `system/` directory (where `disksys.rom` lives).
+fn system_directory(env: retro_environment_t) -> Option<String> {
+    let env = env?;
+    let mut path: *const c_char = ptr::null();
+    let ok = unsafe {
+        env(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &mut path as *mut _ as *mut c_void)
+    };
+    if !ok || path.is_null() {
+        return None;
+    }
+    let s = unsafe { std::ffi::CStr::from_ptr(path) };
+    s.to_str().ok().map(|s| s.to_string())
+}
+
+/// Load the FDS BIOS (`disksys.rom`) from the frontend's system directory.
+fn load_fds_bios(env: retro_environment_t) -> Option<Vec<u8>> {
+    let dir = system_directory(env)?;
+    // Accept it at the system root or in an `fds/` subfolder; case-insensitive
+    // names are left to the frontend's filesystem.
+    for cand in ["disksys.rom", "fds/disksys.rom", "FDS/disksys.rom"] {
+        let p = std::path::Path::new(&dir).join(cand);
+        if let Ok(b) = std::fs::read(&p) {
+            if b.len() >= nes_core::fds::BIOS_LEN {
+                return Some(b);
+            }
+        }
+    }
+    None
+}
+
+// --- Disk control (FDS side/disk swap; Trophy Hub's "SIDE" button) -----------
+// The classic interface has no user-data pointer, so the callbacks reach the
+// single global STATE directly, like a C core's file-scope statics. Frontends
+// swap a disk by: set_eject_state(true) -> set_image_index(n) -> set_eject_state(false).
+
+unsafe extern "C" fn disk_set_eject_state(ejected: bool) -> bool {
+    with_state(|s| {
+        s.disk_ejected = ejected;
+        let idx = s.disk_index;
+        if let Some(core) = &mut s.core {
+            if ejected {
+                core.fds_eject();
+            } else {
+                core.fds_insert_side(idx as usize);
+            }
+        }
+        logline(s, &format!("disk eject={ejected} -> side {idx}"));
+        true
+    })
+}
+unsafe extern "C" fn disk_get_eject_state() -> bool {
+    with_state(|s| s.disk_ejected)
+}
+unsafe extern "C" fn disk_get_image_index() -> u32 {
+    with_state(|s| s.disk_index)
+}
+unsafe extern "C" fn disk_set_image_index(index: u32) -> bool {
+    with_state(|s| {
+        let n = s.core.as_ref().map(|c| c.fds_side_count()).unwrap_or(0) as u32;
+        if index >= n {
+            return false;
+        }
+        s.disk_index = index;
+        // If the disk is currently inserted, apply the new side immediately (some
+        // frontends set the index without an explicit eject cycle).
+        if !s.disk_ejected {
+            if let Some(core) = &mut s.core {
+                core.fds_insert_side(index as usize);
+            }
+        }
+        true
+    })
+}
+unsafe extern "C" fn disk_get_num_images() -> u32 {
+    with_state(|s| s.core.as_ref().map(|c| c.fds_side_count() as u32).unwrap_or(0))
+}
+unsafe extern "C" fn disk_replace_image_index(_index: u32, _info: *const retro_game_info) -> bool {
+    false // fixed-size disk set; we do not support hot-replacing an image
+}
+unsafe extern "C" fn disk_add_image_index() -> bool {
+    false
+}
+
+/// Register the disk-control interface with the frontend (FDS only).
+fn register_disk_control(env: retro_environment_t) {
+    let Some(env) = env else { return };
+    let mut cb = retro_disk_control_callback {
+        set_eject_state: Some(disk_set_eject_state),
+        get_eject_state: Some(disk_get_eject_state),
+        get_image_index: Some(disk_get_image_index),
+        set_image_index: Some(disk_set_image_index),
+        get_num_images: Some(disk_get_num_images),
+        replace_image_index: Some(disk_replace_image_index),
+        add_image_index: Some(disk_add_image_index),
+    };
+    unsafe {
+        env(
+            RETRO_ENVIRONMENT_SET_DISK_CONTROL_INTERFACE,
+            &mut cb as *mut _ as *mut c_void,
+        );
+    }
+}
+
 // --- Required libretro entry points ------------------------------------------
 
 #[no_mangle]
@@ -180,8 +313,8 @@ pub unsafe extern "C" fn retro_get_system_info(info: *mut retro_system_info) {
         return;
     }
     (*info).library_name = c"FamiRust".as_ptr();
-    (*info).library_version = c"0.1.0".as_ptr();
-    (*info).valid_extensions = c"nes".as_ptr();
+    (*info).library_version = c"0.2.0".as_ptr();
+    (*info).valid_extensions = c"nes|fds".as_ptr();
     (*info).need_fullpath = false;
     (*info).block_extract = false;
 }
@@ -244,8 +377,18 @@ pub extern "C" fn retro_set_controller_port_device(_port: u32, _device: u32) {}
 #[no_mangle]
 pub extern "C" fn retro_reset() {
     with_state(|s| {
-        if !s.rom.is_empty() {
-            s.core = Nes::from_rom(&s.rom).ok();
+        if s.rom.is_empty() {
+            return;
+        }
+        s.core = if s.is_fds {
+            Nes::from_fds(&s.rom, &s.bios).ok()
+        } else {
+            Nes::from_rom(&s.rom).ok()
+        };
+        // A reset re-inserts side 0 (the drive powers up on the first side).
+        if s.is_fds {
+            s.disk_index = 0;
+            s.disk_ejected = false;
         }
     });
 }
@@ -263,9 +406,36 @@ pub unsafe extern "C" fn retro_load_game(info: *const retro_game_info) -> bool {
                 env(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &mut fmt as *mut i32 as *mut c_void);
             }
         }
+        // FDS disk image: not a cartridge. It needs the 8 KiB BIOS from the
+        // frontend's system directory, and it exposes disk/side swapping.
+        if Nes::is_fds(&rom) {
+            let Some(bios) = load_fds_bios(s.env) else {
+                logline(s, "FDS load failed: disksys.rom not found in system dir");
+                return false;
+            };
+            return match Nes::from_fds(&rom, &bios) {
+                Ok(core) => {
+                    let sides = core.fds_side_count();
+                    s.rom = rom;
+                    s.bios = bios;
+                    s.is_fds = true;
+                    s.disk_index = 0;
+                    s.disk_ejected = false;
+                    s.core = Some(core);
+                    register_disk_control(s.env);
+                    logline(s, &format!("loaded FDS disk, {sides} side(s)"));
+                    true
+                }
+                Err(e) => {
+                    logline(s, &format!("FDS load failed: {e:?}"));
+                    false
+                }
+            };
+        }
         match Nes::from_rom(&rom) {
             Ok(core) => {
                 s.rom = rom;
+                s.is_fds = false;
                 s.core = Some(core);
                 logline(s, &format!("loaded ROM, {} bytes", s.rom.len()));
                 true

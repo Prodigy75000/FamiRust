@@ -28,7 +28,7 @@ pub enum Mirroring {
 
 /// Serialize a [`Mirroring`] to a stable byte (for mappers with runtime-switchable
 /// mirroring across all four modes, e.g. FME-7).
-fn mirroring_code(m: Mirroring) -> u8 {
+pub(crate) fn mirroring_code(m: Mirroring) -> u8 {
     match m {
         Mirroring::Horizontal => 0,
         Mirroring::Vertical => 1,
@@ -37,7 +37,7 @@ fn mirroring_code(m: Mirroring) -> u8 {
         Mirroring::SingleScreenB => 4,
     }
 }
-fn mirroring_from_code(c: u8) -> Result<Mirroring, LoadError> {
+pub(crate) fn mirroring_from_code(c: u8) -> Result<Mirroring, LoadError> {
     Ok(match c {
         0 => Mirroring::Horizontal,
         1 => Mirroring::Vertical,
@@ -222,6 +222,13 @@ pub trait Mapper: SaveState {
     /// (Irem H3001, Sunsoft FME-7, ...). Default no-op.
     fn tick_cpu(&mut self) {}
 
+    /// Expansion-audio output for this mapper (~0..1), summed into the APU mixer.
+    /// Non-zero only for cartridges/adapters with their own sound (the FDS RAM
+    /// adapter's wavetable channel). Default silent.
+    fn audio_sample(&self) -> f32 {
+        0.0
+    }
+
     /// CHR read for a SPRITE pattern fetch (as opposed to a background tile).
     /// Defaults to a plain [`Mapper::ppu_read`]; MMC5 overrides it because it
     /// banks sprite CHR separately from background CHR in 8x16-sprite mode.
@@ -275,6 +282,21 @@ pub trait Mapper: SaveState {
     /// Test hook: force MMC5 extended-attribute mode on (to validate a captured
     /// state whose format predates the `$5104` field). Default no-op.
     fn dbg_force_ext_attr(&mut self) {}
+
+    // ---- FDS disk-control (only the RAM Adapter overrides these) ----
+
+    /// Number of FDS disk sides; 0 for a normal cartridge.
+    fn fds_side_count(&self) -> usize {
+        0
+    }
+    /// Insert FDS side `side` (0-based). No-op for a normal cartridge.
+    fn fds_insert_side(&mut self, _side: usize) {}
+    /// Eject the FDS disk. No-op for a normal cartridge.
+    fn fds_eject(&mut self) {}
+    /// Currently inserted FDS side (255 = ejected). 0 for a normal cartridge.
+    fn fds_current_side(&self) -> usize {
+        0
+    }
 }
 
 /// Mapper 0: fixed PRG (16 or 32 KiB), fixed CHR. The bring-up mapper.

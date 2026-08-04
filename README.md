@@ -49,6 +49,11 @@ NES library: hundreds of licensed titles boot and play.
   13 (CPROM), 34 (BNROM/NINA-001), 64 (RAMBO-1), 65 (Irem H3001), 66 (GxROM),
   69 (Sunsoft FME-7), 71 (Camerica), 79 (NINA-03), 113 (NINA-113),
   118 (TxSROM), 119 (TQROM), 232 (Camerica BF9096).
+- **Famicom Disk System**: the RAM adapter (mapper 20) driven by the real BIOS
+  (`disksys.rom`, user-supplied): disk-image parsing, the byte-level drive with
+  gap/mark framing, timer + transfer IRQs, disk reads *and writes* (in-game
+  saves), the RP2C33 wavetable + modulation expansion sound channel, and the
+  libretro disk-control interface for side/disk swapping.
 - **Headers**: iNES + NES 2.0 parsing, with a CRC32 correction DB for known-bad
   dumps (e.g. "DiskDude!"-corrupted headers).
 - **RetroAchievements**: exposes system RAM + cartridge work RAM over the
