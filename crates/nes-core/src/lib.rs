@@ -413,8 +413,79 @@ mod tests {
         assert_eq!(&snap[8..10], &[0x04, 0x00]); // format_version = 4, LE
         // NROM 16K PRG + CHR ROM (no CHR RAM): size is deterministic.
         // header(10) + cpu(15) + ram(2048) + ppu + apu + 2 pads + mapper(prg_ram
-        // 8192) + open_bus(1). Assert it is fixed and matches state_size().
-        assert_eq!(snap.len(), nes.state_size());
+        // 8192) + open_bus(1). Pinned to a literal -- comparing against
+        // `state_size()` would be vacuous, since that is itself `save_state().len()`.
+        assert_eq!(snap.len(), GOLDEN_RESET_LEN);
+        assert_eq!(nes.state_size(), GOLDEN_RESET_LEN);
+    }
+
+    /// FNV-1a (64-bit). Defined inline so the golden test depends on nothing but
+    /// the serializer itself: integer-only, fixed-width, no allocation, and no
+    /// behavior of its own that could vary by target.
+    fn fnv1a64(bytes: &[u8]) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for &b in bytes {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        h
+    }
+
+    /// Serialized length of a freshly-reset NROM machine built from `synth_rom`.
+    const GOLDEN_RESET_LEN: usize = 12_825;
+    /// Serialized length of the `golden_fixture` machine (same ROM, dirtied +
+    /// stepped). Equal to `GOLDEN_RESET_LEN` unless a field became
+    /// content-dependent, which contract rule 7 forbids.
+    const GOLDEN_FIXTURE_LEN: usize = 12_825;
+    /// FNV-1a 64 over the entire `golden_fixture` snapshot.
+    const GOLDEN_FIXTURE_FNV: u64 = 0xd6ec_b126_a505_efc3;
+
+    /// A fixed, deliberately non-trivial machine. Every value and every step
+    /// count below is part of the golden fixture -- changing one changes the
+    /// expected checksum, on purpose.
+    fn golden_fixture() -> Nes {
+        let mut nes = Nes::from_rom(&synth_rom()).unwrap();
+        nes.cpu.a = 0x99;
+        nes.cpu.x = 0x3c;
+        nes.cpu.y = 0xf1;
+        nes.cpu.pc = 0x8000;
+        nes.bus.ram[0x123] = 0x45;
+        nes.bus.ram[0x7ff] = 0xa7;
+        nes.bus.controllers[0].buttons = controller::button::START;
+        for _ in 0..512 {
+            nes.step();
+        }
+        nes
+    }
+
+    /// **Golden bytes — the contract's "whole ballgame"**
+    /// (`TrophyHubResources/specs/play/IN_HOUSE_CORE_SAVESTATE_SPEC.md`).
+    ///
+    /// A fixed machine state must serialize to one exact byte string on every
+    /// target triple. Because the format is target-independent *by construction*
+    /// (LE, fixed-width, fixed field order, no `usize`, no map iteration), these
+    /// golden values are identical everywhere -- so this test passing on the dev
+    /// host is what makes iOS/Android/Desktop state agreement a *tested* property
+    /// rather than a hoped-for one. A full hex literal of a ~10 KiB NES state is
+    /// unusable in review, so the byte string is pinned as (exact length +
+    /// checksum over the whole buffer): any added, removed, reordered, or
+    /// re-widened field turns this red.
+    #[test]
+    fn state_is_golden_byte_for_byte() {
+        let snap = golden_fixture().save_state();
+        assert_eq!(&snap[0..8], b"FAMIRST1");
+        assert_eq!(&snap[8..10], &[0x04, 0x00]);
+        assert_eq!(snap.len(), GOLDEN_FIXTURE_LEN);
+        assert_eq!(fnv1a64(&snap), GOLDEN_FIXTURE_FNV);
+    }
+
+    /// Two independently-built machines driven through the identical input
+    /// sequence must serialize identically -- determinism across instances, not
+    /// just round-trip fidelity within one (contract rule 6). This is the
+    /// property netplay lockstep actually leans on.
+    #[test]
+    fn independent_instances_serialize_identically() {
+        assert_eq!(golden_fixture().save_state(), golden_fixture().save_state());
     }
 
     #[test]
