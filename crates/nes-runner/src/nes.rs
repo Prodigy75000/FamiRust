@@ -49,20 +49,24 @@ fn main() -> ExitCode {
     // Optional 4th arg: comma-separated buttons to hold (e.g. "start,a") to
     // drive past menus, plus a flicker analysis of consecutive frames.
     let hold = args.next().unwrap_or_default();
-    let mut buttons = 0u8;
-    for b in hold.split(',') {
-        buttons |= match b.trim().to_ascii_lowercase().as_str() {
-            "a" => 0x01,
-            "b" => 0x02,
-            "select" => 0x04,
-            "start" => 0x08,
-            "up" => 0x10,
-            "down" => 0x20,
-            "left" => 0x40,
-            "right" => 0x80,
-            _ => 0,
-        };
-    }
+    let parse_buttons = |spec: &str| {
+        let mut mask = 0u8;
+        for b in spec.split(',') {
+            mask |= match b.trim().to_ascii_lowercase().as_str() {
+                "a" => 0x01,
+                "b" => 0x02,
+                "select" => 0x04,
+                "start" => 0x08,
+                "up" => 0x10,
+                "down" => 0x20,
+                "left" => 0x40,
+                "right" => 0x80,
+                _ => 0,
+            };
+        }
+        mask
+    };
+    let buttons = parse_buttons(&hold);
 
     let rom = match std::fs::read(&path) {
         Ok(b) => b,
@@ -142,6 +146,25 @@ fn main() -> ExitCode {
     // detection from a save state parked at an "insert side B" prompt.
     let flip_at: i64 = std::env::var("FDS_FLIP_AT").ok().and_then(|s| s.parse().ok()).unwrap_or(-1);
     let flip_side: usize = std::env::var("FDS_FLIP_SIDE").ok().and_then(|s| s.parse().ok()).unwrap_or(1);
+    // Optional: stop pulsing the held buttons after this frame. START drives the
+    // pre-roll past title/intro screens, but a pause-toggling button left pressed
+    // during the flicker analysis blinks the HUD in and out on its own period and
+    // masks the thing being measured. -1 (default) = pulse for the whole run.
+    let hold_stop: i64 = std::env::var("HOLD_STOP_AT").ok().and_then(|s| s.parse().ok()).unwrap_or(-1);
+    // Optional: swap to a different button set at $HOLD_STOP_AT instead of just
+    // letting go -- "start until we are in the level, then hold right" is how a
+    // scrolling scene gets measured without START pausing the game.
+    let after_buttons = std::env::var("HOLD_AFTER").map(|s| parse_buttons(&s)).unwrap_or(0);
+    // Buttons to pulse on frame `f`: the hold set before $HOLD_STOP_AT, the
+    // $HOLD_AFTER set from it on (0 = nothing held).
+    let held_at = |f: i64| {
+        if hold_stop < 0 || f < hold_stop {
+            buttons
+        } else {
+            after_buttons
+        }
+    };
+    let any_buttons = buttons != 0 || after_buttons != 0;
     let mut last: Vec<u32> = Vec::new();
     let mut audio: Vec<f32> = Vec::new();
     for f in 0..frames {
@@ -155,8 +178,8 @@ fn main() -> ExitCode {
         }
         // Pulse the held buttons (press/release alternating so menus that need a
         // fresh edge advance) once we're a little past boot.
-        if buttons != 0 && f > 20 {
-            nes.set_buttons(0, if f % 8 < 4 { buttons } else { 0 });
+        if any_buttons && f > 20 {
+            nes.set_buttons(0, if f % 8 < 4 { held_at(f as i64) } else { 0 });
         }
         last = nes.step_frame().to_vec();
         audio.extend(nes.take_audio());
@@ -167,11 +190,15 @@ fn main() -> ExitCode {
     // changed vs the previous frame + the sprite-0 hit scanline + the HUD band.
     if !hold.is_empty() {
         let mut prev = last.clone();
-        let analysis_frames = 40;
+        // The glitch this harness was built for shows on ~1 frame in 16, so 40 is
+        // enough to see it; $ANALYSIS_FRAMES widens the window for a longer soak.
+        let analysis_frames: u32 =
+            std::env::var("ANALYSIS_FRAMES").ok().and_then(|s| s.parse().ok()).unwrap_or(40);
         println!("--- flicker analysis ({analysis_frames} frames) ---");
         for k in 0..analysis_frames {
-            if buttons != 0 {
-                nes.set_buttons(0, if k % 8 < 4 { buttons } else { 0 });
+            if any_buttons {
+                let abs = (frames + k) as i64;
+                nes.set_buttons(0, if k % 8 < 4 { held_at(abs) } else { 0 });
             }
             let fb = nes.step_frame().to_vec();
             audio.extend(nes.take_audio());
