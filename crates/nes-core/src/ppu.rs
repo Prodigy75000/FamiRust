@@ -755,12 +755,22 @@ impl Ppu {
                 self.fetch_bg(mapper);
             }
             if self.dot == 256 {
-                // A $2006 write that landed on this exact dot (this scanline) has
-                // just set `v` for the split; the coincident increment must not
-                // re-bump it (matches hardware — fixes Bart/Micro Machines status-
-                // bar jitter). Otherwise the vertical position advances normally.
+                // A $2006 write that landed in the last CPU cycle before this dot
+                // (this scanline) has just set `v` for the split; the increment
+                // must not re-bump it (matches hardware — fixes Bart/Micro
+                // Machines status-bar jitter). Otherwise the vertical position
+                // advances normally.
+                //
+                // The window is 255..=256, not 256 alone. `v_write_dot` is the dot
+                // the PPU is *about to* process when the write lands, and one CPU
+                // cycle is three dots, so the write that races this increment can
+                // be recorded at either 255 or 256 depending on where the CPU's
+                // cycle boundary falls this frame. Bart polls sprite-0 in a loop
+                // and writes on a 3-dot lattice, so it hits both: the 255 landings
+                // were still jittering after the first fix (27 of 600 frames from
+                // the level-2 state, and every one of them a 255).
                 let coincident_write =
-                    self.v_write_line == self.scanline && self.v_write_dot == 256;
+                    self.v_write_line == self.scanline && (255..=256).contains(&self.v_write_dot);
                 if !coincident_write {
                     self.increment_y();
                 }
@@ -926,8 +936,9 @@ mod tests {
 
     /// Positions the PPU at (scanline 175, dot 256) with rendering on and fine Y 0,
     /// then performs the second $2006 write (v <- t) exactly as the bus would after
-    /// that CPU cycle's three ticks, and ticks the coincident dot-256 once.
-    fn run_split_write(coincident: bool) -> u16 {
+    /// that CPU cycle's three ticks, records it as having landed on `write_dot`, and
+    /// ticks the dot-256 increment once. Returns the resulting fine Y.
+    fn run_split_write(write_dot: i32) -> u16 {
         let mut ppu = Ppu::new();
         let mut mapper = nrom_mapper();
         ppu.mask = 0x08; // show background => rendering enabled
@@ -937,22 +948,27 @@ mod tests {
         ppu.t = 0x02c0; // target: coarse Y 22, fine Y 0 (the status-bar scroll)
         ppu.w = true; // next $2006 write is the second byte
         ppu.write_register(6, 0xc0, &mut *mapper); // v <- t = 0x02c0, records dot 256
-        if !coincident {
-            // Simulate the write having landed a couple dots earlier, so the dot-256
-            // increment is *not* coincident and must apply normally.
-            ppu.v_write_dot = -1;
-        }
+        // Re-stamp where the write landed: which dot the CPU's cycle boundary puts
+        // it on varies frame to frame, and that is the whole point of the window.
+        ppu.v_write_dot = write_dot;
         ppu.tick(&mut *mapper); // processes dot 256 (the Y increment)
         (ppu.v >> 12) & 0x7 // resulting fine Y
     }
 
-    /// Regression: a second $2006 write coincident with the dot-256 vertical
-    /// increment must win — fine Y stays 0 (the value the game wrote). This is the
-    /// Bart vs. the Space Mutants / Micro Machines status-bar jitter fix.
+    /// Regression: a second $2006 write racing the dot-256 vertical increment must
+    /// win — fine Y stays 0 (the value the game wrote). This is the Bart vs. the
+    /// Space Mutants / Micro Machines status-bar jitter fix.
+    ///
+    /// Both dots in the window are covered on purpose. 256 was the first fix; 255
+    /// is the same write one CPU-cycle boundary earlier, and shipping only 256 left
+    /// Bart still shaking on 27 of 600 frames (every one of them a 255 landing).
     #[test]
     fn dot256_coincident_2006_write_survives_y_increment() {
-        assert_eq!(run_split_write(true), 0, "coincident write must not be re-incremented");
-        // And with no coincident write, the dot-256 increment applies as usual.
-        assert_eq!(run_split_write(false), 1, "non-coincident increment must still fire");
+        assert_eq!(run_split_write(256), 0, "write on dot 256 must not be re-incremented");
+        assert_eq!(run_split_write(255), 0, "write on dot 255 must not be re-incremented");
+        // Outside the window the dot-256 increment applies as usual: 254 is a full
+        // CPU cycle before the increment, and -1 is "no $2006 write on this line".
+        assert_eq!(run_split_write(254), 1, "write a cycle earlier must still increment");
+        assert_eq!(run_split_write(-1), 1, "non-coincident increment must still fire");
     }
 }
