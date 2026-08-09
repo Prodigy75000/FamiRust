@@ -72,18 +72,18 @@ dependencies = [
 
 [[package]]
 name = "nes-core"
-version = "0.2.0"
+version = "0.2.1"
 
 [[package]]
 name = "nes-libretro"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "nes-core",
 ]
 
 [[package]]
 name = "nes-runner"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "flate2",
  "nes-core",
