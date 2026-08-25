@@ -72,7 +72,7 @@ crates/
   nes-asm/        a small dependency-free 6502 assembler, used to build the carts
 roms/
   famirust-demo/  the demo cartridge: source, art, and the built .nes (CC0)
-  liars-keep/     LIAR'S KEEP, a one-screen platformer (CC0)
+  monkey-farce/     MONKEY FARCE, a one-screen platformer (CC0)
 docs/notes/       clean-room hardware reference notes
 dumps/            cart images (gitignored, bring your own)
 tests/vendor/     vendored TomHarte 6502 vectors (gitignored)
@@ -158,39 +158,44 @@ and the statement of permission beside it.
 It doubles as a fixture the core is tested against: `crates/nes-core/tests/demo_cart.rs`
 needs no ROM the user has to supply, so it runs on a fresh clone on any machine.
 
-## LIAR'S KEEP
+## MONKEY FARCE
 
-[`roms/liars-keep/`](roms/liars-keep/) holds a second original cartridge, also
+[`roms/monkey-farce/`](roms/monkey-farce/) holds a second original cartridge, also
 **CC0 1.0**, and this one is a game: a one-screen platformer in which some of the
 floor is not the floor. The blocks that hold you up and the blocks that do not
 are drawn from the same tiles out of the same palette, so there is nothing to
-spot.
+spot. Six rooms, sixteen bananas, ten lives for the lot.
 
-![LIAR'S KEEP](roms/liars-keep/screenshots/1-first-lie.png)
+![MONKEY FARCE](roms/monkey-farce/screenshots/1-first-lie.png)
 
 A room is typed out as sixteen-by-thirteen ASCII in the source and the traps
 configure themselves from the drawing: a saw finds its patrol by looking along
-its own row, a shooter takes its firing phase from where it sits. There is a
-solver, `tools/reach.py`, that ports the physics out of the assembly and proves
-every room can actually be finished; four of the six in the first draft could
-not, and all four looked fine.
+its own row, a shooter takes its firing phase from where it sits. The tune is
+written as notes for the same reason, and a four-voice player mixes it against
+the sound effects by ducking rather than mixing.
+
+There is a solver, `tools/reach.py`, that ports the physics out of the assembly
+and proves every room can be finished and every banana taken. Four of the six
+rooms in the first draft could not be finished and all four looked fine; three
+later had prizes nobody could reach.
 
 ```sh
-scripts/build-liars-keep.sh                        # check, rebuild, re-hash, test
-cargo test -p nes-core --test liars_keep           # it plays, and the liar is invisible
-python roms/liars-keep/tools/reach.py              # every room is still finishable
+scripts/build-monkey-farce.sh                        # regenerate, check, rebuild, test
+cargo test -p nes-core --test monkey_farce           # it plays, and the liar is invisible
+python roms/monkey-farce/tools/reach.py              # every room is still finishable
 ```
 
 As a core fixture it exercises considerably more of the machine than a menu
 does: sixty-odd sprites, per-block attribute palettes, mid-frame palette writes,
-a vertical-blank write queue, and a save state taken in the middle of a jump.
+a vertical-blank write queue, all five APU channels driven every frame, and a
+save state taken in the middle of a jump.
 
 ## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).
 
 The two cartridges in `roms/` are the exception: `famirust-demo` and
-`liars-keep` are both CC0 1.0, so that the artifacts meant to be passed around
+`monkey-farce` are both CC0 1.0, so that the artifacts meant to be passed around
 freely have nothing attached to them. Each carries its own `LICENSE` and a
 signed statement of permission.
 

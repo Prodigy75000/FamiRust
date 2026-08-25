@@ -15,7 +15,7 @@
 # every block you can stand on it simulates real jumps, frame by frame, with the
 # same constants, the same collision box and the same order of operations as the
 # 6502, and asks which blocks you can be standing on next. Then it says whether
-# the bonfire is in that set.
+# the door is in that set, and whether every banana is.
 #
 # What it does NOT model: saws, crushers and darts. Those make a room hard. This
 # answers the different and more important question of whether it is possible,
@@ -242,7 +242,7 @@ def standable(room, bx, by):
 
 
 def cells_under(h):
-    """Every grid cell the hero's box is overlapping right now. A flask is
+    """Every grid cell the hero's box is overlapping right now. A banana is
     collected by touching it, not by landing on it, so this is what decides
     whether one is gettable."""
     out = set()
@@ -273,8 +273,12 @@ def outcomes(room, bx, by):
                 break
             brushed |= cells_under(h)
             if t & BF_GOAL:
+                # Reaching a door is not the end of the simulation, because a
+                # door only opens if you press UP in it. You are free to stand
+                # in one, think better of it, and walk on, so everything past
+                # the door is still reachable and a banana beside it is still
+                # gettable.
                 found.add(("GOAL",))
-                break
             if h.py() > PLAY_TOP + GRID_H * 16:
                 break
             if h.ground and f > 2:
@@ -355,20 +359,20 @@ def main():
         room = Room(grid)
         won, seen, brushed = solve(room)
         ents = sum(row.count(c) for row in grid for c in SPAWNERS)
-        # A flask you cannot possibly touch is not a hard flask, it is a bug
+        # A banana you cannot possibly touch is not a hard banana, it is a bug
         # that looks like content, and it is the single easiest mistake to make
         # in this format: the bait goes where it reads well, not where the jump
         # arc goes.
-        # Two bars, because they are different failures. A flask outside
-        # `brushed` cannot be had at all. A flask that is only in `brushed` can
+        # Two bars, because they are different failures. A banana outside
+        # `brushed` cannot be had at all. A banana that is only in `brushed` can
         # be had, but by a maximum-height jump from one exact spot, which in
         # the hand feels the same as impossible and is what the playtest
         # actually complained about. The bar is: stand in its cell, or stand
         # directly under it, and the rest of the risk comes from what is below.
-        flasks = [(bx, by) for by in range(GRID_H) for bx in range(GRID_W)
+        bananas = [(bx, by) for by in range(GRID_H) for bx in range(GRID_W)
                   if grid[by][bx] == "B"]
-        lost = [c for c in flasks if c not in brushed]
-        awkward = [c for c in flasks
+        lost = [c for c in bananas if c not in brushed]
+        awkward = [c for c in bananas
                    if c in brushed and c not in seen and (c[0], c[1] + 1) not in seen]
         start = room.spawn
         while start and start[1] + 1 < GRID_H and not standable(room, *start):
@@ -377,16 +381,16 @@ def main():
         mark = "OK  " if won and not lost and not awkward and not ambush else "DEAD"
         if not won or lost or awkward or ambush:
             bad += 1
-        print("%s room %d  %-14s  %d cells reachable of %d standable, %d/%d entities, %d/%d flasks"
+        print("%s room %d  %-14s  %d cells reachable of %d standable, %d/%d entities, %d/%d bananas"
               % (mark, num, name, len(seen),
                  sum(standable(room, x, y) for y in range(GRID_H) for x in range(GRID_W)),
-                 ents, ENT_MAX, len(flasks) - len(lost) - len(awkward), len(flasks)))
+                 ents, ENT_MAX, len(bananas) - len(lost) - len(awkward), len(bananas)))
         if not won:
-            print("      the bonfire cannot be reached")
+            print("      the door cannot be reached")
         for bx, by in lost:
-            print("      the flask at column %d row %d cannot be touched at all" % (bx, by))
+            print("      the banana at column %d row %d cannot be touched at all" % (bx, by))
         for bx, by in awkward:
-            print("      the flask at column %d row %d needs a maximum jump from one"
+            print("      the banana at column %d row %d needs a maximum jump from one"
                   " exact spot" % (bx, by))
         for bx, by, frames in ambush:
             print("      the shooter at column %d row %d reaches the spawn in %d"

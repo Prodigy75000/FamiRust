@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Prodigy75000
 
-//! Core-level tests driven by LIAR'S KEEP, the platformer that ships in this
+//! Core-level tests driven by MONKEY FARCE, the platformer that ships in this
 //! tree. Like the demo cartridge tests beside them these need no ROM the user
 //! has to supply, so they run on a fresh clone.
 //!
@@ -14,10 +14,11 @@
 use std::path::PathBuf;
 
 const BTN_A: u8 = 0x01;
+const BTN_UP: u8 = 0x10;
 const BTN_START: u8 = 0x08;
 const BTN_RIGHT: u8 = 0x80;
 
-/// The hero's skin colour: entry $36 of the 2C02 master palette, which only
+/// The monkey's face colour: entry $36 of the 2C02 master palette, which only
 /// his sprite palette contains. No background palette in this cartridge holds
 /// it, so a pixel this colour is him and nothing else.
 const SKIN: u32 = 0x00fe_ccc5;
@@ -34,7 +35,7 @@ fn rom() -> Vec<u8> {
         .unwrap()
         .parent()
         .unwrap()
-        .join("roms/liars-keep/liars-keep.nes");
+        .join("roms/monkey-farce/monkey-farce.nes");
     std::fs::read(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
 }
 
@@ -149,8 +150,8 @@ fn the_honest_platform_holds_him_up() {
     let mut nes = in_room_1();
     onto_the_bridge(&mut nes);
 
-    let landed = find_hero(&run(&mut nes, 1, 0)).expect("hero should be on screen");
-    let later = find_hero(&run(&mut nes, 30, 0)).expect("hero should still be on screen");
+    let landed = find_hero(&run(&mut nes, 1, 0)).expect("monkey should be on screen");
+    let later = find_hero(&run(&mut nes, 30, 0)).expect("monkey should still be on screen");
     assert_eq!(
         landed.1, later.1,
         "he sank {} pixels while stood still on a solid block",
@@ -169,7 +170,7 @@ fn the_liar_does_not() {
     // is which block he ends up over.
     let mut nes = in_room_1();
     onto_the_bridge(&mut nes);
-    let landed = find_hero(&run(&mut nes, 1, 0)).expect("hero should be on screen");
+    let landed = find_hero(&run(&mut nes, 1, 0)).expect("monkey should be on screen");
 
     // Keep walking right, onto the pair that is not there.
     run(&mut nes, 20, BTN_RIGHT);
@@ -187,14 +188,13 @@ fn the_liar_does_not() {
 }
 
 #[test]
-fn falling_into_the_spikes_costs_a_death_and_puts_him_back() {
+fn falling_into_the_spikes_costs_a_life_and_puts_him_back() {
     let mut nes = in_room_1();
-    let start = find_hero(&run(&mut nes, 1, 0)).expect("hero should be on screen");
+    let start = find_hero(&run(&mut nes, 1, 0)).expect("monkey should be on screen");
 
-    // The HUD's death counter: all four digits, on screen tile row 1 from
-    // column 24. Reading fewer than four would be reading the two that stay at
-    // zero until the hundredth death, and would pass no matter what happened.
-    let digits = |fb: &Vec<u32>| region(fb, 24 * 8, 8, 32, 8);
+    // The HUD's life counter: both digits, on screen tile row 1 from column 24.
+    // Reading only the tens would pass while the count fell from 10 to 1.
+    let digits = |fb: &Vec<u32>| region(fb, 24 * 8, 8, 16, 8);
     let before = digits(&run(&mut nes, 1, 0));
 
     // Walk straight off the ledge into the spike pit and wait out the death.
@@ -204,38 +204,63 @@ fn falling_into_the_spikes_costs_a_death_and_puts_him_back() {
     assert_ne!(
         before,
         digits(&fb),
-        "he died in the spikes and the death counter did not move"
+        "he died in the spikes and the life counter did not move"
     );
-    let back = find_hero(&fb).expect("hero should have respawned");
+    let back = find_hero(&fb).expect("monkey should have respawned");
     assert_eq!(
         back, start,
         "he did not come back to where the room starts him"
     );
 }
 
+/// Walk the whole of room 1 and end up standing in the doorway.
+fn to_the_door(nes: &mut nes_core::Nes) {
+    onto_the_bridge(nes);
+    run(nes, 20, 0);
+    run(nes, 12, BTN_RIGHT | BTN_A); // over the two liars
+    run(nes, 30, BTN_RIGHT);
+    run(nes, 20, 0);
+    run(nes, 12, BTN_RIGHT | BTN_A); // off the far end, onto the ledge
+    run(nes, 60, BTN_RIGHT); // and along it to the door
+}
+
+fn room_name(nes: &mut nes_core::Nes) -> Vec<u32> {
+    region(&run(nes, 1, 0), 8, 8, 14 * 8, 8)
+}
+
 #[test]
-fn a_room_that_has_been_cleared_is_left_behind() {
+fn a_door_you_have_not_asked_to_open_stays_shut() {
+    // The door is not a tripwire, which is the whole reason it takes a button.
+    // Standing in it, and standing in it for a while, has to be safe: room 6
+    // runs its floor straight through a doorway and the player is meant to be
+    // able to walk past.
+    let mut nes = in_room_1();
+    let before = room_name(&mut nes);
+    to_the_door(&mut nes);
+    run(&mut nes, 120, 0);
+    assert_eq!(
+        before,
+        room_name(&mut nes),
+        "the room changed while he was only standing in the doorway"
+    );
+}
+
+#[test]
+fn pressing_up_in_a_doorway_opens_it() {
     // Room 1 is crossable. Proving that is worth more than it looks: a game
     // that lies about the floor is one bad measurement away from being one
     // nobody can finish, and the room names are how the screen says which it is.
-    let name = |nes: &mut nes_core::Nes| region(&run(nes, 1, 0), 8, 8, 14 * 8, 8);
-
     let mut nes = in_room_1();
-    let room1 = name(&mut nes);
+    let room1 = room_name(&mut nes);
 
-    onto_the_bridge(&mut nes);
-    run(&mut nes, 20, 0);
-    run(&mut nes, 12, BTN_RIGHT | BTN_A); // over the two liars
-    run(&mut nes, 30, BTN_RIGHT);
-    run(&mut nes, 20, 0);
-    run(&mut nes, 12, BTN_RIGHT | BTN_A); // off the far end, onto the ledge
-    run(&mut nes, 60, BTN_RIGHT); // and along it to the bonfire
-    run(&mut nes, 90, 0); // the win pause, then the next room
+    to_the_door(&mut nes);
+    run(&mut nes, 4, BTN_UP);
+    run(&mut nes, 90, 0); // the pause, then the next room
 
     assert_ne!(
         room1,
-        name(&mut nes),
-        "he reached the bonfire and the room did not change"
+        room_name(&mut nes),
+        "he asked the door to open and the room did not change"
     );
 }
 

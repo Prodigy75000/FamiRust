@@ -21,7 +21,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn assemble_cart() -> Vec<u8> {
-    let src = repo_root().join("roms/liars-keep/src/main.s");
+    let src = repo_root().join("roms/monkey-farce/src/main.s");
     let opts = nes_asm::asm::Options { symbol_file: false };
     nes_asm::asm::assemble(&src, &opts)
         .unwrap_or_else(|e| panic!("the cartridge no longer assembles:\n{e}"))
@@ -31,7 +31,7 @@ fn assemble_cart() -> Vec<u8> {
 #[test]
 fn committed_rom_matches_a_fresh_build_of_the_committed_source() {
     let built = assemble_cart();
-    let path = repo_root().join("roms/liars-keep/liars-keep.nes");
+    let path = repo_root().join("roms/monkey-farce/monkey-farce.nes");
     let committed = std::fs::read(&path)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
 

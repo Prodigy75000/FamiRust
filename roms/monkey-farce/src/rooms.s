@@ -1,6 +1,6 @@
 ; SPDX-License-Identifier: CC0-1.0
 ;
-; LIAR'S KEEP -- the rooms.
+; MONKEY FARCE -- the rooms.
 ;
 ; A room is typed out. That is the whole format: fourteen characters of name
 ; followed by thirteen rows of sixteen characters, and the .str directive turns
@@ -13,9 +13,9 @@
 ;   #  wall                  ~  platform, does not
 ;   c  cracked floor (goes)   o  rubble (never held you up, and says so)
 ;   ^  spikes                 v  ceiling spikes
-;   L  lava                   D  bonfire: the exit
+;   L  lava                   D  the door out (press UP in it)
 ;   *  torch                  |  chain            %  backdrop brick
-;   S  where you start        B  bait
+;   S  where you start        B  a banana
 ;   W  saw                    C  crusher
 ;   >  wall that shoots right <  wall that shoots left
 ;
@@ -33,7 +33,7 @@
 ;
 ; Neither is a matter of opinion, so neither is left to the eye:
 ; `tools/reach.py` simulates real jumps from every block you can stand on and
-; reports any room where the bonfire, or a flask, is out of reach.
+; reports any room where the door, or a banana, is out of reach.
 ;
 ; The asserts under each room are the other safety net: a row typed one
 ; character short would otherwise slide every later row left by one and produce
@@ -148,13 +148,13 @@ room_4:
 .assert room_5 - room_4 == NAME_LEN + ROOM_BYTES, "room 4 is not the right size"
 
 ; ---------------------------------------------------------------------------
-; 5. Generosity. Six flasks, laid out like a reward for exploring. Five of them
-;    are over something. The room is honest in the only way that matters: every
-;    one of them is reachable, and every one of them is reachable safely, if
-;    you approach from the side nobody approaches from.
+; 5. Free bananas. Seven of them up four tiers, laid out like a reward for
+;    exploring. Most are over something. The room is honest in the only way
+;    that matters: every one of them can be reached from somewhere you can
+;    stand, which is checked rather than believed.
 ; ---------------------------------------------------------------------------
 room_5:
-  .str "GENEROSITY    "
+  .str "FREE BANANAS  "
   .str "################"
   .str "#..............#"
   .str "#..............#"
@@ -171,7 +171,7 @@ room_5:
 .assert room_6 - room_5 == NAME_LEN + ROOM_BYTES, "room 5 is not the right size"
 
 ; ---------------------------------------------------------------------------
-; 6. The last lie. The bonfire is visible from the start and the floor runs
+; 6. The last lie. The door is visible from the start and the floor runs
 ;    all the way to it. It is not that simple, and the reason it is not that
 ;    simple is the one block in this room that has nothing wrong with it.
 ; ---------------------------------------------------------------------------

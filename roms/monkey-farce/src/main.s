@@ -1,6 +1,6 @@
 ; SPDX-License-Identifier: CC0-1.0
 ;
-; LIAR'S KEEP v1.0
+; MONKEY FARCE v1.0
 ; Written by Prodigy75000. Dedicated to the public domain under CC0 1.0.
 ;
 ; A one-screen platformer for the NES, in which some of the floor is not the
@@ -37,7 +37,11 @@ SQ1_LO    = $4002
 SQ1_HI    = $4003
 SQ2_VOL   = $4004
 SQ2_SWEEP = $4005
+SQ2_LO    = $4006
+SQ2_HI    = $4007
 TRI_LIN   = $4008
+TRI_LO    = $400A
+TRI_HI    = $400B
 NOISE_VOL = $400C
 NOISE_LO  = $400E
 NOISE_HI  = $400F
@@ -146,6 +150,22 @@ OAM_LIMIT = 240
 M_TITLE = 0
 M_PLAY  = 1
 M_END   = 2
+M_OVER  = 3
+
+; Ten tries at the whole keep, not ten at each room. Running out sends you back
+; to the first door, which is what turns six rooms you can grind into a run you
+; can lose.
+LIVES_START = 10
+
+; How loud each voice starts a note, and how quietly it is allowed to end up.
+; The hook keeps a floor so it sustains; the arpeggio and the drums decay away.
+MUS_LEAD_VOL  = 9
+MUS_LEAD_MIN  = 5
+MUS_HARM_VOL  = 8
+MUS_HARM_MIN  = 4
+MUS_KICK_VOL  = 11
+MUS_SNARE_VOL = 10
+MUS_HAT_VOL   = 4
 
 HS_ALIVE = 0
 HS_DEAD  = 1
@@ -219,6 +239,15 @@ sfx_id       = $3D
 sv_x         = $3E        ; a loop index that has to survive a subroutine
 sv_y         = $3F
 
+music_on     = $40
+music_row    = $41        ; wraps at 256, which is exactly the length of the song
+music_timer  = $42
+mus_vol1     = $43
+mus_vol2     = $44
+mus_vol4     = $45
+lives        = $46
+bananas      = $47
+
 ; ---------------------------------------------------------------------------
 ; RAM
 ; ---------------------------------------------------------------------------
@@ -247,8 +276,7 @@ dart_x     = $04D8
 dart_y     = $04E0
 dart_dx    = $04E8
 
-deaths     = $04F0        ; four digits, most significant first
-souls      = $04F4
+
 
 .org $8000
 
@@ -295,6 +323,8 @@ reset:
   bpl @vblank2
 
   jsr silence_apu
+  lda #LIVES_START
+  sta lives
   jsr enter_title
 
 ; ---------------------------------------------------------------------------
@@ -310,6 +340,7 @@ main:
   sta patch_count
 
   jsr sfx_tick
+  jsr music_tick
   jsr flicker
 
   lda mode
@@ -317,6 +348,8 @@ main:
   beq @play
   cmp #M_END
   beq @end
+  cmp #M_OVER
+  beq @over
   jsr tick_title
   jmp main
 @play:
@@ -324,6 +357,9 @@ main:
   jmp main
 @end:
   jsr tick_end
+  jmp main
+@over:
+  jsr tick_over
   jmp main
 
 ; ---------------------------------------------------------------------------
@@ -587,9 +623,9 @@ silence_apu:
   sta sfx_dur
   rts
 
-; Called from inside entity loops, so it gives X back. So do inc_deaths and
-; inc_souls below, and hero_die, which calls both: an entity routine that lost
-; its own index to a sound effect is a very quiet kind of bug.
+; Called from inside entity loops, so it gives X back. So does hero_die, which
+; calls it: an entity routine that lost its own index to a sound effect is a
+; very quiet kind of bug.
 sfx_start:
   sta sfx_id
   txa
@@ -684,6 +720,219 @@ sfx_tick:
   sta NOISE_HI
   rts
 
+; ---------------------------------------------------------------------------
+; Music
+;
+; Four voices off one row counter. The counter is a byte and the song is exactly
+; 256 rows, so looping it costs nothing: it wraps.
+;
+; Sound effects live on pulse 1 and the noise channel, which are the two the
+; tune can spare for a moment. Rather than mixing, each voice asks whether its
+; channel is free and simply does not play if it is not, so a jump ducks the
+; hook for a fifth of a second and the bass and the arpeggio carry the tune
+; underneath it. A note lost that way is not recovered; the next row brings
+; another one.
+; ---------------------------------------------------------------------------
+music_start:
+  lda #0
+  sta music_row
+  sta mus_vol1
+  sta mus_vol2
+  sta mus_vol4
+  lda #1
+  sta music_timer
+  sta music_on
+  rts
+
+music_stop:
+  lda #0
+  sta music_on
+  sta TRI_LIN
+  lda #%00110000
+  sta SQ2_VOL
+  rts
+
+; Carry set if the tune may write to pulse 1 this frame.
+p1_free:
+  lda sfx_dur
+  beq @yes
+  lda sfx_ch
+  beq @no
+@yes:
+  sec
+  rts
+@no:
+  clc
+  rts
+
+noise_free:
+  lda sfx_dur
+  beq @yes
+  lda sfx_ch
+  bne @no
+@yes:
+  sec
+  rts
+@no:
+  clc
+  rts
+
+music_tick:
+  lda music_on
+  bne @on
+  rts
+@on:
+  dec music_timer
+  bne @env
+  lda #MUSIC_TEMPO
+  sta music_timer
+  jsr music_row_step
+  inc music_row
+@env:
+  jmp music_envelopes
+
+music_row_step:
+  ldx music_row
+
+  ; ---- pulse 1: the hook ----
+  lda song_lead,x
+  cmp #NOTE_HOLD
+  beq @harm
+  cmp #NOTE_REST
+  bne @lead
+  lda #0
+  sta mus_vol1
+  jmp @harm
+@lead:
+  tay
+  lda #MUS_LEAD_VOL
+  sta mus_vol1
+  jsr p1_free
+  bcc @harm
+  lda note_lo,y
+  sta SQ1_LO
+  lda note_hi,y
+  ora #%00001000            ; a non-zero length, which the halt bit then freezes
+  sta SQ1_HI
+
+  ; ---- pulse 2: the arpeggio ----
+@harm:
+  ldx music_row
+  lda song_harm,x
+  cmp #NOTE_HOLD
+  beq @bass
+  cmp #NOTE_REST
+  bne @harm_on
+  lda #0
+  sta mus_vol2
+  jmp @bass
+@harm_on:
+  tay
+  lda #MUS_HARM_VOL
+  sta mus_vol2
+  lda note_lo,y
+  sta SQ2_LO
+  lda note_hi,y
+  ora #%00001000
+  sta SQ2_HI
+
+  ; ---- triangle: the bass ----
+@bass:
+  ldx music_row
+  lda song_bass,x
+  cmp #NOTE_HOLD
+  beq @drum
+  cmp #NOTE_REST
+  bne @bass_on
+  lda #0
+  sta TRI_LIN
+  jmp @drum
+@bass_on:
+  tay
+  lda #$FF                  ; control set: load the linear counter and hold it
+  sta TRI_LIN
+  lda tri_lo,y
+  sta TRI_LO
+  lda tri_hi,y
+  ora #%00001000
+  sta TRI_HI
+
+  ; ---- noise: the drums ----
+@drum:
+  ldx music_row
+  lda song_drum,x
+  beq @done
+  cmp #DRUM_KICK
+  beq @kick
+  cmp #DRUM_SNARE
+  beq @snare
+  lda #1                    ; hat: the shortest period, so the brightest hiss
+  sta tmpa
+  lda #MUS_HAT_VOL
+  jmp @hit
+@kick:
+  lda #13                   ; a long period, which on the noise channel is low
+  sta tmpa
+  lda #MUS_KICK_VOL
+  jmp @hit
+@snare:
+  lda #6
+  sta tmpa
+  lda #MUS_SNARE_VOL
+@hit:
+  sta mus_vol4
+  jsr noise_free
+  bcc @done
+  lda tmpa
+  sta NOISE_LO
+  lda #$08
+  sta NOISE_HI
+@done:
+  rts
+
+music_envelopes:
+  jsr p1_free
+  bcc @two
+  lda mus_vol1
+  ora #%10110000            ; duty 50%, halt length, constant volume
+  sta SQ1_VOL
+  lda #SWEEP_OFF
+  sta SQ1_SWEEP
+@two:
+  lda mus_vol2
+  ora #%01110000            ; duty 25%, which sits under the hook rather than on it
+  sta SQ2_VOL
+  lda #SWEEP_OFF
+  sta SQ2_SWEEP
+
+  jsr noise_free
+  bcc @decay
+  lda mus_vol4
+  ora #%00110000
+  sta NOISE_VOL
+
+  ; One step of decay every fourth frame. The hook and the arpeggio stop at a
+  ; floor so they hold; the drums are allowed all the way down to nothing.
+@decay:
+  lda frame_lo
+  and #3
+  bne @done
+  lda mus_vol1
+  cmp #(MUS_LEAD_MIN+1)
+  bcc @d2
+  dec mus_vol1
+@d2:
+  lda mus_vol2
+  cmp #(MUS_HARM_MIN+1)
+  bcc @d4
+  dec mus_vol2
+@d4:
+  lda mus_vol4
+  beq @done
+  dec mus_vol4
+@done:
+  rts
+
 ; One palette write a frame animates every flame and every pool of lava in the
 ; room at once, which is a great deal cheaper than redrawing their tiles.
 flicker:
@@ -721,6 +970,7 @@ enter_title:
   jsr draw_script
   lda #M_TITLE
   sta mode
+  jsr music_start
   jsr rendering_on
   rts
 
@@ -731,14 +981,10 @@ tick_title:
   lda #SFX_UI
   jsr sfx_start
   ; A new run, so the tally starts again.
-  ldx #3
+  lda #LIVES_START
+  sta lives
   lda #0
-@z:
-  sta deaths,x
-  sta souls,x
-  dex
-  bpl @z
-  lda #0
+  sta bananas
   sta room_idx
   jsr enter_play
 @done:
@@ -758,37 +1004,85 @@ enter_end:
   sta ptr+1
   jsr draw_script
 
-  lda #>END_DEATHS
+  lda bananas
+  jsr split_digits
+  lda #>END_BANANAS
   sta PPUADDR
-  lda #<END_DEATHS
+  lda #<END_BANANAS
   sta PPUADDR
-  ldx #0
-@d:
-  lda deaths,x
+  lda tmp0
   clc
   adc #$10                  ; the digit glyphs start at tile $10
   sta PPUDATA
-  inx
-  cpx #4
-  bne @d
-
-  lda #>END_SOULS
-  sta PPUADDR
-  lda #<END_SOULS
-  sta PPUADDR
-  ldx #0
-@s:
-  lda souls,x
+  lda tmp1
   clc
   adc #$10
   sta PPUDATA
-  inx
-  cpx #4
-  bne @s
+
+  lda lives
+  jsr split_digits
+  lda #>END_LIVES
+  sta PPUADDR
+  lda #<END_LIVES
+  sta PPUADDR
+  lda tmp0
+  clc
+  adc #$10
+  sta PPUDATA
+  lda tmp1
+  clc
+  adc #$10
+  sta PPUDATA
 
   lda #M_END
   sta mode
   jsr rendering_on
+  rts
+
+; ---------------------------------------------------------------------------
+; Out of lives. The keep keeps its bananas.
+; ---------------------------------------------------------------------------
+enter_over:
+  jsr rendering_off
+  jsr hide_sprites
+  jsr music_stop
+  jsr clear_vram
+  jsr load_palette
+  lda #<over_script
+  sta ptr
+  lda #>over_script
+  sta ptr+1
+  jsr draw_script
+  lda #M_OVER
+  sta mode
+  lda #SFX_DIE
+  jsr sfx_start
+  jsr rendering_on
+  rts
+
+tick_over:
+  lda pad1_new
+  and #BTN_START
+  beq @done
+  jsr enter_title
+@done:
+  rts
+
+; A = a number under 100. Leaves its tens in tmp0 and its units in tmp1.
+; The 2A03 has its decimal mode fused off, so this is the whole of the
+; arithmetic available: subtract ten until it stops going.
+split_digits:
+  ldx #0
+@l:
+  cmp #10
+  bcc @done
+  sec
+  sbc #10
+  inx
+  jmp @l
+@done:
+  stx tmp0
+  sta tmp1
   rts
 
 tick_end:
@@ -1831,11 +2125,17 @@ tick_play:
   beq @draw
   lda hero_state
   bne @draw
+  ; A door is not a tripwire. You have to stand in it and ask, which costs one
+  ; button and buys the room the right to put a door somewhere you would
+  ; otherwise run straight through by accident.
+  lda pad1
+  and #BTN_UP
+  beq @draw
   lda #HS_WIN
   sta hero_state
   lda #WIN_FRAMES
   sta state_timer
-  lda #SFX_WIN
+  lda #SFX_DOOR
   jsr sfx_start
 
 @draw:
@@ -1859,6 +2159,11 @@ tick_dying:
   sta hero_yh
   dec state_timer
   bne @draw
+  lda lives
+  bne @again
+  jsr enter_over
+  rts
+@again:
   jsr enter_play
   rts
 @draw:
@@ -1958,52 +2263,21 @@ hero_die:
   lda #0
   sta hero_vxl
   sta hero_vxh
-  jsr inc_deaths
+  lda lives
+  beq @nolife
+  dec lives
+@nolife:
+  lda #1
+  sta hud_dirty
   lda #SFX_DIE
   jsr sfx_start
 @already:
   rts
 
-; Four digits, rippled by hand. The 2A03 has its decimal mode fused off, so
-; there is no adc shortcut to reach for here even if it were tempting.
-inc_deaths:
-  txa
-  pha
-  ldx #3
-@l:
-  inc deaths,x
-  lda deaths,x
-  cmp #10
-  bcc @done
-  lda #0
-  sta deaths,x
-  dex
-  bpl @l
-@done:
+inc_bananas:
+  inc bananas
   lda #1
   sta hud_dirty
-  pla
-  tax
-  rts
-
-inc_souls:
-  txa
-  pha
-  ldx #3
-@l:
-  inc souls,x
-  lda souls,x
-  cmp #10
-  bcc @done
-  lda #0
-  sta souls,x
-  dex
-  bpl @l
-@done:
-  lda #1
-  sta hud_dirty
-  pla
-  tax
   rts
 
 ; ---------------------------------------------------------------------------
@@ -2084,7 +2358,7 @@ hero_hits:
   clc
   rts
 
-; The bait. It bobs, it glitters, and it is worth exactly one point. Where it
+; The bait. It bobs, it shines, and it is worth exactly one banana. Where it
 ; hangs is the room's business, and every room hangs it somewhere expensive.
 ent_bait:
   ; The one box left at full size. Everything else here is trying to kill you
@@ -2100,7 +2374,7 @@ ent_bait:
   bcc @done
   lda #0
   sta ent_type,x
-  jsr inc_souls
+  jsr inc_bananas
   lda #SFX_PICK
   jsr sfx_start
 @done:
@@ -2464,7 +2738,7 @@ draw_entities:
   beq @crusher
   jmp @next                 ; a shooter is part of the wall and draws nothing
 @bait:
-  lda #MS_FLASK
+  lda #MS_BANANA
   sta tmp7
   lda #3
   sta tmp2
@@ -2664,41 +2938,38 @@ end_sprites:
 
 push_hud:
   lda hud_dirty
-  beq @done
+  bne @go
+  rts
+@go:
   lda #0
   sta hud_dirty
 
-  lda #>HUD_DEATHS
+  lda #>HUD_LIVES
   sta tmp4
-  lda #<HUD_DEATHS
+  lda #<HUD_LIVES
   sta tmp5
-  ldx #0
-@d:
-  lda deaths,x
-  clc
-  adc #$10
-  jsr push_patch
-  inc tmp5
-  inx
-  cpx #4
-  bne @d
+  lda lives
+  jsr push_two
 
-  lda #>HUD_SOULS
+  lda #>HUD_BANANAS
   sta tmp4
-  lda #<HUD_SOULS
+  lda #<HUD_BANANAS
   sta tmp5
-  ldx #0
-@s:
-  lda souls,x
+  lda bananas
+  jmp push_two
+
+; A = a number under 100, tmp4/tmp5 = where its tens digit goes.
+push_two:
+  jsr split_digits
+  lda tmp0
   clc
   adc #$10
   jsr push_patch
   inc tmp5
-  inx
-  cpx #4
-  bne @s
-@done:
-  rts
+  lda tmp1
+  clc
+  adc #$10
+  jmp push_patch
 
 ; ---------------------------------------------------------------------------
 ; The address of the first tile of each block row. The playfield starts on
@@ -2720,6 +2991,7 @@ row_hi:
 ; Data, tables and art
 ; ---------------------------------------------------------------------------
 .include "data.s"
+.include "music.s"
 .include "artmap.s"
 .include "rooms.s"
 .include "chr.s"
