@@ -141,6 +141,54 @@ fn main() -> ExitCode {
         }
     }
 
+    // A WAV of the run, and with $TRACE a per-frame energy trace beside it.
+    // The trace is the useful half when a sound effect goes missing: an effect
+    // that never fires and an effect that fires inaudibly sound identical from
+    // the far side of a speaker, and are not the same bug.
+    {
+        let sr = nes_core::SAMPLE_RATE as usize;
+        let wav = std::path::Path::new(&outdir).join("audio.wav");
+        if let Some(d) = wav.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        if let Ok(f) = std::fs::File::create(&wav) {
+            let mut f = std::io::BufWriter::new(f);
+            let n = (audio.len() * 2) as u32;
+            let _ = f.write_all(b"RIFF");
+            let _ = f.write_all(&(36 + n).to_le_bytes());
+            let _ = f.write_all(b"WAVEfmt ");
+            let _ = f.write_all(&16u32.to_le_bytes());
+            let _ = f.write_all(&1u16.to_le_bytes());
+            let _ = f.write_all(&1u16.to_le_bytes());
+            let _ = f.write_all(&(sr as u32).to_le_bytes());
+            let _ = f.write_all(&(sr as u32 * 2).to_le_bytes());
+            let _ = f.write_all(&2u16.to_le_bytes());
+            let _ = f.write_all(&16u16.to_le_bytes());
+            let _ = f.write_all(b"data");
+            let _ = f.write_all(&n.to_le_bytes());
+            for &s in &audio {
+                let v = ((s * 4.0).clamp(-1.0, 1.0) * 32767.0) as i16;
+                let _ = f.write_all(&v.to_le_bytes());
+            }
+            println!("wrote {}", wav.display());
+        }
+        let per_frame = audio.len() / (end as usize + 1).max(1);
+        if std::env::var("TRACE").is_ok() && per_frame > 0 {
+            println!("--- frames with any audio in them ---");
+            for f in 0..=end as usize {
+                let c = &audio[(f * per_frame).min(audio.len())
+                    ..((f + 1) * per_frame).min(audio.len())];
+                if c.is_empty() {
+                    continue;
+                }
+                let r = (c.iter().map(|s| s * s).sum::<f32>() / c.len() as f32).sqrt();
+                if r > 0.002 {
+                    println!("f{f:<5} rms {r:.4}");
+                }
+            }
+        }
+    }
+
     // A quiet channel that is holding a level rather than sitting at zero is
     // inaudible until the stream stops, so report both.
     let peak = audio.iter().fold(0f32, |a, &b| a.max(b.abs()));

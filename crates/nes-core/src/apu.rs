@@ -178,16 +178,29 @@ impl Pulse {
         }
     }
 
-    fn sweep_target(&self) -> u16 {
-        let change = self.timer_period >> self.sweep_shift;
+    /// The period the sweep unit is aiming at. Signed, because for pulse 1 it
+    /// genuinely can be: that channel's adder has its carry wired to add the
+    /// ones' complement, so negating gives `-c - 1`, and the very common
+    /// "disable the sweep" write of $08 (negate set, shift zero) asks for
+    /// `period - period - 1`, which is -1.
+    ///
+    /// Only two things mute the channel: a current period under 8, and a
+    /// target over $7FF. A negative target is neither. Computing this in u16
+    /// and letting it wrap turned that -1 into $FFFF, which is over $7FF, so
+    /// pulse 1 went permanently silent the moment anything wrote $08 to $4001.
+    /// That is the standard way to turn the sweep off, so in practice it meant
+    /// pulse 1 never made a sound at all.
+    fn sweep_target(&self) -> i32 {
+        let period = self.timer_period as i32;
+        let change = (self.timer_period >> self.sweep_shift) as i32;
         if self.sweep_negate {
             if self.is_pulse2 {
-                self.timer_period.wrapping_sub(change)
+                period - change
             } else {
-                self.timer_period.wrapping_sub(change).wrapping_sub(1)
+                period - change - 1
             }
         } else {
-            self.timer_period + change
+            period + change
         }
     }
     fn muted(&self) -> bool {
@@ -205,7 +218,7 @@ impl Pulse {
 
     fn clock_sweep(&mut self) {
         if self.sweep_divider == 0 && self.sweep_enabled && self.sweep_shift != 0 && !self.muted() {
-            self.timer_period = self.sweep_target();
+            self.timer_period = self.sweep_target().max(0) as u16;
         }
         if self.sweep_divider == 0 || self.sweep_reload {
             self.sweep_divider = self.sweep_period;
@@ -876,5 +889,65 @@ impl SaveState for Apu {
         self.frame_reset_pending = r.bool()?;
         self.cycle_parity = r.bool()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A pulse channel set up the way a cartridge normally sets one up: a tone,
+    /// constant volume, length halted, and the sweep turned off.
+    fn voiced(is_pulse2: bool, sweep: u8) -> Pulse {
+        let mut p = Pulse { is_pulse2, ..Default::default() };
+        p.len.set_enabled(true); // before the $4003 write, which loads the length
+        p.write(0, 0b1011_0111); // duty 50%, halt length, constant volume 7
+        p.write(1, sweep);
+        p.write(2, 0xA0); // period $01A0, about 268 Hz
+        p.write(3, 0x01);
+        p
+    }
+
+    /// Runs the sequencer far enough to visit every phase of the duty cycle.
+    fn ever_audible(p: &mut Pulse) -> bool {
+        let mut heard = false;
+        for _ in 0..0x2000 {
+            p.clock_timer();
+            heard |= p.output() != 0;
+        }
+        heard
+    }
+
+    #[test]
+    fn turning_the_sweep_off_does_not_silence_pulse_1() {
+        // $08 is negate set with a shift of zero, which is how most code turns
+        // the sweep off. On pulse 1 that asks for a target of `period - period
+        // - 1`, i.e. -1, because that channel's adder adds the ones'
+        // complement. Computed in unsigned arithmetic it wraps to $FFFF, sails
+        // past the "target over $7FF mutes the channel" rule, and takes the
+        // channel off the air for good.
+        //
+        // Nothing about -1 is over $7FF. Both channels must stay audible.
+        assert!(ever_audible(&mut voiced(false, 0x08)), "pulse 1 went silent");
+        assert!(ever_audible(&mut voiced(true, 0x08)), "pulse 2 went silent");
+    }
+
+    #[test]
+    fn a_target_over_7ff_still_mutes() {
+        // The other half of the same rule, so the test above cannot be passed
+        // by simply never muting. Shift 0 without negate doubles the period, so
+        // any period over $3FF overflows the target and must mute.
+        let mut p = voiced(false, 0x00);
+        p.write(2, 0x00); // period $0500, doubled is $0A00
+        p.write(3, 0x05);
+        assert!(!ever_audible(&mut p), "a target of $0A00 should have muted it");
+    }
+
+    #[test]
+    fn a_period_under_eight_still_mutes() {
+        let mut p = voiced(false, 0x08);
+        p.write(2, 0x04);
+        p.write(3, 0x00);
+        assert!(!ever_audible(&mut p), "a period of 4 should have muted it");
     }
 }
