@@ -121,6 +121,23 @@ DART_SPEED     = 2
 CRUSH_ARM      = 14     ; the pause between a crusher noticing you and falling
 CRUSH_SIT      = 26
 
+; What to write to a sweep register to mean "leave this channel's pitch alone".
+;
+; The value matters far more than it looks. The usual choice is $08: negate set,
+; shift zero. On pulse 1 that asks for a target period of `period - period - 1`,
+; because that channel's adder is wired to add the ones' complement, so the
+; answer is -1. Nothing about -1 is over $7FF and it must not mute anything, but
+; an emulator that works the target out in unsigned arithmetic sees $FFFF,
+; applies the "a target over $7FF mutes the channel" rule, and takes pulse 1 off
+; the air permanently. That is not a hypothetical: it is why the first two
+; releases of this cartridge had no jump sound.
+;
+; $7F asks for `period - (period >> 7) - 1` instead, which is positive and
+; comfortably in range for every period a tune will ever use. It leaves nothing
+; for anybody to get wrong, which is what a value written into a ROM that is
+; meant to run anywhere ought to do.
+SWEEP_OFF = $7F
+
 ENT_MAX   = 8
 DART_MAX  = 6
 PATCH_MAX = 32
@@ -561,8 +578,8 @@ silence_apu:
   sta SQ2_VOL
   sta TRI_LIN
   sta NOISE_VOL
-  lda #$08
-  sta SQ1_SWEEP             ; a zero here would trip the sweep mute
+  lda #SWEEP_OFF
+  sta SQ1_SWEEP
   sta SQ2_SWEEP
   lda #%00001111
   sta APUSTATUS
@@ -644,7 +661,7 @@ sfx_tick:
   ora #%00110000
   ora tmpa
   sta SQ1_VOL
-  lda #$08
+  lda #SWEEP_OFF
   sta SQ1_SWEEP
   lda sfx_plo
   sta SQ1_LO
@@ -2021,8 +2038,13 @@ tick_entities:
 @done:
   rts
 
-; tmp0 = the thing's x, tmp1 = its y, tmp4 = its size minus one.
-; Carry set if it is touching the hero.
+; Does this thing overlap the hero?
+;
+; tmp0/tmp1 = its top-left, tmp4 = its width minus one, tmp6 = its height minus
+; one. Width and height are separate, and every caller passes a box smaller than
+; the sprite it belongs to, because a saw is a disc drawn inside a 16x16 tile and
+; being killed by the empty corner of a circle is the kind of unfairness that
+; reads as a broken game rather than a hard one.
 hero_hits:
   lda hero_xh
   clc
@@ -2047,7 +2069,7 @@ hero_hits:
   bcc @no
   lda tmp1
   clc
-  adc tmp4
+  adc tmp6
   sta tmp3
   lda hero_yh
   clc
@@ -2065,12 +2087,15 @@ hero_hits:
 ; The bait. It bobs, it glitters, and it is worth exactly one point. Where it
 ; hangs is the room's business, and every room hangs it somewhere expensive.
 ent_bait:
+  ; The one box left at full size. Everything else here is trying to kill you
+  ; and gets shrunk; a prize should be easy to take.
   lda ent_x,x
   sta tmp0
   lda ent_y,x
   sta tmp1
   lda #15
   sta tmp4
+  sta tmp6
   jsr hero_hits
   bcc @done
   lda #0
@@ -2104,11 +2129,16 @@ ent_saw:
   sta ent_p3,x
 @move_done:
   lda ent_x,x
+  clc
+  adc #2
   sta tmp0
   lda ent_y,x
+  clc
+  adc #2
   sta tmp1
-  lda #15
+  lda #11
   sta tmp4
+  sta tmp6
   jsr hero_hits
   bcc @done
   jsr hero_die
@@ -2241,11 +2271,15 @@ ent_crusher:
 
 @hurt:
   lda ent_x,x
+  clc
+  adc #1
   sta tmp0
   lda ent_y,x
   sta tmp1
-  lda #15
+  lda #13
   sta tmp4
+  lda #12                   ; its teeth stop three quarters of the way down
+  sta tmp6
   jsr hero_hits
   bcc @done
   jsr hero_die
@@ -2321,11 +2355,17 @@ tick_darts:
   jmp @next
 @alive:
   lda dart_x,x
+  clc
+  adc #1
   sta tmp0
   lda dart_y,x
+  clc
+  adc #2
   sta tmp1
-  lda #7
+  lda #5
   sta tmp4
+  lda #3
+  sta tmp6
   stx tmpb
   jsr hero_hits
   ldx tmpb

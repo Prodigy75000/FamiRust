@@ -133,7 +133,7 @@ It does not model saws, crushers or darts. Those decide whether a room is hard.
 This answers the different and more important question of whether it is
 possible, which is a property of the walls alone.
 
-## Two rules that cost a playtest each
+## Three rules that cost a playtest each
 
 **Platforms go two rows apart, never three.** Standing on a block puts you in
 the row above it and the jump clears 36 pixels, so row 8 to row 6 works and row
@@ -143,6 +143,12 @@ the row above it and the jump clears 36 pixels, so row 8 to row 6 works and row
 they stand on. Its dart leaves at its own height, so a `>` drawn one row too
 high sails over everybody's head and the room becomes a corridor with
 decorative gunfire in it.
+
+**Nothing shoots along the row you spawn in, from the side you spawn on.** In
+the picture the `>` and the `S` are simply next to each other; on the screen a
+dart leaves the wall on the frame the room appears and there is no version of
+that which is a hard opening. `reach.py` measures how long the first dart takes
+to arrive and fails the room under three quarters of a second.
 
 ## Building it
 

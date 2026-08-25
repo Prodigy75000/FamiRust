@@ -97,9 +97,15 @@ room_2:
 .assert room_3 - room_2 == NAME_LEN + ROOM_BYTES, "room 2 is not the right size"
 
 ; ---------------------------------------------------------------------------
-; 3. The gallery. The walls shoot. Each shooter takes its firing phase from
-;    where it sits in the grid, so they never line up into one safe rhythm and
-;    no two rooms full of them ever feel the same.
+; 3. The gallery. The walls shoot, and which wall block is a shooter is not
+;    marked. Each one takes its firing phase from where it sits in the grid, so
+;    they never line up into one safe rhythm.
+;
+;    The wall the player spawns against does NOT shoot. It used to, and a dart
+;    left it on the same frame the room appeared, which is not a hard opening
+;    but a coin flip taken out of the player's hands. The gun on the far wall
+;    takes about a second and three quarters to cross the room, which is the
+;    difference between being shot at and being executed.
 ; ---------------------------------------------------------------------------
 room_3:
   .str "THE GALLERY   "
@@ -112,7 +118,7 @@ room_3:
   .str "#...========...#"
   .str ">..B...........<"
   .str "#..=~==..====..#"
-  .str ">S............D<"
+  .str "#S............D<"
   .str "#==============#"
   .str "################"
   .str "################"

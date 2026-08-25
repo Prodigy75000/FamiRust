@@ -43,6 +43,13 @@ WALK_ACC, AIR_ACC, FRICTION, WALK_MAX = K["WALK_ACC"], K["AIR_ACC"], K["FRICTION
 HB_L, HB_R, HB_T, HB_B = K["HB_L"], K["HB_R"], K["HB_T"], K["HB_B"]
 PLAY_TOP, GRID_W, GRID_H = K["PLAY_TOP"], K["GRID_W"], K["GRID_H"]
 NAME_LEN, COYOTE = K["NAME_LEN"], K["COYOTE_FRAMES"]
+DART_SPEED = K["DART_SPEED"]
+
+# How much warning the room owes you before the first thing shoots at you. A
+# dart crossing three blocks takes about this long, which is enough to see it
+# leave the wall. Less than this and the room has killed you before you have
+# finished reading its name.
+SAFE_FRAMES = 45
 
 BF_SOLID, BF_HAZARD, BF_CRUMBLE, BF_GOAL = 0x01, 0x02, 0x04, 0x08
 
@@ -306,6 +313,39 @@ ENT_MAX = 8
 SPAWNERS = "BWC><"
 
 
+def spawn_ambush(grid, start):
+    """Shooters that can put a dart into you before you have had time to
+    understand there is a room.
+
+    A shooter fires along its own row at its own height, and the player spends
+    the first second of a room standing exactly where they were put. Drawing a
+    `>` in the wall beside the `S` is therefore not a hard opening, it is a
+    coin flip taken out of the player's hands, and it is very easy to do by
+    accident because in the picture the two characters are simply next to each
+    other."""
+    out = []
+    sx, sy = start
+    for by in range(GRID_H):
+        if by != sy:
+            continue
+        for bx in range(GRID_W):
+            c = grid[by][bx]
+            if c not in "><":
+                continue
+            step = 1 if c == ">" else -1
+            x = bx + step
+            while 0 <= x < GRID_W:
+                if x == sx:
+                    frames = max(0, (abs(x - bx) - 1) * 16) // DART_SPEED
+                    if frames < SAFE_FRAMES:
+                        out.append((bx, by, frames))
+                    break
+                if flags_of(grid[by][x]) & BF_SOLID:
+                    break
+                x += step
+    return out
+
+
 def main():
     want = int(sys.argv[1]) if len(sys.argv) > 1 else None
     bad = 0
@@ -330,8 +370,12 @@ def main():
         lost = [c for c in flasks if c not in brushed]
         awkward = [c for c in flasks
                    if c in brushed and c not in seen and (c[0], c[1] + 1) not in seen]
-        mark = "OK  " if won and not lost and not awkward else "DEAD"
-        if not won or lost or awkward:
+        start = room.spawn
+        while start and start[1] + 1 < GRID_H and not standable(room, *start):
+            start = (start[0], start[1] + 1)
+        ambush = spawn_ambush(grid, start) if start else []
+        mark = "OK  " if won and not lost and not awkward and not ambush else "DEAD"
+        if not won or lost or awkward or ambush:
             bad += 1
         print("%s room %d  %-14s  %d cells reachable of %d standable, %d/%d entities, %d/%d flasks"
               % (mark, num, name, len(seen),
@@ -344,10 +388,13 @@ def main():
         for bx, by in awkward:
             print("      the flask at column %d row %d needs a maximum jump from one"
                   " exact spot" % (bx, by))
+        for bx, by, frames in ambush:
+            print("      the shooter at column %d row %d reaches the spawn in %d"
+                  " frames" % (bx, by, frames))
         if ents > ENT_MAX:
             print("      room %d asks for %d entities and only %d will spawn"
                   % (num, ents, ENT_MAX))
-        if not won or lost or awkward or os.environ.get("SHOW"):
+        if not won or lost or awkward or ambush or os.environ.get("SHOW"):
             # Print the room with the reachable cells marked, which is the whole
             # diagnosis: you can see exactly where the search ran out of floor.
             for by in range(GRID_H):

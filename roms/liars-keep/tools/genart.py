@@ -201,16 +201,21 @@ B["lava"] = [
 "1111111111111111",
 ]
 
+# Fire, in a palette of black, red, yellow, white. The colours have to run
+# outward from the hot middle: white core, yellow body, red edge. Drawn the
+# other way round, with white filling a yellow outline, it stops being fire and
+# becomes a bright blob with a rim, which is how the first bonfire here ended up
+# unrecognisable.
 B["torch"] = [
-".......3........",
-"......323.......",
-"......323.......",
-".....23332......",
-".....23332......",
-"....2333332.....",
-"....2333332.....",
-".....23332......",
-"......232.......",
+".......1........",
+"......121.......",
+"......121.......",
+".....12321......",
+".....12321......",
+"....1233321.....",
+"....1233321.....",
+".....12321......",
+"......121.......",
 ".......1........",
 "......111.......",
 ".....11111......",
@@ -258,25 +263,29 @@ B["rubble"] = [
 "1111111111111111",
 ]
 
-# The bonfire. Reaching it is how a room ends, which makes it the only thing
-# in this cartridge that is exactly what it looks like.
+# The bonfire. Reaching it is how a room ends, which makes it the only thing in
+# this cartridge that is exactly what it looks like, so it had better look like
+# it. The first attempt did not: the flame was too narrow and pointed, and the
+# logs underneath were drawn as a row of gaps, which together read to a
+# playtester as "a shard on top of an ocarina". A wider flame over a solid mound
+# of coals says campfire without needing a caption.
 B["bonfire"] = [
 "................",
-".......3........",
-"......232.......",
-"......232.......",
-".....23332......",
-".....23332......",
-"....2333332.....",
-"....2331332.....",
-"...23311332.....",
-"...2311113332...",
-"..1111111111....",
-".11.11.11.111...",
-".1111111111111..",
-"..11111111111...",
+".......1........",
+"......121.......",
+"......121.......",
+".....12321......",
+".....12321......",
+"....1233321.....",
+"....1233321.....",
+"....1233321.....",
+".....12321......",
+"......121.......",
 "................",
-"................",
+"...1111111111...",
+"..11.111111.11..",
+".111111111111...",
+".11111111111....",
 ]
 
 # name, art, palette, flags. The order fixes the block ids.
