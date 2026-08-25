@@ -51,3 +51,7 @@ flate2 = "1"
 [[bin]]
 name = "pcprobe"
 path = "src/pcprobe.rs"
+# Scripted input harness: exact button frames, for driving something playable.
+[[bin]]
+name = "play"
+path = "src/play.rs"

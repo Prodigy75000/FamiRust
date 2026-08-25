@@ -67,10 +67,12 @@ crates/
   nes-core/       the emulator core (lib crate: nes_core)
   nes-libretro/   libretro C ABI cdylib -> libnescore_libretro.{so,dll,dylib}
   nes-runner/     dev harnesses: `tomharte` (CPU conformance), `nes` (headless
-                  render + audio dump), `fingerprint` (save-state parity check)
-  nes-asm/        a small dependency-free 6502 assembler, used to build the cart
+                  render + audio dump), `play` (scripted input, for driving
+                  something playable), `fingerprint` (save-state parity check)
+  nes-asm/        a small dependency-free 6502 assembler, used to build the carts
 roms/
   famirust-demo/  the demo cartridge: source, art, and the built .nes (CC0)
+  liars-keep/     LIAR'S KEEP, a one-screen platformer (CC0)
 docs/notes/       clean-room hardware reference notes
 dumps/            cart images (gitignored, bring your own)
 tests/vendor/     vendored TomHarte 6502 vectors (gitignored)
@@ -154,16 +156,43 @@ an emulator with. See [`roms/famirust-demo/README.md`](roms/famirust-demo/README
 and the statement of permission beside it.
 
 It doubles as a fixture the core is tested against: `crates/nes-core/tests/demo_cart.rs`
-is the only test suite here that needs no ROM the user has to supply, so it runs
-on a fresh clone on any machine.
+needs no ROM the user has to supply, so it runs on a fresh clone on any machine.
+
+## LIAR'S KEEP
+
+[`roms/liars-keep/`](roms/liars-keep/) holds a second original cartridge, also
+**CC0 1.0**, and this one is a game: a one-screen platformer in which some of the
+floor is not the floor. The blocks that hold you up and the blocks that do not
+are drawn from the same tiles out of the same palette, so there is nothing to
+spot.
+
+![LIAR'S KEEP](roms/liars-keep/screenshots/1-first-lie.png)
+
+A room is typed out as sixteen-by-thirteen ASCII in the source and the traps
+configure themselves from the drawing: a saw finds its patrol by looking along
+its own row, a shooter takes its firing phase from where it sits. There is a
+solver, `tools/reach.py`, that ports the physics out of the assembly and proves
+every room can actually be finished; four of the six in the first draft could
+not, and all four looked fine.
+
+```sh
+scripts/build-liars-keep.sh                        # check, rebuild, re-hash, test
+cargo test -p nes-core --test liars_keep           # it plays, and the liar is invisible
+python roms/liars-keep/tools/reach.py              # every room is still finishable
+```
+
+As a core fixture it exercises considerably more of the machine than a menu
+does: sixty-odd sprites, per-block attribute palettes, mid-frame palette writes,
+a vertical-blank write queue, and a save state taken in the middle of a jump.
 
 ## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).
 
-The demo cartridge in `roms/famirust-demo/` is the exception: it is CC0 1.0, so
-that the one artifact meant to be passed around freely has nothing attached to
-it. See [`roms/famirust-demo/LICENSE`](roms/famirust-demo/LICENSE).
+The two cartridges in `roms/` are the exception: `famirust-demo` and
+`liars-keep` are both CC0 1.0, so that the artifacts meant to be passed around
+freely have nothing attached to them. Each carries its own `LICENSE` and a
+signed statement of permission.
 
 "Nintendo Entertainment System", "Famicom", and "NES" are trademarks of Nintendo.
 FamiRust is an independent, clean-room reimplementation and is not affiliated with
