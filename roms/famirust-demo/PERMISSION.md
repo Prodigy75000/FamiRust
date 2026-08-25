@@ -3,7 +3,8 @@
 **Work:** FamiRust Demo Cart (`famirust-demo.nes`), a Nintendo Entertainment
 System / Famicom cartridge image, together with its complete source code.
 
-**Author and sole rights holder:** Prodigy75000 (`https://github.com/Prodigy75000`).
+**Author and sole rights holder:** Armand Bireaud, publishing as Prodigy75000
+(`https://github.com/Prodigy75000`).
 
 **Source of record:** `https://github.com/Prodigy75000/FamiRust`, directory
 `roms/famirust-demo/`.
@@ -48,6 +49,25 @@ permission, to:
 This permission is irrevocable and is not limited by territory, medium, format
 or duration.
 
+## Relationship to the surrounding repository
+
+The FamiRust emulator core that this cartridge lives beside is licensed
+GPL-3.0-or-later. The cartridge is not. A repository is not a single work, and
+these are two separate works distributed together: the core is a program, and
+the cartridge is a data file with its own source, built by a separate tool and
+executed by the emulated machine rather than linked into anything.
+
+The assembler that produces the cartridge, `nes-asm`, is itself GPL-3.0, and
+that has no effect on the cartridge. A compiler's licence does not attach to
+what it compiles, and this assembler in particular injects nothing of its own
+into its output: every byte of `famirust-demo.nes` other than the sixteen-byte
+iNES container header and the unused padding comes from the cartridge source
+listed above.
+
+CC0 imposes no conditions on anyone, so nothing about it can conflict with the
+GPL in either direction. In any case I hold the copyright in both works and am
+free to license each as I choose.
+
 ## Verification
 
 Anyone can confirm that the distributed binary is exactly what the published
@@ -78,10 +98,12 @@ rights (see section 4(a) of `LICENSE`).
 
 Signed,
 
-Name: _______________________________________
+**Armand Bireaud**
 
-Signature: __________________________________
-
-Date: _______________________________________
+Date: 25 August 2026
 
 GitHub: https://github.com/Prodigy75000
+
+If a handwritten signature is required, print this page and sign below.
+
+Signature: __________________________________
