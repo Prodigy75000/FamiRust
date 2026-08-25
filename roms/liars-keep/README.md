@@ -37,7 +37,7 @@ checked rather than believed. See `tools/reach.py` below.
 | ![Patience](screenshots/2-patience.png) | **2. Patience.** Nothing in this room is hidden. The cracked floor is visibly cracked and gives you about a third of a second; the crusher shudders before it commits. It kills people anyway, because a fair amount of warning turns out to be shorter than it feels. |
 | ![The Gallery](screenshots/3-gallery.png) | **3. The Gallery.** The walls shoot. Which wall block is a shooter is not marked, and each one takes its firing phase from where it sits in the grid, so they never fall into one safe rhythm. |
 | ![The Mill](screenshots/4-mill.png) | **4. The Mill.** A saw works out its own patrol by looking left and right along its row until it finds something solid. Draw it a longer corridor and it patrols a longer corridor. Which way it sets off comes from the column it was drawn in, so a room full of them gets saws that cross instead of saws in convoy. |
-| ![Generosity](screenshots/5-generosity.png) | **5. Generosity.** Six flasks, laid out like a reward for exploring. Most of them are over something. |
+| ![Generosity](screenshots/5-generosity.png) | **5. Generosity.** Seven flasks up four tiers, laid out like a reward for exploring. Every one of them is reachable, and most of them are over something. |
 | ![The Last Lie](screenshots/6-last-lie.png) | **6. The Last Lie.** The bonfire is visible from the start and the floor runs all the way to it. |
 
 ## A room is a picture
@@ -122,9 +122,27 @@ correctly right up until nobody can finish the level. When a room fails, the
 tool prints it with the reachable cells marked, so you can see where the floor
 ran out.
 
+It checks the flasks too, and at a higher bar than the bonfire: not merely
+"could the box ever overlap it" but "can you stand in its cell, or directly
+under it". The looser test passes for a flask that needs a maximum-height jump
+from one exact spot, and in the hand that is indistinguishable from impossible.
+The first playtest found three rooms with flasks nobody could get; this now
+finds them before anybody has to.
+
 It does not model saws, crushers or darts. Those decide whether a room is hard.
 This answers the different and more important question of whether it is
 possible, which is a property of the walls alone.
+
+## Two rules that cost a playtest each
+
+**Platforms go two rows apart, never three.** Standing on a block puts you in
+the row above it and the jump clears 36 pixels, so row 8 to row 6 works and row
+8 to row 5 does not. Four of the six rooms in the first draft broke this.
+
+**A shooter goes in the row the player occupies**, not the row of the floor
+they stand on. Its dart leaves at its own height, so a `>` drawn one row too
+high sails over everybody's head and the room becomes a corridor with
+decorative gunfire in it.
 
 ## Building it
 

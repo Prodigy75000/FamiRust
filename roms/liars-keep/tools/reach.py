@@ -234,9 +234,26 @@ def standable(room, bx, by):
     return room.solid(bx * 16 + 8, PLAY_TOP + (by + 1) * 16 + 8)
 
 
+def cells_under(h):
+    """Every grid cell the hero's box is overlapping right now. A flask is
+    collected by touching it, not by landing on it, so this is what decides
+    whether one is gettable."""
+    out = set()
+    for ox in (HB_L, HB_R):
+        for oy in (HB_T, HB_B):
+            py = h.py() + oy
+            if py < PLAY_TOP:
+                continue
+            row = (py - PLAY_TOP) >> 4
+            if row < GRID_H:
+                out.add(((h.px() + ox) >> 4, row))
+    return out
+
+
 def outcomes(room, bx, by):
-    """Every cell he can be standing in after one departure from this one."""
-    found = set()
+    """Every cell he can be standing in after one departure from this one, and
+    every cell he passes through on the way."""
+    found, brushed = set(), set()
     for dx, run, hold in PLANS:
         h = Hero(bx * 16, PLAY_TOP + by * 16)
         h.vx = run * WALK_MAX
@@ -247,6 +264,7 @@ def outcomes(room, bx, by):
             t = h.touching(room)
             if t & BF_HAZARD:
                 break
+            brushed |= cells_under(h)
             if t & BF_GOAL:
                 found.add(("GOAL",))
                 break
@@ -257,7 +275,7 @@ def outcomes(room, bx, by):
                 if cell != (bx, by):
                     found.add(cell)
                     break
-    return found
+    return found, brushed
 
 
 def solve(room):
@@ -267,16 +285,18 @@ def solve(room):
     start = room.spawn
     while start[1] + 1 < GRID_H and not standable(room, *start):
         start = (start[0], start[1] + 1)
-    seen, queue, won = {start}, [start], False
+    seen, queue, won, brushed = {start}, [start], False, set()
     while queue:
         cell = queue.pop()
-        for nxt in outcomes(room, *cell):
+        landings, passed = outcomes(room, *cell)
+        brushed |= passed
+        for nxt in landings:
             if nxt == ("GOAL",):
                 won = True
             elif nxt not in seen and 0 <= nxt[0] < GRID_W and 0 <= nxt[1] < GRID_H:
                 seen.add(nxt)
                 queue.append(nxt)
-    return won, seen
+    return won, seen, brushed
 
 
 # The cartridge keeps room 6 within one entity of this, so it is worth saying
@@ -293,25 +313,48 @@ def main():
         if want is not None and num != want:
             continue
         room = Room(grid)
-        won, seen = solve(room)
+        won, seen, brushed = solve(room)
         ents = sum(row.count(c) for row in grid for c in SPAWNERS)
-        mark = "OK  " if won else "DEAD"
-        if not won:
+        # A flask you cannot possibly touch is not a hard flask, it is a bug
+        # that looks like content, and it is the single easiest mistake to make
+        # in this format: the bait goes where it reads well, not where the jump
+        # arc goes.
+        # Two bars, because they are different failures. A flask outside
+        # `brushed` cannot be had at all. A flask that is only in `brushed` can
+        # be had, but by a maximum-height jump from one exact spot, which in
+        # the hand feels the same as impossible and is what the playtest
+        # actually complained about. The bar is: stand in its cell, or stand
+        # directly under it, and the rest of the risk comes from what is below.
+        flasks = [(bx, by) for by in range(GRID_H) for bx in range(GRID_W)
+                  if grid[by][bx] == "B"]
+        lost = [c for c in flasks if c not in brushed]
+        awkward = [c for c in flasks
+                   if c in brushed and c not in seen and (c[0], c[1] + 1) not in seen]
+        mark = "OK  " if won and not lost and not awkward else "DEAD"
+        if not won or lost or awkward:
             bad += 1
-        print("%s room %d  %-14s  %d cells reachable of %d standable, %d/%d entities"
+        print("%s room %d  %-14s  %d cells reachable of %d standable, %d/%d entities, %d/%d flasks"
               % (mark, num, name, len(seen),
                  sum(standable(room, x, y) for y in range(GRID_H) for x in range(GRID_W)),
-                 ents, ENT_MAX))
+                 ents, ENT_MAX, len(flasks) - len(lost) - len(awkward), len(flasks)))
+        if not won:
+            print("      the bonfire cannot be reached")
+        for bx, by in lost:
+            print("      the flask at column %d row %d cannot be touched at all" % (bx, by))
+        for bx, by in awkward:
+            print("      the flask at column %d row %d needs a maximum jump from one"
+                  " exact spot" % (bx, by))
         if ents > ENT_MAX:
             print("      room %d asks for %d entities and only %d will spawn"
                   % (num, ents, ENT_MAX))
-            bad += 1
-        if not won or os.environ.get("SHOW"):
+        if not won or lost or awkward or os.environ.get("SHOW"):
             # Print the room with the reachable cells marked, which is the whole
             # diagnosis: you can see exactly where the search ran out of floor.
             for by in range(GRID_H):
                 row = "".join(
-                    ("o" if (bx, by) in seen and grid[by][bx] == "." else grid[by][bx])
+                    ("o" if (bx, by) in seen and grid[by][bx] == "."
+                     else "," if (bx, by) in brushed and grid[by][bx] == "."
+                     else grid[by][bx])
                     for bx in range(GRID_W))
                 print("      " + row)
     if bad:

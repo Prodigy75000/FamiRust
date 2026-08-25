@@ -19,9 +19,25 @@
 ;   W  saw                    C  crusher
 ;   >  wall that shoots right <  wall that shoots left
 ;
-; The asserts under each room are the safety net: a row typed one character
-; short would otherwise slide every later row left by one and produce a room
-; that looks plausible and is not the one that was drawn.
+; Two rules that are not obvious from the picture and cost a playtest each:
+;
+;   Platforms go TWO rows apart, never three. Standing on a block puts you in
+;   the row above it, and the jump clears 36 pixels, so row 8 to row 6 works
+;   and row 8 to row 5 does not. Four of the six rooms in the first draft broke
+;   this and every one of them looked fine.
+;
+;   A shooter goes in the row the player OCCUPIES, not the row of the floor
+;   they are standing on. Its dart leaves at its own height, so a `>` drawn one
+;   row too high sails over everybody's head, and the room becomes a corridor
+;   with decorative gunfire in it.
+;
+; Neither is a matter of opinion, so neither is left to the eye:
+; `tools/reach.py` simulates real jumps from every block you can stand on and
+; reports any room where the bonfire, or a flask, is out of reach.
+;
+; The asserts under each room are the other safety net: a row typed one
+; character short would otherwise slide every later row left by one and produce
+; a room that looks plausible and is not the one that was drawn.
 
 ROOM_COUNT = 6
 
@@ -89,14 +105,14 @@ room_3:
   .str "THE GALLERY   "
   .str "################"
   .str "#..............#"
-  .str ">..............<"
-  .str "#....======....#"
   .str "#..............#"
-  .str ">.....B........<"
-  .str "#...=====~=....#"
   .str "#..............#"
-  .str ">..............<"
-  .str "#S............D#"
+  .str "#..............#"
+  .str "#....B...B.....#"
+  .str "#...========...#"
+  .str ">..B...........<"
+  .str "#..=~==..====..#"
+  .str ">S............D<"
   .str "#==============#"
   .str "################"
   .str "################"
@@ -115,10 +131,10 @@ room_4:
   .str "#.*..........*.#"
   .str "#..............#"
   .str "#...W......W...#"
-  .str "#..............#"
+  .str "#.....B..B.....#"
   .str "#....======....#"
-  .str "#.....W.B......#"
-  .str "#.===.=~~=.===.#"
+  .str "#......W.......#"
+  .str "#.===.===.~==..#"
   .str "#S...........BD#"
   .str "#====^^^^^^^===#"
   .str "################"
@@ -135,13 +151,13 @@ room_5:
   .str "GENEROSITY    "
   .str "################"
   .str "#..............#"
-  .str "#..B.......B...#"
-  .str "#..~~.....~~...#"
   .str "#..............#"
+  .str "#..B.......B...#"
+  .str "#..=~.....~=...#"
   .str "#.....B..B.....#"
   .str "#....==..cc....#"
-  .str "#..............#"
-  .str "#.B==~~..~~==B.#"
+  .str "#.B.........B..#"
+  .str "#.==~~...~~==..#"
   .str "#S...........BD#"
   .str "#===^^^^^^^^===#"
   .str "################"
