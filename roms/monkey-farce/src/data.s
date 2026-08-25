@@ -122,7 +122,7 @@ hud_script:
 HUD_NAME    = NT0 + 1*32 + 1    ; where the room's name goes
 HUD_LIVES   = NT0 + 1*32 + 24   ; two digits
 HUD_BANANAS = NT0 + 2*32 + 24   ; two digits
-END_BANANAS = NT0 + 12*32 + 18
+END_BANANAS = NT0 + 12*32 + 21   ; same column as the one below it
 END_LIVES   = NT0 + 14*32 + 21
 
 ; ---------------------------------------------------------------------------
