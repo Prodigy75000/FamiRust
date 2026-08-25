@@ -308,7 +308,13 @@ fn main() -> ExitCode {
     let wav_path = std::path::Path::new(&out).with_extension("wav");
     write_wav(&wav_path, &audio);
     let peak = audio.iter().fold(0f32, |m, &s| m.max(s.abs()));
-    println!("audio: {} samples @44.1kHz, peak={:.3} -> {}", audio.len(), peak, wav_path.display());
+    println!(
+        "audio: {} samples @{}Hz, peak={:.3} -> {}",
+        audio.len(),
+        nes_core::SAMPLE_RATE,
+        peak,
+        wav_path.display()
+    );
 
     // Stats: how many pixels differ from the top-left (a proxy for "is anything
     // actually being drawn"), and the distinct-color count.

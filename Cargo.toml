@@ -2,7 +2,7 @@
 # Standalone workspace (this repo builds on its own; no sibling cores needed).
 [workspace]
 resolver = "2"
-members = ["crates/nes-core", "crates/nes-libretro", "crates/nes-runner"]
+members = ["crates/nes-core", "crates/nes-libretro", "crates/nes-runner", "crates/nes-asm"]
 
 [profile.release]
 opt-level = 3

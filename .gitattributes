@@ -1,0 +1,10 @@
+# The demo cartridge and its screenshots are binary. Without this, a checkout on
+# Windows can rewrite bytes that happen to look like line endings and quietly
+# corrupt the ROM, which would break both the cart and the reproducibility test.
+*.nes binary
+*.png binary
+*.wav binary
+
+# Assembly sources are text; keep them LF everywhere so the assembler and the
+# byte-for-byte rebuild test see the same file on every platform.
+*.s   text eol=lf

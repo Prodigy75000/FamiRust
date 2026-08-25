@@ -1,0 +1,17 @@
+[package]
+name = "nes-asm"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "A small self-contained 6502 assembler: FamiRust's in-repo toolchain for building the demo ROM with no external dependencies."
+
+# Deliberately zero dependencies. The whole point of this crate is that the
+# chain from demo source to `.nes` is ours end to end, so the ROM we distribute
+# carries no third-party licensing question at all.
+[lib]
+name = "nes_asm"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nes-asm"
+path = "src/main.rs"

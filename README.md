@@ -68,6 +68,9 @@ crates/
   nes-libretro/   libretro C ABI cdylib -> libnescore_libretro.{so,dll,dylib}
   nes-runner/     dev harnesses: `tomharte` (CPU conformance), `nes` (headless
                   render + audio dump), `fingerprint` (save-state parity check)
+  nes-asm/        a small dependency-free 6502 assembler, used to build the cart
+roms/
+  famirust-demo/  the demo cartridge: source, art, and the built .nes (CC0)
 docs/notes/       clean-room hardware reference notes
 dumps/            cart images (gitignored, bring your own)
 tests/vendor/     vendored TomHarte 6502 vectors (gitignored)
@@ -124,11 +127,43 @@ lipo -create -output libnescore_libretro.dylib \
 > aligned for both arm64 (16 KB) and x86_64 (4 KB) Macs.
 
 Nothing here includes or requires copyrighted ROMs or BIOS images; supply your
-own legally obtained dumps.
+own legally obtained dumps. The one cartridge that does ship with this
+repository is our own, and is described below.
+
+## The demo cartridge
+
+[`roms/famirust-demo/`](roms/famirust-demo/) holds **FamiRust Demo Cart**, an NES
+cartridge written from scratch for this project and **dedicated to the public
+domain under CC0 1.0**. Every byte of it is original: the 6502 source, the font,
+the graphics, the music, and the assembler that builds it.
+
+It is not a game. It is five screens that each put one part of the machine under
+load: 64 sprites and the eight-per-scanline limit, a sprite-0 raster split over a
+two-nametable scroll, the 2C02 master palette, all five APU channels including a
+DPCM sample, and a live two-port controller readout.
+
+```sh
+scripts/build-demo-rom.sh          # rebuild it, and re-hash it
+cargo test -p nes-asm --test demo_rom_reproduces   # committed .nes == committed source
+cargo test -p nes-core --test demo_cart            # it boots, scrolls, and round-trips a save state
+```
+
+Because it carries no third-party rights, it can be redistributed, bundled into a
+commercial application, or handed to anyone who needs a working cartridge to test
+an emulator with. See [`roms/famirust-demo/README.md`](roms/famirust-demo/README.md)
+and the statement of permission beside it.
+
+It doubles as a fixture the core is tested against: `crates/nes-core/tests/demo_cart.rs`
+is the only test suite here that needs no ROM the user has to supply, so it runs
+on a fresh clone on any machine.
 
 ## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).
+
+The demo cartridge in `roms/famirust-demo/` is the exception: it is CC0 1.0, so
+that the one artifact meant to be passed around freely has nothing attached to
+it. See [`roms/famirust-demo/LICENSE`](roms/famirust-demo/LICENSE).
 
 "Nintendo Entertainment System", "Famicom", and "NES" are trademarks of Nintendo.
 FamiRust is an independent, clean-room reimplementation and is not affiliated with

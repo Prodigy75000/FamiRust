@@ -14,3 +14,7 @@
 
 # Local convenience junction -> TrophyHubAndroid app jniLibs (deploy target)
 android-jnilibs/
+
+# Symbol listing for the demo cart: derived from the committed source by
+# `nes-asm -s`, so it is regenerable and would only add churn.
+/roms/famirust-demo/*.sym
