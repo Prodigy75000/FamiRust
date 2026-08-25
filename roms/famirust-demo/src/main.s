@@ -1,6 +1,6 @@
 ; SPDX-License-Identifier: CC0-1.0
 ;
-; FamiRust Demo Cart v1.0
+; FamiRust Demo Cart v1.1
 ; Written by Prodigy75000. Dedicated to the public domain under CC0 1.0.
 ;
 ; A test cartridge for the FamiRust NES core. It is not a game: it is five
@@ -479,6 +479,11 @@ rendering_off:
   sta mask_shadow
   sta PPUCTRL
   sta ctrl_shadow
+  ; Drop anything the outgoing scene queued. Its tick still ran on the frame the
+  ; scene change was requested, so the queue is full of writes aimed at a screen
+  ; that is about to be painted over. Flushing them afterwards would stamp the
+  ; old scene's text onto the new one.
+  sta patch_count
   rts
 
 rendering_on:

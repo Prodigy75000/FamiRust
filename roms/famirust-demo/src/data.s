@@ -88,7 +88,7 @@ scr_menu:
   .str "F A M I R U S T"
   .byte $FF
   .byte >(NT0+4*32+6),  <(NT0+4*32+6)
-  .str "DEMO CARTRIDGE  V1.0"
+  .str "DEMO CARTRIDGE  V1.1"
   .byte $FF
   .byte >(NT0+6*32+4),  <(NT0+6*32+4)
   .res 24, TILE_FRAMEH

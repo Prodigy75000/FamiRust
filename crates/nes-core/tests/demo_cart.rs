@@ -14,6 +14,7 @@ use std::path::PathBuf;
 // hardware shifts out.
 const BTN_START: u8 = 0x08;
 const BTN_DOWN: u8 = 0x20;
+const BTN_B: u8 = 0x02;
 
 fn demo_rom() -> Vec<u8> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -210,5 +211,50 @@ fn the_scene_actually_scrolls() {
     assert!(
         bar_before == bar_after,
         "the status bar scrolled; the split is not holding it still"
+    );
+}
+
+#[test]
+fn leaving_a_scene_does_not_leave_its_text_on_the_menu() {
+    // Scenes that update text push single-tile writes into a queue that the NMI
+    // drains during vertical blank. Pressing B still runs the scene's tick, so
+    // the queue is full at the moment the menu is redrawn, and the next NMI used
+    // to paint those stale writes on top of the fresh menu.
+    //
+    // The menu's only moving parts are four sprites bobbing in a fixed band, so
+    // everything outside that band must come back exactly as it was.
+    const ORB_BAND: std::ops::Range<usize> = 56..72;
+
+    let mut nes = boot();
+    for _ in 0..4 {
+        tap(&mut nes, BTN_DOWN); // land on INPUT, the busiest text screen
+    }
+    for _ in 0..10 {
+        nes.step_frame();
+    }
+    let pristine = nes.step_frame().to_vec();
+
+    tap(&mut nes, BTN_START);
+    for _ in 0..20 {
+        nes.step_frame();
+    }
+    tap(&mut nes, BTN_B);
+    for _ in 0..10 {
+        nes.step_frame();
+    }
+    let returned = nes.step_frame().to_vec();
+
+    let mut dirty: Vec<usize> = Vec::new();
+    for y in (0..240).filter(|y| !ORB_BAND.contains(y)) {
+        if row(&pristine, y) != row(&returned, y) {
+            dirty.push(y);
+        }
+    }
+    assert!(
+        dirty.is_empty(),
+        "the menu came back changed on {} scanline(s) (first few: {:?}); \
+         a scene left queued writes behind when it exited",
+        dirty.len(),
+        &dirty[..dirty.len().min(8)]
     );
 }
