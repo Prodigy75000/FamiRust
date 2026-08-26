@@ -313,7 +313,7 @@ pub unsafe extern "C" fn retro_get_system_info(info: *mut retro_system_info) {
         return;
     }
     (*info).library_name = c"FamiRust".as_ptr();
-    (*info).library_version = c"0.2.1".as_ptr();
+    (*info).library_version = c"0.2.2".as_ptr();
     (*info).valid_extensions = c"nes|fds".as_ptr();
     (*info).need_fullpath = false;
     (*info).block_extract = false;

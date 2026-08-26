@@ -1,6 +1,6 @@
 [package]
 name = "nes-libretro"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "libretro C ABI front-end for the FamiRust clean-room NES / Famicom core."

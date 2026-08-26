@@ -95,6 +95,16 @@ cargo run --release -p nes-runner --bin nes -- path/to/game.nes 300 out.png
 #   target/release/libnescore_libretro.dylib (macOS)
 ```
 
+The three clients each take the core as a different artifact, and because save
+states are versioned they want rebuilding together:
+
+```sh
+scripts/deploy-android-debug.sh   # arm64 .so -> TrophyHubAndroid jniLibs (+ APK)
+cargo build --release -p nes-libretro
+#   -> target/release/nescore_libretro.dll, for TrophyHubDesktop
+scripts/build-ios-dylib.sh both   # macOS only: dylib -> TrophyHubIOS iosApp/cores
+```
+
 **Android (arm64)** with the NDK, 16 KB-page-aligned (required by Google Play for
 apps targeting API 35+):
 

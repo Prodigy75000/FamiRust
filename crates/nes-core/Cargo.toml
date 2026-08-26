@@ -1,6 +1,6 @@
 [package]
 name = "nes-core"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "A clean-room Nintendo Entertainment System (NES / Famicom) emulator core, written from scratch in Rust. Codename FamiRust. Cycle-accurate and byte-identical-save-state by construction for cross-engine netplay."
