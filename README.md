@@ -95,6 +95,25 @@ cargo run --release -p nes-runner --bin nes -- path/to/game.nes 300 out.png
 #   target/release/libnescore_libretro.dylib (macOS)
 ```
 
+Driving something playable, rather than rendering it, is `play`. The frames are
+part of the script, both pads are addressable, and a script can assert against
+RAM instead of leaving PNGs for somebody to look at:
+
+```sh
+# pad 1 walks right and jumps; pad 2 waits, then goes left. `.` leaves a pad
+# exactly as it was, so moving one player never means restating the other.
+cargo run -p nes-runner --bin play -- roms/monkey-farce/monkey-farce.nes \
+    "40=start;60=right;92=right+a;120=./left;135?mode=M_PLAY;135?lives=LIVES_START;170#both" out
+
+# what a lockstep netplay peer's core actually consumes: every input four
+# frames late, on both pads, and zero at all through the warmup window
+cargo run -p nes-runner --bin play -- game.nes "40=start;60=right/left;200" out --delay 4
+```
+
+Names come from `<rom>.sym` beside the ROM, which is why an assertion can read
+`300?lives=LIVES_START` rather than `300?$0046=10`. A failed assertion fails the
+process, and that is what lets a two-player script be a test rather than a demo.
+
 The three clients each take the core as a different artifact, and because save
 states are versioned they want rebuilding together:
 
