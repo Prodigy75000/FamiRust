@@ -14,9 +14,14 @@
 ;   ^  spikes                 v  ceiling spikes
 ;   c  cracked floor          o  rubble
 ;   D  a way out (stand in it and press UP)
+;   W  a wardrobe (stand in it and you are hidden; no button, no timer)
 ;   *  torch                  |  chain
 ;   1  where the big one starts
 ;   2  where the small one starts
+;
+; Hiding is generous on purpose: any corner of your box overlapping a wardrobe
+; counts. You have two seconds from hearing him, and a hiding place you have to
+; line up exactly is not one.
 ;
 ; Two of them, and two ways out, and a room does not end until BOTH of them are
 ; standing in one. One of you reaching the door is worth nothing, which is the
@@ -48,6 +53,11 @@ room_hi:
 ;    that the pair take their own pads and move independently, that each of
 ;    them can reach their own door, that neither door opens on its own, and
 ;    that one of them stepping into the spikes takes the room away from both.
+;
+;    The two wardrobes are here for the same reason and are placed for the
+;    harness rather than for a player: one within a step of each spawn, so the
+;    tests can put somebody in one and somebody else not in one without any of
+;    it depending on exactly how far a walk carries.
 ; ---------------------------------------------------------------------------
 room_1:
   .str "THE LANDING   "
@@ -61,7 +71,7 @@ room_1:
   .str "#..............#"
   .str "#....======....#"
   .str "#..............#"
-  .str "#D.1........2.D#"
+  .str "#DW1........2WD#"
   .str "#####^^^^^^#####"
   .str "################"
 .assert room_end - room_1 == NAME_LEN + ROOM_BYTES, "room 1 is not the right size"

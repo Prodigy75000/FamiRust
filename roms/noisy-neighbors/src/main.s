@@ -148,6 +148,69 @@ PLAYERS  = 2
 PL_BIG   = 0
 PL_SMALL = 1
 
+; ---------------------------------------------------------------------------
+; Noise, and the man it fetches.
+;
+; One bar for the pair. That is the whole design: his mistakes fill your meter,
+; and there is no way to be individually careful.
+;
+; The bar is twelve cells and the meter runs to 192, so a cell is sixteen and
+; working out the fill is four shifts rather than a divide.
+;
+; Every cost below is paid for by an ACTION or by a POSITION and never by
+; timing, and hiding is somewhere you stand rather than something you press.
+; That is not only for the four frames of netplay delay. It is what makes a
+; one-player mode possible at all, because a character you have parked goes on
+; standing where you left him, and therefore goes on being hidden, while you
+; are busy being the other one.
+; ---------------------------------------------------------------------------
+NOISE_MAX   = 192
+NOISE_CELLS = 12
+NOISE_SHIFT = 4
+.assert (NOISE_MAX >> NOISE_SHIFT) == NOISE_CELLS, "the bar and the meter disagree"
+
+; The big one is louder than the small one at everything. That is the entire
+; asymmetry between them: the one who can do the heavy work is the one who
+; keeps getting you both caught.
+NOISE_JUMP_BIG   = 5
+NOISE_JUMP_SMALL = 1
+NOISE_LAND_BIG   = 10
+NOISE_LAND_SMALL = 2
+
+; Both of these are masked rather than divided, so both must be powers of two.
+WALK_NOISE_EVERY = 8      ; the big one adds one per this many frames of walking
+DECAY_EVERY      = 4      ; once it is draining, one per this many frames
+.assert (WALK_NOISE_EVERY & (WALK_NOISE_EVERY - 1)) == 0, "walk period is masked"
+.assert (DECAY_EVERY & (DECAY_EVERY - 1)) == 0, "decay period is masked"
+
+; And nothing drains at all until this many frames after the last sound.
+;
+; The grace is the whole mechanism and the first version did not have it. A
+; flat drain has to be slower than the noise going in or nothing ever
+; accumulates, and faster than it or waiting is not a real move, and those are
+; the same number: one jump and its landing cost fifteen over about fifty
+; frames, and a flat drain of one per four frames removed almost exactly
+; fifteen over the same fifty. The bar sat at zero however carelessly it was
+; played. With a second of grace, being careless never drains at all and
+; standing still drains fast, which is the choice the room is supposed to be
+; offering.
+QUIET_GRACE      = 60
+
+; The neighbor is not a hazard you dodge. He is a deadline you meet.
+NB_IDLE   = 0
+NB_COMING = 1             ; you can hear him at his door, and that is the warning
+NB_SWEEP  = 2             ; he is in the room, and looking
+NB_GOING  = 3
+NB_WARN         = 120     ; two seconds to reach a wardrobe
+NB_SWEEP_FRAMES = 150
+NB_GOING_FRAMES = 40
+
+; The bar is drawn out of the font rather than out of art of its own: '#' for
+; a cell that is full and '-' for one that is not. .str emits ASCII minus $20,
+; and these are the same two bytes typing them would produce.
+CH_BAR_FULL  = $23 - $20
+CH_BAR_EMPTY = $2D - $20
+
 ; What to write to a sweep register to mean "leave this channel's pitch alone".
 ;
 ; The value matters far more than it looks. The usual choice is $08: negate set,
@@ -294,6 +357,14 @@ mus_vol1     = $47
 mus_vol2     = $48
 mus_vol4     = $49
 lives        = $4A
+
+noise        = $4B        ; 0 to NOISE_MAX, shared by the pair
+noise_shown  = $4C        ; cells currently lit, so the bar patches one at a time
+noise_made   = $4D        ; did either of them make any this frame
+noise_tick   = $4E        ; free-running, masked for the walk and decay periods
+nb_state     = $4F
+nb_timer     = $50
+quiet_timer  = $51        ; frames left before the building starts forgetting
 
 ; ---------------------------------------------------------------------------
 ; RAM
@@ -2009,6 +2080,16 @@ enter_play:
 place_heroes:
   lda #0
   sta room_timer
+  ; The room starts quiet and the bar starts empty. noise_shown has to be
+  ; cleared with it, because paint_room has just drawn twelve empty cells and
+  ; the bar patches the difference between what is true and what is on screen.
+  sta noise
+  sta noise_shown
+  sta noise_tick
+  sta noise_made
+  sta nb_state
+  sta nb_timer
+  sta quiet_timer
   sta cur_pl
 @l:
   jsr place_one
@@ -2045,13 +2126,19 @@ place_one:
   sta hero_vyl
   sta hero_vyh
   sta hero_face
-  sta on_ground
   sta coyote
   sta jump_buf
   sta hero_state
   sta crumb_timer
   lda #$FF
   sta crumb_idx
+  ; He arrives standing, not falling. Zeroing this instead made the first frame
+  ; of every room read as a landing, so the room opened by charging both of
+  ; them for a noise neither of them made and the bar was never empty. If a
+  ; room does spawn somebody over a hole, ground_probe corrects this on the
+  ; first frame and the landing that follows is genuinely theirs.
+  lda #1
+  sta on_ground
   rts
 
 ; The pad of whoever is being updated. Everything downstream reads `pad` and
@@ -2082,6 +2169,7 @@ tick_play:
 
 @go:
   lda #0
+  sta noise_made
   sta cur_pl
 @ploop:
   jsr hero_load
@@ -2093,6 +2181,8 @@ tick_play:
   cmp #PLAYERS
   bne @ploop
 
+  jsr noise_frame
+  jsr neighbor_tick
   jsr room_verdict
 
 @draw:
@@ -2106,12 +2196,15 @@ update_hero:
   beq @alive
   rts                       ; dead, or already at his door and waiting
 @alive:
+  lda on_ground
+  sta tmp6                  ; where his feet were before any of this
   jsr hero_input
   jsr hero_jump
   jsr hero_gravity
   jsr move_x
   jsr move_y
   jsr ground_probe
+  jsr noise_from_motion
 
   lda on_ground
   beq @air
@@ -2150,6 +2243,231 @@ update_hero:
   jsr sfx_start
 @done:
   rts
+
+; ---------------------------------------------------------------------------
+; Noise
+; ---------------------------------------------------------------------------
+
+; A = how much to add. Clamps at the top rather than wrapping, because a meter
+; that reads quiet at the exact instant it is loudest is the worst bug in this
+; cartridge to have to reproduce.
+noise_add:
+  cmp #0
+  beq @none
+  sta tmpa
+  lda #1
+  sta noise_made
+  lda noise
+  clc
+  adc tmpa
+  bcs @full
+  cmp #NOISE_MAX
+  bcc @set
+@full:
+  lda #NOISE_MAX
+@set:
+  sta noise
+@none:
+  rts
+
+; What the two of them just did, worked out by comparing where his feet were
+; before the move with where they are now.
+;
+; This is here and not inside hero_jump on purpose. The movement routines came
+; over from the other cartridge already playtested, and they are worth keeping
+; recognisable; nothing is gained by threading a side effect through them.
+;
+; tmp6 holds on_ground from before the move.
+noise_from_motion:
+  lda on_ground
+  bne @grounded
+
+  ; In the air now. If his feet were down a moment ago and he is travelling
+  ; upward, he jumped. If he is not travelling upward he walked off an edge,
+  ; and walking off an edge is free: it is the one way to get down quietly and
+  ; the rooms are allowed to be built around it.
+  lda tmp6
+  beq @none
+  lda hero_vyh
+  bpl @none
+  ldx cur_pl
+  lda noise_jump_cost,x
+  jmp noise_add
+
+@grounded:
+  lda tmp6
+  bne @walking
+  ; He was in the air and he is not any more.
+  ldx cur_pl
+  lda noise_land_cost,x
+  jmp noise_add
+
+@walking:
+  ; Under a pixel a frame is a shuffle rather than a walk, and costs nothing.
+  lda hero_vxh
+  beq @none
+  lda cur_pl
+  bne @none                 ; the small one walks silently: it is her whole job
+  lda noise_tick
+  and #(WALK_NOISE_EVERY - 1)
+  bne @none
+  lda #1
+  jmp noise_add
+@none:
+  rts
+
+noise_jump_cost:
+  .byte NOISE_JUMP_BIG, NOISE_JUMP_SMALL
+noise_land_cost:
+  .byte NOISE_LAND_BIG, NOISE_LAND_SMALL
+
+; Once a frame, after both of them have moved. A frame in which neither of them
+; made a sound is a frame the building forgets a little of what it heard, which
+; is what makes standing still a real move rather than a wasted one.
+noise_frame:
+  inc noise_tick
+  lda noise_made
+  beq @quiet
+  lda #QUIET_GRACE
+  sta quiet_timer
+  rts
+@quiet:
+  lda quiet_timer
+  beq @draining
+  dec quiet_timer
+  rts
+@draining:
+  lda noise
+  beq @done
+  lda noise_tick
+  and #(DECAY_EVERY - 1)
+  bne @done
+  dec noise
+@done:
+  rts
+
+; The bar, one cell per frame.
+;
+; It can only ever be one cell out, because the largest single cost is ten and
+; a cell is sixteen, so one action cannot cross two boundaries. Both of them
+; landing on the same frame can, and then the bar is briefly one cell behind
+; the truth and catches up on the next frame. That is a deliberate trade: a
+; bar that repaints itself all at once is a burst of patches that vertical
+; blank has no time to flush.
+push_noise:
+  lda noise
+  lsr a
+  lsr a
+  lsr a
+  lsr a
+  cmp noise_shown
+  beq @done
+  bcc @quieter
+  ldx noise_shown
+  inc noise_shown
+  lda #CH_BAR_FULL
+  jmp patch_bar_cell
+@quieter:
+  dec noise_shown
+  ldx noise_shown
+  lda #CH_BAR_EMPTY
+  jmp patch_bar_cell
+@done:
+  rts
+
+; X = which cell, A = the glyph that goes in it.
+patch_bar_cell:
+  sta patch_tmp
+  txa
+  clc
+  adc #<HUD_NOISE
+  sta tmp5
+  lda #>HUD_NOISE
+  adc #0
+  sta tmp4
+  lda patch_tmp
+  jmp push_patch
+
+; ---------------------------------------------------------------------------
+; The neighbor
+; ---------------------------------------------------------------------------
+
+; He arrives when the bar fills, and the two seconds between hearing him and
+; seeing him are the entire warning. There is no way to make him leave early
+; and no way to fight him. The only move is to already be somewhere else.
+neighbor_tick:
+  lda nb_state
+  bne @running
+
+  lda noise
+  cmp #NOISE_MAX
+  bcc @done
+  lda #NB_COMING
+  sta nb_state
+  lda #NB_WARN
+  sta nb_timer
+  ; The tune stops rather than ducking. Two seconds of hearing only your own
+  ; footsteps is worth more than any sting would be.
+  jsr music_stop
+  lda #SFX_KNOCK
+  jsr sfx_start
+@done:
+  rts
+
+@running:
+  lda nb_state
+  cmp #NB_SWEEP
+  bne @tick
+  jsr check_hidden
+@tick:
+  dec nb_timer
+  bne @done
+  lda nb_state
+  cmp #NB_COMING
+  bne @after_sweep
+  lda #NB_SWEEP
+  sta nb_state
+  lda #NB_SWEEP_FRAMES
+  sta nb_timer
+  rts
+@after_sweep:
+  cmp #NB_SWEEP
+  bne @after_going
+  lda #NB_GOING
+  sta nb_state
+  lda #NB_GOING_FRAMES
+  sta nb_timer
+  rts
+@after_going:
+  ; Back inside his own flat, and the building is quiet again.
+  lda #NB_IDLE
+  sta nb_state
+  lda #0
+  sta noise
+  jsr music_start
+  rts
+
+; While he is in the room, either of them not standing in a wardrobe is caught.
+;
+; There is no line of sight and no geometry to learn. He is here, and you are
+; either in a wardrobe or you are not. A hiding place whose angles have to be
+; worked out is not a hiding place when the working out has to happen in two
+; seconds, and it would be an unplayable one over a link with input delay on it.
+check_hidden:
+  lda #0
+  sta cur_pl
+@l:
+  jsr hero_load
+  jsr hero_flags
+  and #BF_HIDE
+  beq @caught
+  inc cur_pl
+  lda cur_pl
+  cmp #PLAYERS
+  bne @l
+  rts
+@caught:
+  jmp kill_room
 
 ; Whether the room is still going, asked of the pair rather than of either of
 ; them. One of you dying is both of you starting it again; both of you at your
@@ -2365,6 +2683,7 @@ draw_frame:
   cmp #PLAYERS
   bne @l
   jsr end_sprites
+  jsr push_noise
   jsr push_hud
   rts
 
@@ -2601,10 +2920,10 @@ row_hi:
 ; or put one on the liar, and the flags stop agreeing. Either way the build
 ; stops, which is the only place a claim like this can be defended, since the
 ; player is never going to be able to check it.
-.assert LIAR_TILES_MATCH == 1, "the liar no longer shares the platform's tiles"
-.assert BLKP_PLAT == BLKP_LIAR, "the liar and the platform drifted apart in palette"
 .assert (BLKF_PLAT & BF_SOLID) != 0, "the honest platform stopped being solid"
-.assert (BLKF_LIAR & BF_SOLID) == 0, "the liar became solid, so it is not lying"
+.assert (BLKF_CLOSET & BF_HIDE) != 0, "the wardrobe stopped being somewhere to hide"
+.assert (BLKF_CLOSET & BF_SOLID) == 0, "the wardrobe became solid, so nobody can get in"
+.assert (BLKF_DOOR & BF_GOAL) != 0, "the way out stopped being a way out"
 
 ; The playfield has to divide the screen the way the collision code assumes.
 .assert PLAY_TOP + GRID_H * 16 == 240, "the block grid does not fill the screen"

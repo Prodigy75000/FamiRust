@@ -750,7 +750,55 @@
 11111111
 .endtile
 
-; tile $44  crumble_0
+; tile $44  closet_0
+.tile bgt_closet_0
+33333333
+32222222
+32111111
+32111111
+32111111
+32111111
+32111133
+32111133
+.endtile
+
+; tile $45  closet_1
+.tile bgt_closet_1
+33333333
+22222223
+33111123
+33111123
+33111123
+33111123
+33331123
+33331123
+.endtile
+
+; tile $46  closet_2
+.tile bgt_closet_2
+32111111
+32111111
+32111111
+32111111
+32111111
+32111111
+32222222
+33333333
+.endtile
+
+; tile $47  closet_3
+.tile bgt_closet_3
+33111123
+33111123
+33111123
+33111123
+33111123
+33111123
+22222223
+33333333
+.endtile
+
+; tile $48  crumble_0
 .tile bgt_crumble_0
 33333333
 22222222
@@ -762,7 +810,7 @@
 22222221
 .endtile
 
-; tile $45  crumble_1
+; tile $49  crumble_1
 .tile bgt_crumble_1
 33333333
 22222222
@@ -774,7 +822,7 @@
 .2222221
 .endtile
 
-; tile $46  crumble_2
+; tile $4A  crumble_2
 .tile bgt_crumble_2
 1111.111
 2221222.
@@ -786,7 +834,7 @@
 11111111
 .endtile
 
-; tile $47  crumble_3
+; tile $4B  crumble_3
 .tile bgt_crumble_3
 11.11111
 22212222
@@ -798,7 +846,7 @@
 11111111
 .endtile
 
-; tile $48  rubble_0
+; tile $4C  rubble_0
 .tile bgt_rubble_0
 ........
 ........
@@ -810,7 +858,7 @@
 ........
 .endtile
 
-; tile $49  rubble_2
+; tile $4D  rubble_2
 .tile bgt_rubble_2
 ........
 ......11
@@ -822,7 +870,7 @@
 11111111
 .endtile
 
-; tile $4A  rubble_3
+; tile $4E  rubble_3
 .tile bgt_rubble_3
 ........
 ........
@@ -834,7 +882,7 @@
 11111111
 .endtile
 
-; tile $4B  spikeup_0
+; tile $4F  spikeup_0
 .tile bgt_spikeup_0
 ...33...
 ...33...
@@ -846,7 +894,7 @@
 .322223.
 .endtile
 
-; tile $4C  spikeup_2
+; tile $50  spikeup_2
 .tile bgt_spikeup_2
 33222223
 32222222
@@ -858,7 +906,7 @@
 11111111
 .endtile
 
-; tile $4D  spikeup_3
+; tile $51  spikeup_3
 .tile bgt_spikeup_3
 33222233
 32222223
@@ -870,7 +918,7 @@
 11111111
 .endtile
 
-; tile $4E  spikedn_0
+; tile $52  spikedn_0
 .tile bgt_spikedn_0
 11111111
 22222222
@@ -882,7 +930,7 @@
 33222223
 .endtile
 
-; tile $4F  spikedn_1
+; tile $53  spikedn_1
 .tile bgt_spikedn_1
 11111111
 22222222
@@ -894,7 +942,7 @@
 33222233
 .endtile
 
-; tile $50  spikedn_2
+; tile $54  spikedn_2
 .tile bgt_spikedn_2
 .322223.
 .322223.
@@ -906,7 +954,7 @@
 ...33...
 .endtile
 
-; tile $51  lava_0
+; tile $55  lava_0
 .tile bgt_lava_0
 32233223
 21122112
@@ -918,7 +966,7 @@
 11111111
 .endtile
 
-; tile $52  lava_1
+; tile $56  lava_1
 .tile bgt_lava_1
 32233223
 21122112
@@ -930,7 +978,7 @@
 11111111
 .endtile
 
-; tile $53  lava_2
+; tile $57  lava_2
 .tile bgt_lava_2
 11111111
 11111111
@@ -942,7 +990,7 @@
 11111111
 .endtile
 
-; tile $54  torch_0
+; tile $58  torch_0
 .tile bgt_torch_0
 .......1
 ......12
@@ -954,7 +1002,7 @@
 .....123
 .endtile
 
-; tile $55  torch_1
+; tile $59  torch_1
 .tile bgt_torch_1
 ........
 1.......
@@ -966,7 +1014,7 @@
 21......
 .endtile
 
-; tile $56  torch_2
+; tile $5A  torch_2
 .tile bgt_torch_2
 ......12
 .......1
@@ -978,7 +1026,7 @@
 ........
 .endtile
 
-; tile $57  torch_3
+; tile $5B  torch_3
 .tile bgt_torch_3
 1.......
 ........
@@ -990,7 +1038,7 @@
 ........
 .endtile
 
-; tile $58  chain_0
+; tile $5C  chain_0
 .tile bgt_chain_0
 ......22
 .....2..
@@ -1002,7 +1050,7 @@
 ......22
 .endtile
 
-; tile $59  chain_1
+; tile $5D  chain_1
 .tile bgt_chain_1
 ........
 2.......
@@ -1014,7 +1062,7 @@
 ........
 .endtile
 
-; tile $5A  backbrick_0
+; tile $5E  backbrick_0
 .tile bgt_backbrick_0
 ........
 .1....1.
@@ -1026,7 +1074,7 @@
 ....1...
 .endtile
 
-; tile $5B  backbrick_1
+; tile $5F  backbrick_1
 .tile bgt_backbrick_1
 ........
 ...1....
@@ -1038,7 +1086,7 @@
 .1....1.
 .endtile
 
-; tile $5C  door_0
+; tile $60  door_0
 .tile bgt_door_0
 ........
 ....1111
@@ -1050,7 +1098,7 @@
 .1222211
 .endtile
 
-; tile $5D  door_1
+; tile $61  door_1
 .tile bgt_door_1
 ........
 1111....
@@ -1062,7 +1110,7 @@
 2222221.
 .endtile
 
-; tile $5E  door_2
+; tile $62  door_2
 .tile bgt_door_2
 .1223211
 .1222211
@@ -1074,7 +1122,7 @@
 ........
 .endtile
 
-; tile $5F  door_3
+; tile $63  door_3
 .tile bgt_door_3
 2222221.
 2222221.
@@ -1087,7 +1135,7 @@
 .endtile
 
 ; Pad out pattern table 0.
-.chrskip 160
+.chrskip 156
 
 ; ---------------------------------------------------------------------------
 ; Pattern table 1 ($1000): sprites. Indices are table-relative, which is what

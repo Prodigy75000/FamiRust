@@ -108,9 +108,9 @@ hud_script:
   .byte >(NT0+ 1*32+18), <(NT0+ 1*32+18)
   .str "LIVES"
   .byte $FF
-  ; Row 2 is where the noise bar goes. It is empty rather than removed,
-  ; because the HUD is painted once per room and reserving the row now means
-  ; the bar arrives as a patch and not as a relayout.
+  .byte >(NT0+ 2*32+ 1), <(NT0+ 2*32+ 1)
+  .str "NOISE ------------"
+  .byte $FF
   .byte >(NT0+ 3*32+ 1), <(NT0+ 3*32+ 1)
   .str "------------------------------"
   .byte $FF
@@ -118,7 +118,7 @@ hud_script:
 
 HUD_NAME    = NT0 + 1*32 + 1    ; where the room's name goes
 HUD_LIVES   = NT0 + 1*32 + 24   ; two digits
-HUD_NOISE   = NT0 + 2*32 + 16   ; the noise bar, once there is one
+HUD_NOISE   = NT0 + 2*32 + 7    ; twelve cells, columns 7 to 18
 END_LIVES   = NT0 + 14*32 + 21
 
 ; ---------------------------------------------------------------------------
@@ -141,23 +141,24 @@ SFX_CRUMBLE = 5
 SFX_DART    = 6
 SFX_DOOR    = 7
 SFX_UI      = 8
-SFX_COUNT   = 9
+SFX_KNOCK   = 9
+SFX_COUNT   = 10
 
 SFX_PULSE = 0
 SFX_NOISE = 1
 
 sfx_tbl_ch:
   .byte SFX_PULSE, SFX_PULSE, SFX_PULSE, SFX_NOISE
-  .byte SFX_PULSE, SFX_NOISE, SFX_NOISE, SFX_PULSE, SFX_PULSE
+  .byte SFX_PULSE, SFX_NOISE, SFX_NOISE, SFX_PULSE, SFX_PULSE, SFX_NOISE
 sfx_tbl_dur:
-  .byte 0, 12, 6, 34, 12, 14, 4, 44, 6
+  .byte 0, 12, 6, 34, 12, 14, 4, 44, 6, 26
 sfx_tbl_plo:
-  .byte 0, $A0, $20, $08, $60, $06, $02, $00, $80
+  .byte 0, $A0, $20, $08, $60, $06, $02, $00, $80, $0D
 sfx_tbl_phi:
-  .byte 0, $01, $03, $00, $01, $00, $00, $02, $01
+  .byte 0, $01, $03, $00, $01, $00, $00, $02, $01, $00
 sfx_tbl_dp:
-  .byte 0, $F4, $18, $01, $EC, $01, $00, $F8, $00
+  .byte 0, $F4, $18, $01, $EC, $01, $00, $F8, $00, $00
 sfx_tbl_vol:
-  .byte 0, 8, 4, 12, 9, 8, 5, 9, 6
+  .byte 0, 8, 4, 12, 9, 8, 5, 9, 6, 13
 sfx_tbl_duty:
-  .byte 0, $80, $00, $00, $80, $00, $00, $40, $80
+  .byte 0, $80, $00, $00, $80, $00, $00, $40, $80, $00

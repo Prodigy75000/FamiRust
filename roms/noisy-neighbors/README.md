@@ -23,24 +23,18 @@ Do not read the rest of this file as a description of something you can play.
 
 **Done.** Two players on two pads, each with their own physics and their own
 spawn. Two ways out, and a room that only ends when both of them are in one.
-One of them dying taking the room away from both. All of it proven on the
+One of them dying taking the room away from both. The shared noise bar, the
+neighbor it fetches, and the wardrobes you hide in. All of it proven on the
 machine rather than asserted here, and proven again under four frames of
 lockstep netplay delay.
 
-**Not done.** The noise bar and the neighbor it summons, which is the actual
-game. The two of them being different from each other, which is the other
-actual game: right now they are the same character in two colours. Carryable
-crates, vents, held plates, the closet. Its own art and its own tune, both of
-which are currently borrowed from MONKEY FARCE next door. `tools/reach2.py`,
-the two-body solver.
-
-**And therefore: no `PERMISSION.md` in this directory yet, deliberately.** The
-statement of authorship in the other carts says that everything in them was
-made for them, and today that is not true here, because the art and the music
-came from the cartridge next door. Both are the same author's CC0 work, so
-nothing is wrong with distributing this; the statement would simply say
-something inaccurate, and it is signed in a real person's name. It gets written
-when the cartridge has its own graphics and its own tune.
+**Not done.** The two of them being different from each other in what they can
+*do*: the only asymmetry that exists so far is how loud they are. Carryable
+crates, vents, held plates. Real rooms, of which there are none; there is one
+room and it is a shakedown rig rather than a puzzle. Its own art and its own
+tune, both still borrowed from MONKEY FARCE next door, and the wardrobe
+currently reads too much like the door for something you have to pick out in
+two seconds. `tools/reach2.py`, the two-body solver. The one-player mode.
 
 ## The one rule
 
@@ -78,6 +72,52 @@ no input that had to land on an exact frame. The same check runs as a test.
 **Nothing is decided by who moves first.** A room one of you can lose for the
 other by being early is a room two strangers cannot play.
 
+## Noise
+
+One bar, for the pair. That is the point of it: his mistakes fill your meter,
+and there is no way to be individually careful.
+
+The big one is five times as loud as the small one doing the same thing. A jump
+and its landing cost him fifteen out of a hundred and ninety-two; they cost her
+three. He leaves a trickle behind him when he walks and she leaves none. So the
+one who can do the heavy work is the one who keeps getting you both caught,
+which is the game and the joke at the same time.
+
+Walking off a ledge is free. It is the one way down that costs nothing, and
+rooms are allowed to be built around that.
+
+Nothing drains for a full second after the last sound, and then it drains
+quickly. That grace is the whole mechanism and the first version did not have
+it. A flat drain has to be slower than the noise going in or nothing ever
+accumulates, and faster than it or standing still is not a real move, and those
+turned out to be the same number: one jump and its landing put in fifteen over
+about fifty frames, and a flat drain of one per four frames took out almost
+exactly fifteen over the same fifty. The bar sat at zero however carelessly it
+was played.
+
+## The neighbor
+
+When the bar fills you hear him at his door and the tune stops. That is two
+seconds of warning and it is all the warning there is. Then he comes in and
+sweeps, and anyone he finds standing costs you the room.
+
+Hiding is standing in a wardrobe. No button, no timer, no animation to be
+caught halfway through, and any corner of your box overlapping one counts. A
+hiding place whose angles have to be worked out is not a hiding place when the
+working out has to happen in two seconds, and it would be worse again over a
+link with input delay on it.
+
+That rule is also what makes a one-player mode possible, which is worth writing
+down before any room is built that quietly assumes otherwise:
+
+> A gate may require **both bodies**. It may never require **both hands**.
+
+Standing somewhere is shared state that survives you looking away. Pressing
+something is not. Hold that line and one person swapping between the two
+characters can solve every room the pair can, with no room redrawn and no
+puzzle weakened, because a character you parked in a wardrobe is still in the
+wardrobe while you are busy being the other one.
+
 ## Two of them, one set of variables
 
 The hero physics came over from MONKEY FARCE unchanged, which was the point of
@@ -113,14 +153,14 @@ room_1:
   .str "#..............#"
   .str "#....======....#"
   .str "#..............#"
-  .str "#D.1........2.D#"
+  .str "#DW1........2WD#"
   .str "#####^^^^^^#####"
   .str "################"
 ```
 
 Fourteen characters of name, then thirteen rows of sixteen. `1` is where the
-big one starts and `2` is where the small one starts, which is the only
-addition to the alphabet so far. A mistyped row fails the build.
+big one starts, `2` is where the small one starts, and `W` is a wardrobe. A
+mistyped row fails the build.
 
 ## Building it
 

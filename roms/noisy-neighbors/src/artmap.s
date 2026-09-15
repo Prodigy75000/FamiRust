@@ -7,7 +7,7 @@
 BLK_AIR        = 0
 BLK_STONE      = 1
 BLK_PLAT       = 2
-BLK_LIAR       = 3
+BLK_CLOSET     = 3
 BLK_CRUMBLE    = 4
 BLK_RUBBLE     = 5
 BLK_SPIKEUP    = 6
@@ -23,14 +23,7 @@ BF_SOLID   = $01
 BF_HAZARD  = $02
 BF_CRUMBLE = $04
 BF_GOAL    = $08
-
-E_NONE     = 0
-E_BAIT     = 1
-E_SAW      = 2
-E_CRUSHER  = 3
-E_DARTR    = 4
-E_DARTL    = 5
-E_COUNT    = 6
+BF_HIDE    = $10
 
 MS_HERO_IDLE  = 0
 MS_HERO_WALK1 = 1
@@ -45,62 +38,49 @@ SPR_DART   = 28
 SPR_SKULL  = 29
 
 blk_tl:  ; background tile in the TL corner of each block
-  .byte $00, $40, $42, $42, $44, $48, $4B, $4E
-  .byte $51, $54, $58, $5A, $5C
+  .byte $00, $40, $42, $44, $48, $4C, $4F, $52
+  .byte $55, $58, $5C, $5E, $60
 
 blk_tr:  ; background tile in the TR corner of each block
-  .byte $00, $40, $42, $42, $45, $48, $4B, $4F
-  .byte $52, $55, $59, $5B, $5D
+  .byte $00, $40, $42, $45, $49, $4C, $4F, $53
+  .byte $56, $59, $5D, $5F, $61
 
 blk_bl:  ; background tile in the BL corner of each block
-  .byte $00, $41, $43, $43, $46, $49, $4C, $50
-  .byte $53, $56, $58, $5A, $5E
+  .byte $00, $41, $43, $46, $4A, $4D, $50, $54
+  .byte $57, $5A, $5C, $5E, $62
 
 blk_br:  ; background tile in the BR corner of each block
-  .byte $00, $41, $43, $43, $47, $4A, $4D, $50
-  .byte $53, $57, $59, $5B, $5F
+  .byte $00, $41, $43, $47, $4B, $4E, $51, $54
+  .byte $57, $5B, $5D, $5F, $63
 
 blk_flags:  ; solid / hazard / crumble / goal
-  .byte $00, $01, $01, $00, $05, $00, $02, $02
+  .byte $00, $01, $01, $10, $05, $00, $02, $02
   .byte $02, $00, $00, $00, $08
 
 blk_pal:  ; which background palette the block wants
   .byte $00, $01, $02, $02, $02, $02, $01, $01
   .byte $03, $03, $01, $01, $02
 
-BLKF_PLAT  = $01
-BLKP_PLAT  = 2
-BLKF_LIAR  = $00
-BLKP_LIAR  = 2
-LIAR_TILES_MATCH = 1
+BLKF_PLAT   = $01
+BLKP_PLAT   = 2
+BLKF_CLOSET = $10
+BLKP_CLOSET = 2
+BLKF_DOOR   = $08
+BLKP_DOOR   = 2
 
 charmap:  ; room character (the byte .str emits) -> block id
   .byte $00, $00, $00, $01, $00, $0B, $00, $00
   .byte $00, $00, $09, $00, $00, $00, $00, $00
   .byte $00, $00, $00, $00, $00, $00, $00, $00
-  .byte $00, $00, $00, $00, $01, $02, $01, $00
+  .byte $00, $00, $00, $00, $00, $02, $00, $00
   .byte $00, $00, $00, $00, $0C, $00, $00, $00
   .byte $00, $00, $00, $00, $08, $00, $00, $00
-  .byte $00, $00, $00, $00, $00, $00, $00, $00
+  .byte $00, $00, $00, $00, $00, $00, $00, $03
   .byte $00, $00, $00, $00, $00, $00, $06, $00
   .byte $00, $00, $00, $04, $00, $00, $00, $00
   .byte $00, $00, $00, $00, $00, $00, $00, $05
   .byte $00, $00, $00, $00, $00, $00, $07, $00
-  .byte $00, $00, $00, $00, $0A, $00, $03, $00
-
-charent:  ; room character -> entity spawned in that cell
-  .byte $00, $00, $00, $00, $00, $00, $00, $00
-  .byte $00, $00, $00, $00, $00, $00, $00, $00
-  .byte $00, $00, $00, $00, $00, $00, $00, $00
-  .byte $00, $00, $00, $00, $05, $00, $04, $00
-  .byte $00, $00, $01, $03, $00, $00, $00, $00
-  .byte $00, $00, $00, $00, $00, $00, $00, $00
-  .byte $00, $00, $00, $00, $00, $00, $00, $02
-  .byte $00, $00, $00, $00, $00, $00, $00, $00
-  .byte $00, $00, $00, $00, $00, $00, $00, $00
-  .byte $00, $00, $00, $00, $00, $00, $00, $00
-  .byte $00, $00, $00, $00, $00, $00, $00, $00
-  .byte $00, $00, $00, $00, $00, $00, $00, $00
+  .byte $00, $00, $00, $00, $0A, $00, $00, $00
 
 CH_SPAWN1 = $11  ; where player 1 starts the room
 CH_SPAWN2 = $12  ; where player 2 starts the room

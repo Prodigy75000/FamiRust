@@ -62,6 +62,7 @@ SOLID   = 0x01   # you stand on it
 HAZARD  = 0x02   # touching it kills you
 CRUMBLE = 0x04   # solid, until you stand on it
 GOAL    = 0x08   # touching it ends the room
+HIDE    = 0x10   # standing in it puts you out of sight
 
 B = {}
 
@@ -123,6 +124,30 @@ B["crumble"] = [
 "2222222122.22221",
 "22222221222222.1",
 "1111111111111111",
+]
+
+# The wardrobe you hide in. Two doors, a split up the middle, and two handles
+# meeting at it. It has to read as furniture at a glance and as furniture you
+# can get inside, which is why the doors are panelled rather than flat: a flat
+# rectangle in this palette is a wall, and a wall is the last thing a player
+# should run at when a door is opening.
+B["closet"] = [
+"3333333333333333",
+"3222222222222223",
+"3211111133111123",
+"3211111133111123",
+"3211111133111123",
+"3211111133111123",
+"3211113333331123",
+"3211113333331123",
+"3211111133111123",
+"3211111133111123",
+"3211111133111123",
+"3211111133111123",
+"3211111133111123",
+"3211111133111123",
+"3222222222222223",
+"3333333333333333",
 ]
 
 B["backbrick"] = [
@@ -292,11 +317,11 @@ BLOCKS = [
     ("air",       None,        0,         0),
     ("stone",     "stone",     PAL_ROCK,  SOLID),
     ("plat",      "plat",      PAL_BRICK, SOLID),
-    # The liar. Same picture, same palette, same everything except the one bit
-    # that decides whether it holds you up. That only works because it shares
-    # tiles with the block above rather than imitating it: there is nothing to
-    # spot, not one pixel.
-    ("liar",      "plat",      PAL_BRICK, 0),
+    # The wardrobe. Standing in it is the whole of hiding: no button, no timer,
+    # no animation to be caught halfway through. That is not a shortcut, it is
+    # the rule that lets one person play both characters, because a parked
+    # character stays hidden while you are busy being the other one.
+    ("closet",    "closet",    PAL_BRICK, HIDE),
     ("crumble",   "crumble",   PAL_BRICK, SOLID | CRUMBLE),
     ("rubble",    "rubble",    PAL_BRICK, 0),
     ("spikeup",   "spikeup",   PAL_ROCK,  HAZARD),
@@ -316,29 +341,22 @@ BLOCKS = [
 # The last five spawn something instead of being something: the cell itself
 # keeps its block and an entity is created there when the room loads.
 # ---------------------------------------------------------------------------
-E_NONE, E_BAIT, E_SAW, E_CRUSHER, E_DARTR, E_DARTL = 0, 1, 2, 3, 4, 5
-
 CHARS = [
-    (".", "air",       E_NONE),
-    ("#", "stone",     E_NONE),
-    ("=", "plat",      E_NONE),
-    ("~", "liar",      E_NONE),
-    ("c", "crumble",   E_NONE),
-    ("o", "rubble",    E_NONE),
-    ("^", "spikeup",   E_NONE),
-    ("v", "spikedn",   E_NONE),
-    ("L", "lava",      E_NONE),
-    ("*", "torch",     E_NONE),
-    ("|", "chain",     E_NONE),
-    ("%", "backbrick", E_NONE),
-    ("D", "door",      E_NONE),
-    ("1", "air",       E_NONE),   # where the big one starts, found by scanning
-    ("2", "air",       E_NONE),   # where the small one starts
-    ("B", "air",       E_BAIT),
-    ("W", "air",       E_SAW),
-    ("C", "air",       E_CRUSHER),
-    (">", "stone",     E_DARTR),  # a wall that shoots
-    ("<", "stone",     E_DARTL),
+    (".", "air"),
+    ("#", "stone"),
+    ("=", "plat"),
+    ("c", "crumble"),
+    ("o", "rubble"),
+    ("^", "spikeup"),
+    ("v", "spikedn"),
+    ("L", "lava"),
+    ("*", "torch"),
+    ("|", "chain"),
+    ("%", "backbrick"),
+    ("D", "door"),
+    ("W", "closet"),             # the wardrobe: stand in it and you are hidden
+    ("1", "air"),                # where the big one starts, found by scanning
+    ("2", "air"),                # where the small one starts
 ]
 
 # ---------------------------------------------------------------------------
@@ -553,7 +571,7 @@ for name, art, pal, flags in BLOCKS:
         raise SystemExit("block %s names missing art %r" % (name, art))
 blocknames = [b[0] for b in BLOCKS]
 roomchars = [c[0] for c in CHARS]
-for ch, blk, ent in CHARS:
+for ch, blk in CHARS:
     if blk not in blocknames:
         raise SystemExit("room character %r names missing block %r" % (ch, blk))
     if not (0x20 <= ord(ch) < 0x80):
@@ -619,16 +637,16 @@ if bg.base + len(bg.tiles) > 256:
 if len(sp.tiles) > 256:
     raise SystemExit("sprite tiles overflow pattern table 1")
 
-# The premise of the whole cartridge, checked where it can actually be checked.
-# Give the liar so much as one pixel of its own and the pool stops sharing, the
-# tile numbers diverge, and this fails. It is also re-asserted inside the ROM
-# through LIAR_TILES_MATCH below, so a stale checked-in chr.s cannot hide it.
-LIAR_TILES_MATCH = int(blk_tiles["liar"] == blk_tiles["plat"])
-if not LIAR_TILES_MATCH:
-    raise SystemExit(
-        "the liar no longer shares the honest platform's tiles (%r vs %r); "
-        "there is now something to see, and the game is about nothing"
-        % (blk_tiles["liar"], blk_tiles["plat"]))
+# The wardrobe has to be obvious. A hiding place you cannot pick out at a
+# glance is not a hiding place, it is a trap, and the one thing the player
+# needs to find in the two seconds before a door opens is this block. So it may
+# not end up sharing tiles with anything: sharing means it looks like something
+# else, which is exactly the property it must not have.
+for other, tiles in blk_tiles.items():
+    if other != "closet" and tiles == blk_tiles["closet"]:
+        raise SystemExit(
+            "the wardrobe now draws the same as %r, so the one block a player "
+            "has to spot under pressure looks like scenery" % other)
 
 # ---------------------------------------------------------------------------
 # Emit
@@ -728,13 +746,9 @@ m.write("""; SPDX-License-Identifier: CC0-1.0
 for i, (name, art, pal, flags) in enumerate(BLOCKS):
     m.write("BLK_%-10s = %d\n" % (name.upper(), i))
 m.write("NUM_BLOCKS   = %d\n\n" % len(BLOCKS))
-m.write("BF_SOLID   = $%02X\nBF_HAZARD  = $%02X\nBF_CRUMBLE = $%02X\nBF_GOAL    = $%02X\n\n"
-        % (SOLID, HAZARD, CRUMBLE, GOAL))
-for nm, v in [("E_NONE", E_NONE), ("E_BAIT", E_BAIT), ("E_SAW", E_SAW),
-              ("E_CRUSHER", E_CRUSHER), ("E_DARTR", E_DARTR), ("E_DARTL", E_DARTL)]:
-    m.write("%-10s = %d\n" % (nm, v))
-m.write("E_COUNT    = %d\n\n" % 6)
-
+m.write("BF_SOLID   = $%02X\nBF_HAZARD  = $%02X\nBF_CRUMBLE = $%02X\nBF_GOAL    = $%02X\n"
+        "BF_HIDE    = $%02X\n\n"
+        % (SOLID, HAZARD, CRUMBLE, GOAL, HIDE))
 for i, nm in enumerate(MS_ORDER):
     m.write("MS_%-10s = %d\n" % (nm.upper(), i))
 m.write("MS_COUNT   = %d\n" % len(MS_ORDER))
@@ -759,19 +773,16 @@ table("blk_pal", [b[2] for b in BLOCKS], "which background palette the block wan
 # assembly time, so the two blocks the cartridge is actually about get their
 # flags and palette named individually and checked in main.s.
 byname = dict((b[0], b) for b in BLOCKS)
-for who in ("plat", "liar"):
-    m.write("BLKF_%-5s = $%02X\n" % (who.upper(), byname[who][3]))
-    m.write("BLKP_%-5s = %d\n" % (who.upper(), byname[who][2]))
-m.write("LIAR_TILES_MATCH = %d\n\n" % LIAR_TILES_MATCH)
+for who in ("plat", "closet", "door"):
+    m.write("BLKF_%-6s = $%02X\n" % (who.upper(), byname[who][3]))
+    m.write("BLKP_%-6s = %d\n" % (who.upper(), byname[who][2]))
+m.write("\n")
 
 # charmap: 96 entries covering $20..$7F, indexed by the byte .str emits.
 cm_blk = [0] * 96
-cm_ent = [0] * 96
-for ch, blk, ent in CHARS:
+for ch, blk in CHARS:
     cm_blk[ord(ch) - 0x20] = blocknames.index(blk)
-    cm_ent[ord(ch) - 0x20] = ent
 table("charmap", cm_blk, "room character (the byte .str emits) -> block id")
-table("charent", cm_ent, "room character -> entity spawned in that cell")
 for who in ("1", "2"):
     m.write("CH_SPAWN%s = $%02X  ; where player %s starts the room\n"
             % (who, ord(who) - 0x20, who))
