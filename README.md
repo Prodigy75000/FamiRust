@@ -73,6 +73,7 @@ crates/
 roms/
   famirust-demo/  the demo cartridge: source, art, and the built .nes (CC0)
   monkey-farce/     MONKEY FARCE, a one-screen platformer (CC0)
+  noisy-neighbors/  NOISY NEIGHBORS, a two-player escape (CC0, in progress)
 docs/notes/       clean-room hardware reference notes
 dumps/            cart images (gitignored, bring your own)
 tests/vendor/     vendored TomHarte 6502 vectors (gitignored)
