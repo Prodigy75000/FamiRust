@@ -115,6 +115,22 @@ Names come from `<rom>.sym` beside the ROM, which is why an assertion can read
 `300?lives=LIVES_START` rather than `300?$0046=10`. A failed assertion fails the
 process, and that is what lets a two-player script be a test rather than a demo.
 
+`fdstrace` answers a different question: what an FDS game actually asks the
+BIOS to do. It watches control crossing into `$E000-$FFFF` rather than looking
+for call opcodes, which catches jumps and interrupt dispatch as well as calls,
+and it counts every read of the window split by whether the BIOS or the game
+made it. That split is the constraint on replacing `disksys.rom`, because a byte
+only the BIOS reads goes away with the routine that read it.
+
+```sh
+cargo run --release -p nes-runner --bin fdstrace -- disk.fds --frames 1800 --mash
+python scripts/fds-census.py      # the same over a whole corpus, rolled up
+```
+
+Run over 114 disks it found forty entry points, and that 100 of the 114 read
+nothing at all out of the BIOS image beyond the interrupt vectors. See
+[`docs/notes/FDS-HLE.md`](docs/notes/FDS-HLE.md).
+
 The three clients each take the core as a different artifact, and because save
 states are versioned they want rebuilding together:
 

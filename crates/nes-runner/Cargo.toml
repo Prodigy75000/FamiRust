@@ -55,3 +55,9 @@ path = "src/pcprobe.rs"
 [[bin]]
 name = "play"
 path = "src/play.rs"
+
+# FDS BIOS census: which BIOS routines a disk actually calls, and which BIOS
+# bytes it reads directly. Step one of replacing disksys.rom (docs/notes/FDS-HLE.md).
+[[bin]]
+name = "fdstrace"
+path = "src/fdstrace.rs"

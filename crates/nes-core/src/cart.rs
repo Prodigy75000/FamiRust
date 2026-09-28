@@ -283,6 +283,30 @@ pub trait Mapper: SaveState {
     /// state whose format predates the `$5104` field). Default no-op.
     fn dbg_force_ext_attr(&mut self) {}
 
+    // ---- HLE census instrumentation (only the FDS RAM Adapter overrides these) ----
+
+    /// Begin recording per-address read counts for the BIOS window. Allocates,
+    /// so a tracer calls it once; nothing else ever calls it. Default no-op.
+    fn dbg_census_on(&mut self) {}
+
+    /// Tell the recorder whether the CPU is executing inside the BIOS window.
+    /// The mapper cannot know this (it never sees the PC), so the tracer sets it
+    /// once per instruction. Default no-op.
+    fn dbg_census_ctx(&mut self, _inside: bool) {}
+
+    /// Per-BIOS-address read counts as `[inside, outside]`, indexed from $E000.
+    /// Empty unless [`Mapper::dbg_census_on`] was called. Default empty.
+    fn dbg_census_reads(&self) -> &[[u32; 2]] {
+        &[]
+    }
+
+    /// Running count of writes to the disk-control registers ($4024/$4025).
+    /// Always counted, so a tracer can attribute each write to the instruction
+    /// that made it by taking a delta. Default zero.
+    fn dbg_diskreg_writes(&self) -> u64 {
+        0
+    }
+
     // ---- FDS disk-control (only the RAM Adapter overrides these) ----
 
     /// Number of FDS disk sides; 0 for a normal cartridge.

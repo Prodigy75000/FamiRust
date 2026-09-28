@@ -174,6 +174,32 @@ impl Nes {
         self.cpu.pc
     }
 
+    /// Total CPU cycles elapsed since power-on.
+    pub fn dbg_cycles(&self) -> u64 {
+        self.cpu.cycles
+    }
+
+    /// Debug: begin recording which FDS BIOS bytes get read. See
+    /// [`cart::Mapper::dbg_census_on`]; no-op on a normal cartridge.
+    pub fn dbg_census_on(&mut self) {
+        self.bus.mapper.dbg_census_on();
+    }
+
+    /// Debug: tell the BIOS read recorder whether the CPU is inside the BIOS.
+    pub fn dbg_census_ctx(&mut self, inside: bool) {
+        self.bus.mapper.dbg_census_ctx(inside);
+    }
+
+    /// Debug: per-BIOS-address read counts as `[inside, outside]` from $E000.
+    pub fn dbg_census_reads(&self) -> &[[u32; 2]] {
+        self.bus.mapper.dbg_census_reads()
+    }
+
+    /// Debug: writes so far to the FDS disk-control registers ($4024/$4025).
+    pub fn dbg_diskreg_writes(&self) -> u64 {
+        self.bus.mapper.dbg_diskreg_writes()
+    }
+
     pub fn dbg_halted(&self) -> bool {
         self.cpu.halted
     }

@@ -669,6 +669,26 @@ pub struct Fds {
     dbg_last_4032: u8,
     dbg_cycle: u64,
     dbg_first_bytes: u8,
+
+    // ---- HLE census instrumentation ----
+    /// Per-BIOS-address read counts, empty unless a tracer turned recording on.
+    /// Two banks per address: `[0]` counts reads the CPU took while executing
+    /// INSIDE the BIOS window, `[1]` reads it took from outside it.
+    ///
+    /// Only the second bank constrains an HLE. A byte that only the BIOS itself
+    /// reads goes away with the routine that read it; a byte the GAME reads out
+    /// of the BIOS image has to still be there, whatever replaces the code
+    /// around it. That is the difference between a table we may redesign and a
+    /// table that is part of the published interface.
+    dbg_bios_reads: Vec<[u32; 2]>,
+    /// Which bank the next BIOS read lands in. Set per instruction by the
+    /// tracer, which is the only thing that knows the PC.
+    dbg_bios_ctx: usize,
+    /// Writes to the disk-control registers ($4024/$4025). Counted so a tracer
+    /// can tell a game that leaves loading to the BIOS from one that drives the
+    /// drive itself, because the second kind keeps the hardware path
+    /// load-bearing no matter how good the HLE gets.
+    dbg_diskreg_writes: u64,
 }
 
 impl Fds {
@@ -714,6 +734,9 @@ impl Fds {
             dbg_last_4032: 0xff,
             dbg_cycle: 0,
             dbg_first_bytes: 0,
+            dbg_bios_reads: Vec::new(),
+            dbg_bios_ctx: 0,
+            dbg_diskreg_writes: 0,
         }
     }
 
@@ -1068,13 +1091,29 @@ impl crate::cart::Mapper for Fds {
             0x4030..=0x4033 => self.read_disk_reg(addr),
             0x4040..=0x407f | 0x4090 | 0x4092 => self.audio.read(addr),
             0x6000..=0xdfff => self.prg_ram[(addr - 0x6000) as usize],
-            0xe000..=0xffff => self.bios[(addr - 0xe000) as usize],
+            0xe000..=0xffff => {
+                let off = (addr - 0xe000) as usize;
+                // Empty unless a tracer asked for it, so this is one length
+                // compare per BIOS read on a normal run. Saturating because a
+                // long trace can fetch the same wait-loop instruction more
+                // times than a u32 holds, and a wrapped counter reads as a
+                // byte nobody touched.
+                if !self.dbg_bios_reads.is_empty() {
+                    let c = &mut self.dbg_bios_reads[off][self.dbg_bios_ctx];
+                    *c = c.saturating_add(1);
+                }
+                self.bios[off]
+            }
             _ => 0,
         }
     }
 
     fn cpu_write(&mut self, addr: u16, val: u8) {
         match addr {
+            0x4024 | 0x4025 => {
+                self.dbg_diskreg_writes += 1;
+                self.write_disk_reg(addr, val);
+            }
             0x4020..=0x4026 => self.write_disk_reg(addr, val),
             0x4040..=0x407f | 0x4080..=0x408a => self.audio.write(addr, val),
             0x6000..=0xdfff => self.prg_ram[(addr - 0x6000) as usize] = val,
@@ -1112,6 +1151,24 @@ impl crate::cart::Mapper for Fds {
         // FDS "saves" are the writable disk itself, not $6000 work RAM, so we do
         // not expose PRG-RAM here (it is scratch that the BIOS reloads).
         None
+    }
+
+    fn dbg_census_on(&mut self) {
+        self.dbg_bios_reads = vec![[0u32; 2]; BIOS_LEN];
+    }
+
+    fn dbg_census_ctx(&mut self, inside: bool) {
+        // Bank 0 is inside, bank 1 is outside, so this is deliberately NOT
+        // `usize::from(inside)`.
+        self.dbg_bios_ctx = if inside { 0 } else { 1 };
+    }
+
+    fn dbg_census_reads(&self) -> &[[u32; 2]] {
+        &self.dbg_bios_reads
+    }
+
+    fn dbg_diskreg_writes(&self) -> u64 {
+        self.dbg_diskreg_writes
     }
 
     fn fds_side_count(&self) -> usize {
