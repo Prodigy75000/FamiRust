@@ -19,6 +19,13 @@
 //! So the disks here are built to order: small, synthetic, and shaped exactly
 //! to ask the question. They need no firmware and no dumps, and they fail if
 //! the rule moves in either direction.
+//!
+//! **These pin our behaviour; they cannot be held against the oracle.** The
+//! real BIOS refuses to boot a disk whose first file is not Nintendo's licence
+//! screen byte for byte, so none of these disks will run under it at all. That
+//! measurement, and why our BIOS deliberately has no such check, is recorded in
+//! `fds_hle_routines.rs`. The rule itself was measured on commercial disks
+//! before being pinned here.
 
 /// Bytes of block data per side in a `.fds` image.
 const SIDE_LEN: usize = 65500;

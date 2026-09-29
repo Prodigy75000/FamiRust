@@ -218,6 +218,41 @@ impl Nes {
         self.bus.mapper.dbg_chr_ram()
     }
 
+    /// Debug: start logging CPU-space accesses, at most `cap` of them. See
+    /// [`bus::Bus::dbg_log_start`]; this is how `fdsprof` learns what a BIOS
+    /// routine does without reading its code.
+    pub fn dbg_log_start(&mut self, cap: usize) {
+        self.bus.dbg_log_start(cap);
+    }
+
+    /// Debug: stop logging and take what was logged, as (address, value, write).
+    pub fn dbg_log_take(&mut self) -> Vec<(u16, u8, bool)> {
+        self.bus.dbg_log_take()
+    }
+
+    /// Debug: write a byte into CPU space without running a cycle. RAM and
+    /// cartridge/adapter space only; the I/O range is left out on purpose,
+    /// because poking `$4031` would advance the disk head.
+    pub fn dbg_poke(&mut self, addr: u16, val: u8) {
+        match addr {
+            0x0000..=0x1fff => self.bus.ram[(addr & 0x07ff) as usize] = val,
+            0x6000..=0xffff => self.bus.mapper.cpu_write(addr, val),
+            _ => {}
+        }
+    }
+
+    /// Debug: put the program counter somewhere, for a test that wants to call
+    /// one routine rather than play a game.
+    pub fn dbg_set_pc(&mut self, pc: u16) {
+        self.cpu.pc = pc;
+    }
+
+    /// Debug: the 256 bytes of sprite memory. `dbg_oam_json` renders it for a
+    /// human; this is for a test that wants the bytes.
+    pub fn dbg_oam(&self) -> &[u8; 256] {
+        &self.bus.ppu.oam
+    }
+
     /// Debug: the 2 KiB of console nametable RAM. An FDS file of kind 2 loads
     /// straight into here, so a boot comparison that leaves it out is blind to
     /// a whole class of file.

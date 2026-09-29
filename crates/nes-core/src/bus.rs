@@ -29,6 +29,20 @@ pub struct Bus {
     pub mapper: Box<dyn Mapper>,
     /// Last value on the data bus, returned for open-bus reads.
     open_bus: u8,
+    /// Whether the access log below is recording. Kept beside `open_bus`, which
+    /// every access already touches, so testing it costs no extra cache line.
+    dbg_log_on: bool,
+
+    /// Debug access log: every CPU-space access in order, as (address, value,
+    /// was-a-write). Off and empty unless a tool turns it on, and bounded, so a
+    /// routine that never returns cannot eat the machine.
+    ///
+    /// This exists for `fdsprof`, which works out what a BIOS routine does by
+    /// watching what it touches rather than by reading its code. A routine's
+    /// interface IS the set of addresses it reads and writes, so that is the
+    /// thing to record.
+    dbg_log: Vec<(u16, u8, bool)>,
+    dbg_log_cap: usize,
 }
 
 impl Bus {
@@ -40,12 +54,49 @@ impl Bus {
             controllers: [Controller::new(), Controller::new()],
             mapper,
             open_bus: 0,
+            dbg_log_on: false,
+            dbg_log: Vec::new(),
+            dbg_log_cap: 0,
         }
     }
 
 }
 
 impl Bus {
+    /// Start recording CPU-space accesses, keeping at most `cap` of them.
+    pub fn dbg_log_start(&mut self, cap: usize) {
+        self.dbg_log.clear();
+        self.dbg_log.reserve(cap.min(1 << 16));
+        self.dbg_log_cap = cap;
+        self.dbg_log_on = true;
+    }
+
+    /// Stop recording and hand back what was recorded.
+    pub fn dbg_log_take(&mut self) -> Vec<(u16, u8, bool)> {
+        self.dbg_log_on = false;
+        std::mem::take(&mut self.dbg_log)
+    }
+
+    /// One predictable branch on a bool when the log is off, which is always
+    /// except under `fdsprof`. Everything else is outlined and marked cold, so
+    /// the Vec's length and capacity are never loaded on the hot path: written
+    /// as one function it cost 26% of emulation speed, measured, because this
+    /// runs on every CPU-space access in the machine.
+    #[inline(always)]
+    fn dbg_note(&mut self, addr: u16, val: u8, write: bool) {
+        if self.dbg_log_on {
+            self.dbg_push(addr, val, write);
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn dbg_push(&mut self, addr: u16, val: u8, write: bool) {
+        if self.dbg_log.len() < self.dbg_log_cap {
+            self.dbg_log.push((addr, val, write));
+        }
+    }
+
     /// Advance the rest of the system for one CPU cycle: three PPU dots + one APU
     /// cycle + the mapper's per-cycle hook.
     #[inline]
@@ -110,6 +161,7 @@ impl CpuBus for Bus {
             0x4020..=0xffff => self.mapper.cpu_read(addr),
         };
         self.open_bus = val;
+        self.dbg_note(addr, val, false);
         val
     }
 
@@ -117,6 +169,7 @@ impl CpuBus for Bus {
         self.ppu.begin_cpu_cycle();
         self.tick();
         self.open_bus = val;
+        self.dbg_note(addr, val, true);
         match addr {
             0x0000..=0x1fff => self.ram[(addr & 0x07ff) as usize] = val,
             0x2000..=0x3fff => self.ppu.write_register(addr & 7, val, &mut *self.mapper),

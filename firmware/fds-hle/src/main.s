@@ -81,6 +81,7 @@ PPUCTRL   = $2000
 PPUMASK   = $2001
 PPUSTATUS = $2002
 OAMADDR   = $2003
+OAMDMA    = $4014
 PPUADDR   = $2006
 PPUDATA   = $2007
 APUSTATUS = $4015
@@ -339,8 +340,23 @@ read_to_ppu:
   jmp unimplemented
 .org $E9B1
   jmp unimplemented
+; --- $E9C8: copy the sprite page to OAM ------------------------------------
+;
+; 27 of the 114 corpus titles call it, and it is the one routine the profiler
+; settled on its own: every caller, on every call, writes $2003=$00 then
+; $4014=$02 and reads $0200-$02FF, returns by `rts` with a=$02, and costs
+; exactly 18 CPU cycles. That is a sprite DMA from page 2 with the page fixed,
+; and 18 is precisely lda(2) + sta abs(4) + lda(2) + sta abs(4) + rts(6).
+;
+; The DMA's own 513 stall cycles are on top and are not part of the 18; the CPU
+; makes no bus accesses while the DMA unit has the bus.
 .org $E9C8
-  jmp unimplemented
+sprite_dma:
+  lda #$00
+  sta OAMADDR
+  lda #$02
+  sta OAMDMA
+  rts
 .org $E9D3
   jmp unimplemented
 .org $EA1F

@@ -67,3 +67,8 @@ path = "src/fdstrace.rs"
 [[bin]]
 name = "fdsdiff"
 path = "src/fdsdiff.rs"
+
+# FDS routine profiler: what one BIOS entry point does, from the outside.
+[[bin]]
+name = "fdsprof"
+path = "src/fdsprof.rs"
