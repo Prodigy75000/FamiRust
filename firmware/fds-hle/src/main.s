@@ -82,8 +82,11 @@ PPUMASK   = $2001
 PPUSTATUS = $2002
 OAMADDR   = $2003
 OAMDMA    = $4014
+PPUSCROLL = $2005
 PPUADDR   = $2006
 PPUDATA   = $2007
+JOY1      = $4016
+JOY2      = $4017
 APUSTATUS = $4015
 APUFRAME  = $4017
 DMC_FREQ  = $4010
@@ -359,16 +362,264 @@ sprite_dma:
   rts
 .org $E9D3
   jmp unimplemented
+; --- $EA1F: read both pads and work out what was newly pressed -------------
+;
+; 26 of the 114 corpus titles call it. No register arguments; everything comes
+; from and goes to zero page:
+;
+;   $FB  in   the byte to hold on $4016's output lines while strobing. The
+;             strobe writes are $FB+1 then $FB, which is an increment and not
+;             an or: poking $FB=$07 produced writes of $08 then $07, where an
+;             `ora #1` would have produced $07 twice. Bit 0 is the strobe, and
+;             the other bits are there for whatever the expansion port wants.
+;   $F7  in   what was held last call, for pad 1. $F8 for pad 2.
+;   $F5  out  newly pressed since the last call, pad 1. $F6 for pad 2.
+;   $F7  out  held now, pad 1. $F8 for pad 2.
+;   $00  out  the expansion pad's held state, pad 1. $01 for pad 2.
+;
+; The "newly pressed" arithmetic was proven with a sentinel rather than read
+; off: poking $F7=$EE before a call holding A, Select, Down and Right returned
+; $01, which is $A5 AND NOT $EE exactly.
+;
+; Bit order in the stored byte is A=$80 down to Right=$01, proven by feeding
+; $0F and getting $F0 back, and $33 giving $CC.
+;
+; Exit: a = $F5, y = $F7, x = $FF, and the flags do NOT describe a (a call
+; returning a=$00 still came back with Z clear). We reproduce x=$FF and the
+; register values; the exit carry varies with the data on the real BIOS from a
+; source that could not be identified, so it is not reproduced and should not
+; be relied on.
+;
+; Bit 1 of each read is the Famicom expansion pad and goes to $00/$01, which is
+; structural inference rather than measurement: our core never drives that bit,
+; so it was never seen lit. Nothing in the corpus depends on it, and routing it
+; here costs nothing if it is right and nothing if it is wrong.
 .org $EA1F
-  jmp unimplemented
+  jmp read_pads             ; body below; 70 bytes will not fit in 45
+
 .org $EA4C
   jmp unimplemented
+; --- $EA84: fill a page of video memory ------------------------------------
+;
+; 41 of the 114 corpus titles call it, the joint most-called routine after the
+; NMI handler. Measured with the profiler across 39 callers plus forced-register
+; probes, which is how the argument meanings and the path boundary were pinned
+; rather than guessed:
+;
+;   a = the VRAM page, i.e. the high byte of the start address; the low byte is
+;       always zero.
+;   x = the byte to fill with.
+;   y = the attribute byte when a >= $20, the page count when a < $20, and in
+;       the second case y=0 means 256 pages (forced a=$00 y=$00 ran 590,919
+;       cycles, which is exactly 256 pages).
+;
+; The boundary is exactly $20: forced a=$19 and a=$1F take the short path and
+; a=$20 takes the nametable path.
+;
+;   a >= $20   1024 bytes of x at a<<8, which covers the nametable and its
+;              attribute area, then 64 bytes of y at ((a+3)<<8)|$C0.
+;              9889 cycles, constant, on every one of the 36 callers that take
+;              this path.
+;   a <  $20   y*256 bytes of x and no attribute pass.
+;              2308*pages + 71 cycles, checked at 2, 8, 16, 32 and 256 pages.
+;
+; Two things here are published state rather than implementation. The three
+; arguments are spilled to $00, $01 and $02 and LEFT there, so a game may read
+; them back after the call. And $FF, the PPUCTRL shadow, is updated to the
+; masked value: forced $FF=$FF left $FB in both $2000 and $FF, $FF=$04 left
+; $00, $FF=$14 left $10. Bit 2 is the VRAM increment, so clearing it forces the
+; +1 stepping this routine needs, and persisting it means a following $EAEA
+; keeps that stepping.
+;
+; The attribute address really is computed as a+3 by an `adc #$02` under a set
+; carry rather than by an `ora`: forcing a=$7E wrote $2006=$81,$C0 and returned
+; with V set, and no `ora` sets overflow. It is also computed blindly, so a
+; caller passing a=$21..$27 has its "attribute" pass land in the middle of a
+; nametable. The real BIOS does that too, and copying it is the point.
+;
+; Exactly 78 bytes, which puts the `rts` on $EAD1 and the next entry point at
+; $EAD2 with nothing between them. Every branch stays inside page $EA, which
+; the cycle counts above depend on: a branch crossing a page costs one more.
 .org $EA84
-  jmp unimplemented
+vram_fill:
+  sta $00                   ; the arguments, spilled and deliberately left
+  stx $01
+  sty $02
+  lda PPUSTATUS             ; reset the write latch
+  lda $FF
+  and #%11111011            ; force the VRAM increment to +1
+  sta PPUCTRL
+  sta $FF                   ; and keep it, for whoever reads the shadow next
+  lda $00
+  sta PPUADDR               ; high byte is the page
+  ldx #$00
+  stx PPUADDR               ; low byte is always zero
+  ldx #$04                  ; a whole nametable is four pages
+  cmp #$20
+  bcs @go
+  ldx $02                   ; below $20 the page count is the y argument
+@go:
+  ldy #$00
+  lda $01
+@fill:
+  sta PPUDATA
+  iny
+  bne @fill
+  dex
+  bne @fill
+  ldy $02                   ; the y argument back; also the attribute byte
+  lda $00
+  cmp #$20
+  bcc @done
+  adc #$02                  ; carry is set, so this is page + 3
+  sta PPUADDR
+  lda #$C0
+  sta PPUADDR
+  ldx #$40
+@attr:
+  sty PPUDATA
+  dex
+  bne @attr
+@done:
+  ldx $01                   ; the x argument back; the exit N and Z are its
+  rts
+
+; The reconstruction is only cycle-exact if it is also size-exact, and it comes
+; out at precisely the 78 bytes between this entry point and the next.
+.assert vram_fill_end == $EAD2
+vram_fill_end:
+; --- $EAD2: fill whole pages of RAM ----------------------------------------
+;
+; 27 of the 114 corpus titles call it. Measured: a = the fill byte, x = the
+; first page, y = the last, both inclusive, so x=y fills one page. Dead Zone
+; calls a=$F8 x=2 y=2 and fills $0200-$02FF; Adian a=0 x=2 y=7 fills
+; $0200-$07FF; an injected a=$55 x=3 y=3 filled page 3 and left $02FF alone.
+; The entry carry does not take part (tried both ways, identical).
+;
+; It touches no hardware at all. Pages go DOWNWARD from y to x, and inside a
+; page $p00 is written first and then $pFF down to $p01, which is what a
+; `sta ($00),y` loop starting at y=0 does. Every one of the 6172 accesses in a
+; six-page call is accounted for by exactly that shape.
+;
+; Exit: a preserved (it goes on the stack and comes back), x=0, y=0, $00=0 and
+; $01=x-1.
+;
+; Two cycles short of the real one at entry, and it leaves carry set where the
+; real one leaves it clear. Both are deliberate rather than unnoticed: the
+; measured entry is 24 cycles and no encoding I can find that produces the
+; measured access order does it in fewer than 26. A fill of 2825 cycles a page
+; is one and a half scanlines, so nothing raster-times through it, and no
+; caller can sensibly branch on the carry out of a memory fill. Being FASTER
+; is the safe direction for a routine a game may run inside vblank; being
+; slower is not, and this is not slower.
+;
+; Not defended, deliberately: x > y. On the real BIOS the count wraps toward
+; 256 pages, the fill reaches zero page, overwrites its own pointer and the
+; machine destroys itself. No corpus title does it. We do the same thing for
+; the same reason, because a clamp the original lacks is its own bug.
 .org $EAD2
-  jmp unimplemented
+  jmp mem_fill              ; see the body below: it does not fit in the 24
+                            ; bytes between here and the next entry point, and
+                            ; the real BIOS puts its bulk elsewhere too
+
+; ===========================================================================
+; Routine bodies that do not fit between their entry points
+; ===========================================================================
+;
+; Three cycles of `jmp` each. That makes these three slower to start and, with
+; the savings below, still comfortably faster overall than the routines they
+; replace, which is the safe direction: a game that runs one of these inside
+; vblank has more room than it had, never less.
+.org $FB80
+
+mem_fill:
+  pha                       ; a survives the call; the stack is where it waits
+  sty $01                   ; the page pointer starts at the LAST page
+  txa
+  eor #$FF
+  sec
+  adc $01                   ; a = y - x
+  tax
+  inx                       ; x = the page count, y - x + 1
+  pla
+  ldy #$00
+  sty $00
+@page:
+  sta ($00),y               ; y walks 0, $FF, $FE ... $01: measured order
+  dey
+  bne @page
+  dec $01
+  dex
+  bne @page
+  rts
+
+read_pads:
+  ldy $FB
+  iny
+  sty JOY1                  ; strobe on:  $FB + 1
+  dey
+  sty JOY1                  ; strobe off: $FB
+  ldx #$07
+@bit:
+  lda JOY1
+  lsr a                     ; bit 0 is the pad that is wired to the port
+  rol $F5
+  lsr a                     ; bit 1 is the expansion port
+  rol $00
+  lda JOY2
+  lsr a
+  rol $F6
+  lsr a
+  rol $01
+  dex
+  bpl @bit                  ; eight bits, and x falls out as $FF
+  lda $00                   ; the expansion pad merges into the wired one
+  ora $F5
+  sta $F5
+  lda $01
+  ora $F6
+  sta $F6
+  lda $F6                   ; pad 2: newly = held AND NOT was-held
+  tay
+  eor $F8
+  and $F6
+  sta $F6
+  sty $F8
+  lda $F5                   ; pad 1 last, so a and y end as $F5 and $F7
+  tay
+  eor $F7
+  and $F5
+  sta $F5
+  sty $F7
+  ldx #$FF
+  rts
+; --- $EAEA: write the scroll and PPUCTRL from their zero-page shadows -------
+;
+; 32 of the 114 corpus titles call it, and all 32 look identical under the
+; profiler: one $2002 read, reads of $FD, $FC and $FF, two $2005 writes and one
+; $2000 write, no RAM written at all, 31 cycles, rts.
+;
+; $FF is the PPUCTRL shadow the BIOS shares across routines; $FD and $FC are the
+; horizontal and vertical scroll shadows. $FD goes out first, so it is X.
+; Forcing $FD=$11 and $FC=$22 at the call produced $2005=$11 then $2005=$22,
+; which is what settles which is which.
+;
+; PPUCTRL is copied VERBATIM here, with no mask: forced $FF=$14 wrote $14 and
+; forced $FF=$FF wrote $FF. That is the difference from $EA84 below, which
+; masks bit 2 and writes the masked value back.
+;
+; The per-instruction rhythm is 4,3,4,3,4,3,4,6, which adds to the measured 31
+; and admits exactly this stream.
 .org $EAEA
-  jmp unimplemented
+set_scroll:
+  lda PPUSTATUS             ; reset the write latch; the value is not used
+  lda $FD
+  sta PPUSCROLL             ; first write is X
+  lda $FC
+  sta PPUSCROLL             ; second is Y
+  lda $FF
+  sta PPUCTRL
+  rts
 .org $EAFD
   jmp unimplemented
 .org $EBAF

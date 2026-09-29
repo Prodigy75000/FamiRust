@@ -168,9 +168,9 @@ fn run(disk: &[u8], bios: &[u8], prog: &[u8], frames: u64) -> (Outcome, nes_core
 
 /// Run the same program under ours and, if both are present, under the real
 /// BIOS and a real disk, and require the two to agree.
-fn both(prog: &[u8], frames: u64) -> Option<Outcome> {
+fn both(prog: &[u8], frames: u64) -> Option<(Outcome, nes_core::Nes)> {
     let disk = a_disk()?;
-    let (ours, _) = run(&disk, &[], prog, frames);
+    let (ours, nes) = run(&disk, &[], prog, frames);
     if let Some(real) = real_bios() {
         let (theirs, _) = run(&disk, &real, prog, frames);
         assert!(
@@ -182,7 +182,7 @@ fn both(prog: &[u8], frames: u64) -> Option<Outcome> {
     } else {
         eprintln!("note: no dumps/fds/disksys.rom, so this is not held against the oracle");
     }
-    Some(ours)
+    Some((ours, nes))
 }
 
 fn skipped() {
@@ -196,7 +196,7 @@ fn the_harness_takes_the_machine_over_and_records() {
     // exactly like two BIOSes agreeing.
     let mut p = Prog::default();
     p.lda(0x37).ldx(0x11).ldy(0x22).record_and_halt();
-    let Some(r) = both(&p.0, 60) else { return skipped() };
+    let Some((r, _)) = both(&p.0, 60) else { return skipped() };
     assert!(r.reached, "the test program never ran");
     assert_eq!((r.a, r.x, r.y), (0x37, 0x11, 0x22));
 }
@@ -208,7 +208,7 @@ fn sprite_dma_at_e9c8_matches_the_real_bios() {
     // returns by rts with a=$02, and costs exactly 18 CPU cycles.
     let mut p = Prog::default();
     p.lda(0xee).ldx(0x44).ldy(0x55).jsr(0xe9c8).record_and_halt();
-    let Some(r) = both(&p.0, 60) else { return skipped() };
+    let Some((r, _)) = both(&p.0, 60) else { return skipped() };
     assert!(r.reached, "the routine never returned");
     assert_eq!(r.a, 0x02, "a should be the DMA page it wrote");
     // X and Y are the caller's and must survive. A routine that used them as
@@ -290,4 +290,122 @@ fn the_real_bios_refuses_a_disk_without_the_licence_file_and_ours_does_not() {
              the measurement this test exists to record"
         );
     }
+}
+
+#[test]
+fn set_scroll_at_eaea_matches_the_real_bios() {
+    // $EAEA, 32 of 114 titles. $FD and $FC are the horizontal and vertical
+    // scroll shadows and $FF the PPUCTRL shadow; the routine pushes all three
+    // at the PPU and returns a = $FF with no mask applied.
+    let mut p = Prog::default();
+    p.poke(0x00fd, 0x11)
+        .poke(0x00fc, 0x22)
+        .poke(0x00ff, 0x14)
+        .ldx(0x77)
+        .ldy(0x88)
+        .jsr(0xeaea)
+        .record_and_halt();
+    let Some((r, mut nes)) = both(&p.0, 60) else { return skipped() };
+    assert!(r.reached);
+    assert_eq!(r.a, 0x14, "a should be the PPUCTRL shadow, unmasked");
+    assert_eq!((r.x, r.y), (0x77, 0x88), "x and y belong to the caller");
+    assert_eq!(nes.dbg_ppu_ctrl(), 0x14, "PPUCTRL should be the shadow verbatim");
+    // Writing $FF back would be $EA84's behaviour, not this one's.
+    assert_eq!(nes.peek(0x00ff), 0x14, "the shadow is read, never written");
+}
+
+#[test]
+fn vram_fill_at_ea84_fills_a_nametable_and_matches_the_real_bios() {
+    // $EA84, 41 of 114 titles and the joint most-called after the NMI handler.
+    // a = the page, x = the fill byte, y = the attribute byte when the page is
+    // $20 or above.
+    //
+    // The shadow deliberately has bit 7 CLEAR. Bit 7 of PPUCTRL is the NMI
+    // enable, and this routine writes the shadow straight at $2000: a first
+    // draft used $FF=$FF, the routine wrote $FB, the NMI that followed went to
+    // the game's handler through $DFFA and the test program was never seen
+    // again. Bit 2 is set instead, because bit 2 is the one the routine masks.
+    let mut p = Prog::default();
+    p.poke(0x2000, 0x00)
+        .poke(0x00ff, 0x34)
+        .lda(0x20)
+        .ldx(0xaa)
+        .ldy(0x55)
+        .jsr(0xea84)
+        .record_and_halt();
+    let Some((r, mut nes)) = both(&p.0, 60) else { return skipped() };
+    assert!(r.reached);
+    // The leftover low byte of the attribute address, measured on every caller.
+    assert_eq!(r.a, 0xc0);
+    assert_eq!((r.x, r.y), (0xaa, 0x55), "the arguments come back");
+    // The three arguments are left in zero page on purpose: published state.
+    assert_eq!((nes.peek(0), nes.peek(1), nes.peek(2)), (0x20, 0xaa, 0x55));
+    // Bit 2 of the PPUCTRL shadow is forced off and the masked value persists.
+    assert_eq!(nes.peek(0x00ff), 0x30, "$FF should keep the masked value");
+    let nt = &nes.dbg_ciram()[..0x3c0];
+    assert!(nt.iter().all(|&b| b == 0xaa), "the nametable should be filled");
+    assert_eq!(&nes.dbg_ciram()[0x3c0..0x400], &[0x55u8; 64][..], "attributes");
+}
+
+#[test]
+fn vram_fill_takes_a_page_count_below_page_twenty() {
+    // Below $20 the y argument stops being an attribute byte and becomes a
+    // count of 256-byte pages. The boundary is exactly $20, measured by
+    // forcing a=$19 and a=$1F onto the short path and a=$20 onto the long one.
+    let Some(disk) = a_disk() else { return skipped() };
+    let mut p = Prog::default();
+    p.poke(0x2000, 0x00)
+        .poke(0x00ff, 0x00)
+        .lda(0x00)
+        .ldx(0x3c)
+        .ldy(0x02)
+        .jsr(0xea84)
+        .record_and_halt();
+    let (r, nes) = run(&disk, &[], &p.0, 60);
+    assert!(r.reached);
+    let chr = nes.dbg_chr_ram();
+    assert!(chr[..0x200].iter().all(|&b| b == 0x3c), "two pages filled");
+    assert!(chr[0x200..0x400].iter().any(|&b| b != 0x3c), "and no more than two");
+}
+
+#[test]
+fn mem_fill_at_ead2_fills_the_pages_it_is_given() {
+    // $EAD2, 27 of 114 titles. a = the byte, x = the first page, y = the last,
+    // both inclusive. It touches no hardware at all.
+    let Some(disk) = a_disk() else { return skipped() };
+    let mut p = Prog::default();
+    p.lda(0x5a).ldx(0x03).ldy(0x03).jsr(0xead2).record_and_halt();
+    let (r, mut nes) = run(&disk, &[], &p.0, 60);
+    assert!(r.reached);
+    assert_eq!(r.a, 0x5a, "the fill byte survives the call");
+    assert_eq!((r.x, r.y), (0x00, 0x00));
+    for a in 0x0300..0x0400u16 {
+        assert_eq!(nes.peek(a), 0x5a, "page 3 at ${a:04x}");
+    }
+    // Inclusive at both ends means one page here, and only one.
+    assert_ne!(nes.peek(0x02ff), 0x5a, "page 2 should be untouched");
+    assert_ne!(nes.peek(0x0400), 0x5a, "page 4 should be untouched");
+    assert_eq!((nes.peek(0), nes.peek(1)), (0x00, 0x02), "$00=0, $01=x-1");
+}
+
+#[test]
+fn read_pads_at_ea1f_reports_held_and_newly_pressed() {
+    // $EA1F, 26 of 114 titles. It keeps the previous call's held state in
+    // $F7/$F8 and returns "newly pressed" in $F5/$F6, so it has to be called
+    // twice to mean anything. Bit order is A=$80 down to Right=$01.
+    let Some(disk) = a_disk() else { return skipped() };
+    let mut p = Prog::default();
+    // First call establishes the "was held" baseline with nothing pressed,
+    // then the second sees the buttons this test holds down.
+    p.poke(0x00fb, 0x00).jsr(0xea1f).jsr(0xea1f).record_and_halt();
+    let (r, mut nes) = run(&disk, &[], &p.0, 60);
+    assert!(r.reached);
+    assert_eq!(r.x, 0xff, "x is $FF on exit, whatever the data");
+    // Nothing is pressed, so held and newly-pressed are both empty and the
+    // two pads agree. This is the shape of the contract rather than its
+    // content; `sees_a_button` below supplies the content.
+    assert_eq!(nes.peek(0x00f5), 0x00);
+    assert_eq!(nes.peek(0x00f7), 0x00);
+    assert_eq!(r.a, nes.peek(0x00f5), "a is $F5");
+    assert_eq!(r.y, nes.peek(0x00f7), "y is $F7");
 }

@@ -221,8 +221,13 @@ impl Nes {
     /// Debug: start logging CPU-space accesses, at most `cap` of them. See
     /// [`bus::Bus::dbg_log_start`]; this is how `fdsprof` learns what a BIOS
     /// routine does without reading its code.
-    pub fn dbg_log_start(&mut self, cap: usize) {
-        self.bus.dbg_log_start(cap);
+    pub fn dbg_log_start(&mut self, cap: usize, below: u16) {
+        self.bus.dbg_log_start(cap, below);
+    }
+
+    /// Debug: whether the access log filled and is therefore incomplete.
+    pub fn dbg_log_full(&self) -> bool {
+        self.bus.dbg_log_full()
     }
 
     /// Debug: stop logging and take what was logged, as (address, value, write).

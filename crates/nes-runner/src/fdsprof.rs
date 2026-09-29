@@ -61,6 +61,8 @@ struct Call {
     log: Vec<(u16, u8, bool)>,
     /// True if the stay ended because the routine ran away rather than returned.
     ran_away: bool,
+    /// True if the access log filled up, so `log` is only the start of the call.
+    truncated: bool,
 }
 
 impl Call {
@@ -112,7 +114,7 @@ fn profile(
             let (a_in, x_in, y_in, p_in, sp_in) =
                 (nes.cpu.a, nes.cpu.x, nes.cpu.y, nes.cpu.p, nes.cpu.sp);
             let start = nes.dbg_cycles();
-            nes.dbg_log_start(1 << 16);
+            nes.dbg_log_start(1 << 20, BIOS_BASE);
             let mut ran_away = false;
             let mut steps = 0u32;
             loop {
@@ -130,11 +132,8 @@ fn profile(
                     break;
                 }
             }
-            let log: Vec<_> = nes
-                .dbg_log_take()
-                .into_iter()
-                .filter(|(a, _, _)| *a < BIOS_BASE)
-                .collect();
+            let truncated = nes.dbg_log_full();
+            let log = nes.dbg_log_take();
             calls.push(Call {
                 caller: prev,
                 a_in,
@@ -151,6 +150,7 @@ fn profile(
                 cycles: nes.dbg_cycles() - start,
                 log,
                 ran_away,
+                truncated,
             });
             prev = nes.dbg_pc();
             continue;
@@ -345,6 +345,10 @@ fn main() -> ExitCode {
     if calls.iter().any(|c| c.ran_away) {
         println!("  NOTE: at least one call never returned");
     }
+    if calls.iter().any(|c| c.truncated) {
+        println!("  NOTE: the access log FILLED UP, so what follows is the start");
+        println!("        of the call and not the whole of it. Raise the cap.");
+    }
 
     let touched = fold(&calls);
     for (what, want_write) in [("reads ", false), ("writes", true)] {
@@ -474,7 +478,7 @@ mod tests {
             caller: 0,
             a_in: 0, x_in: 0, y_in: 0, p_in: 0, sp_in,
             a_out: 0, x_out: 0, y_out: 0, p_out: 0, sp_out,
-            exit_pc: 0, cycles: 0, log: Vec::new(), ran_away: false,
+            exit_pc: 0, cycles: 0, log: Vec::new(), ran_away: false, truncated: false,
         };
         // A jsr left the stack two bytes down; an rts puts them back.
         assert_eq!(mk(0xfb, 0xfd).exit_kind(), "rts");

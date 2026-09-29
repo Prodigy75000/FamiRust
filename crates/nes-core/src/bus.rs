@@ -43,6 +43,8 @@ pub struct Bus {
     /// thing to record.
     dbg_log: Vec<(u16, u8, bool)>,
     dbg_log_cap: usize,
+    /// Only accesses strictly below this address are recorded.
+    dbg_log_below: u16,
 }
 
 impl Bus {
@@ -57,18 +59,34 @@ impl Bus {
             dbg_log_on: false,
             dbg_log: Vec::new(),
             dbg_log_cap: 0,
+            dbg_log_below: 0,
         }
     }
 
 }
 
 impl Bus {
-    /// Start recording CPU-space accesses, keeping at most `cap` of them.
-    pub fn dbg_log_start(&mut self, cap: usize) {
+    /// Start recording CPU-space accesses below `below`, keeping at most `cap`.
+    ///
+    /// The address filter is not a convenience. A caller watching what a BIOS
+    /// routine touches wants RAM and hardware, not the routine fetching its own
+    /// instructions, and fetches are the overwhelming majority: filtering after
+    /// the fact spends the whole buffer on them and then silently truncates the
+    /// interesting part. That happened, on a nine-million-cycle disk load, and
+    /// the report it produced covered the first 0.7% of the call while looking
+    /// complete.
+    pub fn dbg_log_start(&mut self, cap: usize, below: u16) {
         self.dbg_log.clear();
         self.dbg_log.reserve(cap.min(1 << 16));
         self.dbg_log_cap = cap;
+        self.dbg_log_below = below;
         self.dbg_log_on = true;
+    }
+
+    /// Whether the log filled up, so a caller can say so instead of reporting a
+    /// truncated set as if it were the whole one.
+    pub fn dbg_log_full(&self) -> bool {
+        self.dbg_log.len() >= self.dbg_log_cap
     }
 
     /// Stop recording and hand back what was recorded.
@@ -92,7 +110,7 @@ impl Bus {
     #[cold]
     #[inline(never)]
     fn dbg_push(&mut self, addr: u16, val: u8, write: bool) {
-        if self.dbg_log.len() < self.dbg_log_cap {
+        if addr < self.dbg_log_below && self.dbg_log.len() < self.dbg_log_cap {
             self.dbg_log.push((addr, val, write));
         }
     }

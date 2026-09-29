@@ -196,14 +196,49 @@ rather than the BIOS. They are worth recording because each is easy to repeat:
 Work RAM, leftover boot artwork and the registers are reported and not required,
 for the reasons above and in the script's own header.
 
-### What a cold boot does not yet do
+### The routines
 
-Three of the forty entry points are implemented: the NMI handler, the IRQ
-handler and reset. The other 37 are stubs that put **NO ROUTINE** on the screen
-and stop. That is worth its 111 bytes: Zelda hands over correctly, runs its own
-code, jumps to `$EA84` and would otherwise disappear into the fill, which looks
-like a hundred different bugs instead of one missing routine. `fdstrace` names
-the address.
+Seven of the forty entry points are implemented. The other 33 are stubs that put
+**NO ROUTINE** on the screen and stop, which is worth its 111 bytes: Zelda hands
+over correctly, runs its own code, jumps to `$EA84` and would otherwise
+disappear into the fill, looking like a hundred different bugs instead of one
+missing routine. `fdstrace` names the address.
+
+| entry | titles | what it is | note |
+|---|---|---|---|
+| `$E18B` | 107 | NMI dispatch | cycle-exact, 13/14 |
+| `$E1C7` | 23 | IRQ dispatch | 11 cycles against 14 |
+| `$EE24` | 6 | reset | |
+| `$EA84` | 41 | fill a page of video memory | cycle-exact, 9889 |
+| `$EAEA` | 32 | scroll and PPUCTRL from the zero-page shadows | cycle-exact, 31 |
+| `$E9C8` | 27 | sprite DMA from page 2 | cycle-exact, 18 |
+| `$EAD2` | 27 | fill whole pages of RAM | 2 cycles fast at entry |
+| `$EA1F` | 26 | read both pads, work out newly-pressed | faster; exit carry not reproduced |
+| `$E1F8` | 41 | **load files from disk** | measured, not written: `FDS-LOADFILES.md` |
+
+**Where the cycle counts do not match, ours is faster, never slower.** That is
+deliberate. A game that runs one of these inside vblank has more room than it
+had rather than less, so being quick is safe and being slow is not. The
+exception is interrupt dispatch, where arriving early moves every raster split
+on the screen, and that one is matched exactly.
+
+Four of the seven came out cycle-exact without being aimed at, which is the
+strongest evidence available that the reconstructions are right rather than
+merely adequate. `$EA84` in particular lands its `rts` on `$EAD1`, filling
+precisely the 78 bytes between its entry point and the next one.
+
+### How a routine gets worked out
+
+`fdsprof` puts the machine under an access log for the length of one call and
+reports registers in and out, exit kind, cycles, and every address outside the
+BIOS window that was read or written. A routine's interface **is** that set of
+addresses. `scripts/fds-routine.py` runs it across every corpus title that calls
+the routine, because one game's call shows what that game passes and six show
+which registers are arguments.
+
+`crates/nes-core/tests/fds_hle_routines.rs` is the other half: it boots a real
+disk to handover under both BIOSes, plants a caller in work RAM, and compares
+what comes back. That is the oracle at the level the work happens at.
 
 ## Running order
 
@@ -211,7 +246,7 @@ the address.
 2. ~~Baseline smoke on the real BIOS, one ledger row per title.~~ The census
    rows and `fds-hle-check.py` are this.
 3. ~~HLE boot with our own graphics and no BIOS file present.~~ Done 2026-09-29.
-4. Routine by routine, each held against the real BIOS on every corpus call.
-   The queue is the entry-point table, in order: `$E1F8`, `$EAEA`, `$EA84`,
-   `$EBAF`, `$EAD2`.
+4. Routine by routine, each held against the real BIOS. Seven of forty done;
+   the queue by usage is `$E1F8` (measured, see `FDS-LOADFILES.md`), `$EBAF`,
+   `$E1B2`, `$E7BB`, `$E149`, `$EA4C`. Zelda's next blocker is `$E7BB`.
 5. Cycle accounting per routine, starting from the `cyc/call` column.
