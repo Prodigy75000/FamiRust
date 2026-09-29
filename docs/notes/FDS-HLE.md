@@ -102,7 +102,7 @@ it late twice.
 - **The disk is writable.** Saves land on the medium, so anything the HLE does
   to loading has to leave writing exactly as it was.
 
-## Where the HLE should intercept
+## Where the HLE intercepts (written before it was built)
 
 A **synthetic 8 KB image**, not CPU address traps: our own artwork where the
 real BIOS keeps its graphics, a reserved opcode plus a routine id at each
@@ -111,11 +111,107 @@ trivial, entry addresses land where games expect them, and the cycle charge is a
 table sitting next to the id. The census makes this cheap, because only fourteen
 titles read the image as data at all.
 
+## The BIOS itself
+
+`firmware/fds-hle/src/main.s`, assembled by our own `nes-asm` into the 8 KiB
+image `nes-core` carries with `include_bytes!`. Build it with
+`scripts/build-fds-bios.sh`; `cargo test` checks that the committed image is
+what the committed source assembles to, and that the core carries that same
+image rather than a stale one.
+
+**It is 6502, not host code, and the census is why.** The plan in the previous
+section was a synthetic image full of trap opcodes with the work done in Rust.
+One number killed it: `$E1F8` averages 8.4 million cycles a call, and a single
+Bio Miracle call took 9,911,532, which at `BYTE_CYCLES = 149` is one whole side
+of a disk. A host-side routine has to invent that time, and keep inventing it
+while the game's own interrupt handlers run inside the wait. Doing the work in
+6502 gets the timing right by doing the work. It also makes save states free,
+because the BIOS window already serializes.
+
+### What was measured, and how
+
+Everything below came out of `fdsdiff`, which boots a disk under two BIOSes and
+compares the machine each hands the game at **handover**: the instant the BIOS
+dispatches through the `$DFFC` pseudo-vector.
+
+**The file-selection rule.** A file loads if its ID is at most the boot read
+file code at byte **`$19`** of the disk-info block. Byte `$1A`, which is what a
+first reading suggested, is `$FF` on every disk and would load everything; Bio
+Miracle loads two of its seven files. The comparison is `<=` rather than `<`,
+which Falsion settles: boot code 15, and its ID-15 file is loaded.
+
+**The NMI vector selection is real, and `$0100` drives it.** The first version
+dispatched through `$DFFA` unconditionally, because all three disks here use it.
+A corpus scan found Doki Doki Panic on vector 1 and Tama & Friends on vector 2,
+with all three of their vectors distinct at the moment of dispatch. Which byte
+selects was then found by correlation rather than by reading the ROM: ten disks
+run to their first NMI, work RAM captured at that instant, all 2048 bytes tested
+for whether their value predicts the vector. Exactly one survives.
+
+| `$0100` | N (bit 7) | V (bit 6) | vector |
+|---|---|---|---|
+| `$C0` | 1 | 1 | 3, `$DFFA`. The value the BIOS leaves at boot |
+| `$80` | 1 | 0 | 2, `$DFF8` |
+| `$40` | 0 | 1 | 1, `$DFF6` |
+| `$00` | 0 | 0 | never observed; we return |
+
+The cycle counts confirm it independently. A `bit` test plus two branches plus
+`jmp (ind)` costs 13 cycles for `$C0` and 14 for either of the others, which is
+exactly what the real handler measures, and the branch targets land on the same
+addresses its control flow visits.
+
+**The BIOS boots with horizontal mirroring.** Not a detail: a file of kind 2
+loads into the nametables at the address its header names, and which physical
+bank that is depends on `$4025` bit 3. With it clear, Zelda's licence screen
+landed in bank 0; the real BIOS puts it in bank 1, and with it set all 224 bytes
+match the oracle.
+
+**The registers at handover are NOT a contract**, though they looked like one.
+Zelda, Bio Miracle and Famicom Grand Prix are all handed `a=$10 x=$00 y=$FF
+sp=$FF p=$20`. Xevious is handed `x=$FF y=$00 p=$21`. They are whatever the real
+BIOS's last instruction left behind, so nothing can depend on them. We set a
+fixed, sane set.
+
+### Where it stands: 114 of 114
+
+`scripts/fds-hle-check.py` boots every disk in the corpus under both BIOSes.
+**All 114 are handed the machine the real BIOS hands them**: 72 of 72 originals,
+40 of 40 translations, both hacks. The contract is reaching handover at the same
+entry address with identical program RAM. 67 of them also match byte for byte on
+pattern RAM; the rest differ only in whose boot artwork is left lying in it.
+
+Two earlier numbers from this same check were wrong, and both were the tooling
+rather than the BIOS. They are worth recording because each is easy to repeat:
+
+- **108 of 114**, because the check required the handover REGISTERS to match and
+  those vary by disk under the real BIOS, and because `fdsdiff` was calling the
+  first exit from the BIOS window a handover. The real BIOS leaves NMI enabled
+  while it loads, so on a disk whose files install an NMI handler early the
+  first exit is an interrupt being dispatched mid-load. That made the six Namco
+  titles look like they disagreed with us when they did not.
+- **113 of 114**, because a mutation test overwrote `fds-hle.bin` while the
+  corpus check was reading it, so one disk was measured against a deliberately
+  broken BIOS. Do not mutate a shared artifact while a background job reads it.
+
+Work RAM, leftover boot artwork and the registers are reported and not required,
+for the reasons above and in the script's own header.
+
+### What a cold boot does not yet do
+
+Three of the forty entry points are implemented: the NMI handler, the IRQ
+handler and reset. The other 37 are stubs that put **NO ROUTINE** on the screen
+and stop. That is worth its 111 bytes: Zelda hands over correctly, runs its own
+code, jumps to `$EA84` and would otherwise disappear into the fill, which looks
+like a hundred different bugs instead of one missing routine. `fdstrace` names
+the address.
+
 ## Running order
 
 1. ~~Dynamic tracer, then a census across the corpus.~~ Done 2026-09-29.
-2. Baseline smoke on the real BIOS, one ledger row per title. (The census rows
-   are most of this already.)
-3. HLE boot with our own graphics and no BIOS file present.
+2. ~~Baseline smoke on the real BIOS, one ledger row per title.~~ The census
+   rows and `fds-hle-check.py` are this.
+3. ~~HLE boot with our own graphics and no BIOS file present.~~ Done 2026-09-29.
 4. Routine by routine, each held against the real BIOS on every corpus call.
+   The queue is the entry-point table, in order: `$E1F8`, `$EAEA`, `$EA84`,
+   `$EBAF`, `$EAD2`.
 5. Cycle accounting per routine, starting from the `cyc/call` column.

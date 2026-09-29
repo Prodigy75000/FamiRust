@@ -307,6 +307,13 @@ pub trait Mapper: SaveState {
         0
     }
 
+    /// Pattern memory when the mapper owns it as RAM, for comparing two boots
+    /// byte for byte. CPU-space RAM can be read through `peek`; this cannot,
+    /// because it lives in PPU space. Empty for a CHR-ROM cartridge.
+    fn dbg_chr_ram(&self) -> &[u8] {
+        &[]
+    }
+
     // ---- FDS disk-control (only the RAM Adapter overrides these) ----
 
     /// Number of FDS disk sides; 0 for a normal cartridge.

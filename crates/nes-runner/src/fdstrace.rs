@@ -309,14 +309,9 @@ fn main() -> ExitCode {
             .to_string_lossy()
             .into_owned()
     });
-    let bios = match std::fs::read(&bios_path) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("FDS image needs a BIOS; cannot read {bios_path}: {e}");
-            eprintln!("(set $FDS_BIOS or place disksys.rom next to the .fds)");
-            return ExitCode::FAILURE;
-        }
-    };
+    // Falls back to the BIOS built into the core, so a census can be run over
+    // ours as well as over the real one.
+    let bios = std::fs::read(&bios_path).unwrap_or_default();
     let mut nes = match nes_core::Nes::from_fds(&disk, &bios) {
         Ok(n) => n,
         Err(e) => {

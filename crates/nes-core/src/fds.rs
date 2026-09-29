@@ -47,6 +47,19 @@ const SIDE_LEN: usize = 65500;
 /// FDS BIOS size ($E000-$FFFF).
 pub const BIOS_LEN: usize = 8 * 1024;
 
+/// Our own FDS BIOS, built into the core so the Famicom Disk System needs no
+/// firmware file at all.
+///
+/// Source and reasoning in `firmware/fds-hle/`; doctrine in
+/// `docs/notes/FDS-HLE.md`. It is a clean-room reimplementation written against
+/// the published RAM Adapter interface and against behaviour measured from the
+/// real BIOS as a black box, with our own boot screen. Nothing in it is derived
+/// from a disassembly of Nintendo's ROM.
+///
+/// A real `disksys.rom` is still accepted and is still the ORACLE this is held
+/// against. It is never a requirement.
+pub const HLE_BIOS: &[u8] = include_bytes!("../../../firmware/fds-hle/fds-hle.bin");
+
 /// CPU cycles between one disk byte and the next. The drive turns at a fixed
 /// speed, delivering ~96.4 kbit/s; at the NTSC 2A03 clock that is ~149 cycles
 /// per byte. Games time nothing off this directly (the BIOS drives it), so the
@@ -1169,6 +1182,10 @@ impl crate::cart::Mapper for Fds {
 
     fn dbg_diskreg_writes(&self) -> u64 {
         self.dbg_diskreg_writes
+    }
+
+    fn dbg_chr_ram(&self) -> &[u8] {
+        &self.chr_ram
     }
 
     fn fds_side_count(&self) -> usize {

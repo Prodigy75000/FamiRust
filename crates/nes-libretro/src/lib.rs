@@ -406,12 +406,24 @@ pub unsafe extern "C" fn retro_load_game(info: *const retro_game_info) -> bool {
                 env(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &mut fmt as *mut i32 as *mut c_void);
             }
         }
-        // FDS disk image: not a cartridge. It needs the 8 KiB BIOS from the
-        // frontend's system directory, and it exposes disk/side swapping.
+        // FDS disk image: not a cartridge, and it exposes disk/side swapping.
+        //
+        // A real `disksys.rom` in the frontend's system directory is used when
+        // there is one, because it is the oracle our own BIOS is held against
+        // and it is the more conservative choice for anyone who has it. With no
+        // firmware file present the core falls back to the BIOS built into it
+        // and loads the disk anyway, which is the entire point of the exercise:
+        // no user should have to find a copyrighted ROM to play a disk game.
         if Nes::is_fds(&rom) {
-            let Some(bios) = load_fds_bios(s.env) else {
-                logline(s, "FDS load failed: disksys.rom not found in system dir");
-                return false;
+            let bios = match load_fds_bios(s.env) {
+                Some(b) => {
+                    logline(s, "FDS: using disksys.rom from the system directory");
+                    b
+                }
+                None => {
+                    logline(s, "FDS: no disksys.rom, using the built-in HLE BIOS");
+                    Vec::new()
+                }
             };
             return match Nes::from_fds(&rom, &bios) {
                 Ok(core) => {

@@ -69,12 +69,18 @@ impl Nes {
         Ok(nes)
     }
 
-    /// Build a machine from an FDS disk image (`.fds`, headered or raw) plus the
-    /// 8 KiB FDS BIOS (`disksys.rom`, user-supplied). The RAM Adapter is the
-    /// mapper; the BIOS drives boot from its reset vector. The disk is not a
-    /// cartridge, so it does not go through [`cart::from_ines`].
+    /// Build a machine from an FDS disk image (`.fds`, headered or raw) and a
+    /// BIOS. The RAM Adapter is the mapper; the BIOS drives boot from its reset
+    /// vector. The disk is not a cartridge, so it does not go through
+    /// [`cart::from_ines`].
+    ///
+    /// **An empty `bios` means "use ours"** ([`fds::HLE_BIOS`]), so a frontend
+    /// with no `disksys.rom` to offer can still run the disk. A real BIOS is
+    /// accepted and is the oracle the built-in one is held against, but it is
+    /// not a requirement: see [`Nes::from_fds_hle`].
     pub fn from_fds(disk_image: &[u8], bios: &[u8]) -> Result<Self, fds::FdsError> {
         let disk = fds::FdsDisk::parse(disk_image)?;
+        let bios = if bios.is_empty() { fds::HLE_BIOS } else { bios };
         let mapper = fds::Fds::new(disk, bios.to_vec());
         let mut nes = Nes {
             cpu: Cpu::new(),
@@ -82,6 +88,12 @@ impl Nes {
         };
         nes.cpu.reset(&mut nes.bus);
         Ok(nes)
+    }
+
+    /// Build a machine from an FDS disk image using the BIOS built into this
+    /// core, with no firmware file anywhere in the path.
+    pub fn from_fds_hle(disk_image: &[u8]) -> Result<Self, fds::FdsError> {
+        Self::from_fds(disk_image, &[])
     }
 
     /// True if `data` looks like an FDS disk image (so a frontend knows to call
@@ -198,6 +210,19 @@ impl Nes {
     /// Debug: writes so far to the FDS disk-control registers ($4024/$4025).
     pub fn dbg_diskreg_writes(&self) -> u64 {
         self.bus.mapper.dbg_diskreg_writes()
+    }
+
+    /// Debug: mapper-owned pattern RAM, empty on a CHR-ROM cartridge. PPU space
+    /// is not reachable through [`Nes::peek`], and comparing two boots needs it.
+    pub fn dbg_chr_ram(&self) -> &[u8] {
+        self.bus.mapper.dbg_chr_ram()
+    }
+
+    /// Debug: the 2 KiB of console nametable RAM. An FDS file of kind 2 loads
+    /// straight into here, so a boot comparison that leaves it out is blind to
+    /// a whole class of file.
+    pub fn dbg_ciram(&self) -> &[u8] {
+        &self.bus.ppu.ciram
     }
 
     pub fn dbg_halted(&self) -> bool {

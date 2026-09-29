@@ -49,11 +49,13 @@ NES library: hundreds of licensed titles boot and play.
   13 (CPROM), 34 (BNROM/NINA-001), 64 (RAMBO-1), 65 (Irem H3001), 66 (GxROM),
   69 (Sunsoft FME-7), 71 (Camerica), 79 (NINA-03), 113 (NINA-113),
   118 (TxSROM), 119 (TQROM), 232 (Camerica BF9096).
-- **Famicom Disk System**: the RAM adapter (mapper 20) driven by the real BIOS
-  (`disksys.rom`, user-supplied): disk-image parsing, the byte-level drive with
-  gap/mark framing, timer + transfer IRQs, disk reads *and writes* (in-game
-  saves), the RP2C33 wavetable + modulation expansion sound channel, and the
-  libretro disk-control interface for side/disk swapping.
+- **Famicom Disk System**: the RAM adapter (mapper 20), **with no firmware file
+  required**: disk-image parsing, the byte-level drive with gap/mark framing,
+  timer + transfer IRQs, disk reads *and writes* (in-game saves), the RP2C33
+  wavetable + modulation expansion sound channel, and the libretro disk-control
+  interface for side/disk swapping. A real `disksys.rom` is used when the
+  frontend has one and is the oracle our own BIOS is measured against; see
+  below.
 - **Headers**: iNES + NES 2.0 parsing, with a CRC32 correction DB for known-bad
   dumps (e.g. "DiskDude!"-corrupted headers).
 - **RetroAchievements**: exposes system RAM + cartridge work RAM over the
@@ -68,8 +70,12 @@ crates/
   nes-libretro/   libretro C ABI cdylib -> libnescore_libretro.{so,dll,dylib}
   nes-runner/     dev harnesses: `tomharte` (CPU conformance), `nes` (headless
                   render + audio dump), `play` (scripted input, for driving
-                  something playable), `fingerprint` (save-state parity check)
+                  something playable), `fingerprint` (save-state parity check),
+                  `fdstrace` (what a disk asks the BIOS for), `fdsdiff` (two
+                  BIOSes, one disk, compared at handover)
   nes-asm/        a small dependency-free 6502 assembler, used to build the carts
+firmware/
+  fds-hle/        our own FDS BIOS: 6502 source and the 8 KiB image it builds
 roms/
   famirust-demo/  the demo cartridge: source, art, and the built .nes (CC0)
   monkey-farce/     MONKEY FARCE, a one-screen platformer (CC0)
@@ -128,8 +134,34 @@ python scripts/fds-census.py      # the same over a whole corpus, rolled up
 ```
 
 Run over 114 disks it found forty entry points, and that 100 of the 114 read
-nothing at all out of the BIOS image beyond the interrupt vectors. See
-[`docs/notes/FDS-HLE.md`](docs/notes/FDS-HLE.md).
+nothing at all out of the BIOS image beyond the interrupt vectors.
+
+## FDS with no firmware file
+
+The Famicom Disk System was the last platform here that demanded a copyrighted
+ROM before it would do anything. It does not any more: the core carries its own
+8 KiB BIOS, written in 6502 from the published RAM Adapter interface and from
+behaviour measured off the real one as a black box, with our own boot screen.
+
+```sh
+scripts/build-fds-bios.sh            # firmware/fds-hle/src/main.s -> the image
+python scripts/fds-hle-check.py      # every disk in the corpus, both BIOSes
+```
+
+A real `disksys.rom` is still used when the frontend has one, because it is the
+**oracle** this is held against and never a requirement. `fdsdiff` boots a disk
+under both and compares the machine each hands the game at handover, the instant
+the BIOS dispatches through the `$DFFC` pseudo-vector.
+
+Measured that way, **all 114 disks in the corpus are handed the machine the real
+BIOS hands them**: same entry address, same program RAM, byte for byte.
+[`docs/notes/FDS-HLE.md`](docs/notes/FDS-HLE.md) has what was measured and how,
+which of it turned out not to be a contract after all, and the two wrong numbers
+this check produced before the tooling was right.
+
+It is a boot, not a finished BIOS. Three of the forty entry points are
+implemented; the other 37 are stubs that say **NO ROUTINE** and stop, so a game
+that wants one says so instead of wandering into the fill.
 
 The three clients each take the core as a different artifact, and because save
 states are versioned they want rebuilding together:

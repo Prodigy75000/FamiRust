@@ -19,3 +19,5 @@ android-jnilibs/
 # `nes-asm -s`, so it is regenerable and would only add churn.
 /roms/famirust-demo/*.sym
 /roms/monkey-farce/*.sym
+# Symbol dump from assembling the FDS BIOS: a build artifact, not a source.
+/firmware/fds-hle/*.sym

@@ -48,6 +48,8 @@ struct Asm {
     mapper: u8,
     vertical_mirroring: bool,
     configured: bool,
+    /// `.raw` was used, so the image is emitted bare with no iNES header.
+    raw: bool,
 
     section: Section,
     pc: u16,
@@ -77,6 +79,7 @@ pub fn assemble(entry: &std::path::Path, opts: &Options) -> Result<Output, Strin
         mapper: 0,
         vertical_mirroring: false,
         configured: false,
+        raw: false,
         section: Section::Prg,
         pc: 0x8000,
         chr_pos: 0,
@@ -115,7 +118,16 @@ pub fn assemble(entry: &std::path::Path, opts: &Options) -> Result<Output, Strin
     }
 
     if !a.configured {
-        return Err("source never declared a cartridge with .ines".into());
+        return Err("source never declared its output with .ines or .raw".into());
+    }
+
+    if a.raw {
+        return Ok(Output {
+            prg_used: a.prg_written.iter().filter(|w| **w).count(),
+            chr_tiles_used: 0,
+            symbols: symbol_dump(&a, opts),
+            rom: a.prg,
+        });
     }
 
     let mut rom = Vec::with_capacity(16 + a.prg.len() + a.chr.len());
@@ -132,6 +144,17 @@ pub fn assemble(entry: &std::path::Path, opts: &Options) -> Result<Output, Strin
     rom.extend_from_slice(&a.prg);
     rom.extend_from_slice(&a.chr);
 
+    let symbols = symbol_dump(&a, opts);
+
+    Ok(Output {
+        rom,
+        symbols,
+        prg_used: a.prg_written.iter().filter(|w| **w).count(),
+        chr_tiles_used: a.max_chr_pos / 16,
+    })
+}
+
+fn symbol_dump(a: &Asm, opts: &Options) -> String {
     let mut symbols = String::new();
     if opts.symbol_file {
         let mut names: Vec<_> = a.syms.iter().collect();
@@ -140,13 +163,7 @@ pub fn assemble(entry: &std::path::Path, opts: &Options) -> Result<Output, Strin
             symbols.push_str(&format!("{value:04X}  {name}\n"));
         }
     }
-
-    Ok(Output {
-        rom,
-        symbols,
-        prg_used: a.prg_written.iter().filter(|w| **w).count(),
-        chr_tiles_used: a.max_chr_pos / 16,
-    })
+    symbols
 }
 
 /// Read the entry file and splice in every `.include`, depth first.
@@ -403,6 +420,7 @@ impl Asm {
 
         match name {
             ".ines" => self.d_ines(args),
+            ".raw" => self.d_raw(args),
             ".org" => {
                 let v = self.value_now(args)?;
                 if !(0..=0xffff).contains(&v) {
@@ -490,6 +508,50 @@ impl Asm {
         self.pc = self.prg_base;
         self.mapper = mapper;
         self.vertical_mirroring = vertical;
+        self.configured = true;
+        Ok(())
+    }
+
+    /// `.raw base=$E000 size=8192` -- emit a bare image at a fixed address
+    /// instead of an iNES cartridge. No header, no CHR bank, nothing but the
+    /// bytes, which is what a firmware image is.
+    ///
+    /// This exists for the HLE FDS BIOS (`firmware/fds-hle`). That image has to
+    /// sit at $E000-$FFFF with its routines at the addresses games call, and it
+    /// is not a cartridge in any sense: wrapping it in an iNES header and then
+    /// slicing the header back off would be a lie told twice.
+    fn d_raw(&mut self, args: &str) -> Result<(), String> {
+        let mut base: Option<i64> = None;
+        let mut size: Option<i64> = None;
+        for field in args.split_whitespace() {
+            let (k, v) = field
+                .split_once('=')
+                .ok_or_else(|| format!("bad .raw field {field:?}, want key=value"))?;
+            let n = self.value_now(v)?;
+            match k {
+                "base" => base = Some(n),
+                "size" => size = Some(n),
+                other => return Err(format!("unknown .raw field {other}")),
+            }
+        }
+        let base = base.ok_or("`.raw` needs base=")?;
+        let size = size.ok_or("`.raw` needs size=")?;
+        if !(0..=0xffff).contains(&base) {
+            return Err(format!(".raw base ${base:X} is not a 16-bit address"));
+        }
+        if size <= 0 || base + size > 0x10000 {
+            return Err(format!(
+                ".raw size {size} does not fit at ${base:04X} (would run past $FFFF)"
+            ));
+        }
+        if self.pass == 1 {
+            self.prg = vec![0xff; size as usize];
+            self.chr = Vec::new();
+            self.prg_written = vec![false; size as usize];
+        }
+        self.prg_base = base as u16;
+        self.pc = self.prg_base;
+        self.raw = true;
         self.configured = true;
         Ok(())
     }

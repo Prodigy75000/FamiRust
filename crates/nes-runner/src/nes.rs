@@ -87,14 +87,13 @@ fn main() -> ExitCode {
                 .to_string_lossy()
                 .into_owned()
         });
-        let bios = match std::fs::read(&bios_path) {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!("FDS image needs a BIOS; cannot read {bios_path}: {e}");
-                eprintln!("(set $FDS_BIOS or place disksys.rom next to the .fds)");
-                return ExitCode::FAILURE;
-            }
-        };
+        // No BIOS file is not an error any more: the core carries its own. A
+        // real one is still preferred when present, because it is the oracle
+        // ours is measured against.
+        let bios = std::fs::read(&bios_path).unwrap_or_default();
+        if bios.is_empty() {
+            println!("FDS: no BIOS at {bios_path}, using the built-in HLE BIOS");
+        }
         match nes_core::Nes::from_fds(&rom, &bios) {
             Ok(n) => {
                 println!("FDS disk: {} side(s), BIOS {} bytes", n.fds_side_count(), bios.len());

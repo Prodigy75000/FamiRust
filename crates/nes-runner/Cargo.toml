@@ -61,3 +61,9 @@ path = "src/play.rs"
 [[bin]]
 name = "fdstrace"
 path = "src/fdstrace.rs"
+
+# FDS BIOS differential: boot one disk under two BIOSes and compare the machine
+# each hands the game. The real BIOS is the oracle for the HLE.
+[[bin]]
+name = "fdsdiff"
+path = "src/fdsdiff.rs"
