@@ -4,9 +4,16 @@
 
 The general "load files from disk" entry point: 41 of the 114 corpus titles
 call it, the joint most-used routine after the NMI handler, and the one a game
-uses to pull in a level or a new bank after boot. It is not yet implemented.
-This is the measured interface, written down so the measuring does not have to
-be done twice.
+uses to pull in a level or a new bank after boot.
+
+**Implemented as of 2026-09-30**, in `firmware/fds-hle/src/main.s`, and held
+against the real BIOS in `crates/nes-core/tests/fds_hle_routines.rs`. This page
+is the measurement it was built from, kept because the parts marked unmeasured
+below are still unmeasured and because the next person to touch it should not
+have to do the measuring again.
+
+No game reaches it yet under our BIOS: every title that calls it asks for
+something else first, which is why the tests plant their own caller.
 
 Everything here came from black-box observation of the real BIOS under an
 access log. Nothing was read out of the ROM. Where something could not be

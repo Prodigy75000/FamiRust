@@ -102,6 +102,21 @@ impl Prog {
         self.0.extend_from_slice(&[0x20, addr as u8, (addr >> 8) as u8]);
         self
     }
+    /// `jsr addr` followed by two little-endian words the routine reads as
+    /// inline arguments and then steps its own return address over.
+    fn jsr_with_args(&mut self, addr: u16, a: u16, b: u16) -> &mut Self {
+        self.jsr(addr);
+        self.0.extend_from_slice(&a.to_le_bytes());
+        self.0.extend_from_slice(&b.to_le_bytes());
+        self
+    }
+    /// Plant a run of bytes in memory before the call.
+    fn bytes_at(&mut self, addr: u16, vals: &[u8]) -> &mut Self {
+        for (i, v) in vals.iter().enumerate() {
+            self.poke(addr + i as u16, *v);
+        }
+        self
+    }
     /// Record a, x, y and the flags, then the sentinel, then spin forever.
     fn record_and_halt(&mut self) -> &mut Self {
         self.0.extend_from_slice(&[0x8d, OUT as u8, (OUT >> 8) as u8]);
@@ -408,4 +423,139 @@ fn read_pads_at_ea1f_reports_held_and_newly_pressed() {
     assert_eq!(nes.peek(0x00f7), 0x00);
     assert_eq!(r.a, nes.peek(0x00f5), "a is $F5");
     assert_eq!(r.y, nes.peek(0x00f7), "y is $F7");
+}
+
+/// Where a LoadFiles test puts the two things the routine reads through its
+/// inline pointers. Work RAM, clear of the program at $0600 and the results
+/// at $0700.
+const LF_TEMPLATE: u16 = 0x0720;
+const LF_LIST: u16 = 0x0740;
+/// Written over a file's destination before the call, so "the bytes are there"
+/// cannot be satisfied by the boot loader having put them there already.
+const SCRIBBLE: u8 = 0xa5;
+
+#[test]
+fn load_files_at_e1f8_matches_the_real_bios() {
+    // $E1F8, entered by 41 of the 114 corpus titles and the joint most-called
+    // routine after the NMI handler. It cannot be reached through a game yet
+    // because every title that calls it asks for something else first, so the
+    // planted caller is the only way to test it at all.
+    //
+    // Ten $FF template bytes is "any disk", which is what makes the test work
+    // on whichever disk the checkout happens to have. The list asks for one
+    // file by ID and ends with $FF.
+    let Some(disk) = a_disk() else { return skipped() };
+    let (want, addr, body) = wanted_file(&disk);
+    let mut p = Prog::default();
+    // Scribble over the destination first. The boot loader already put this
+    // file where it belongs, so without the scribble the check below passes on
+    // a routine that loads nothing at all. Verified: it did.
+    p.bytes_at(addr, &[SCRIBBLE; 32])
+        .bytes_at(LF_TEMPLATE, &[0xff; 10])
+        .bytes_at(LF_LIST, &[want, 0xff])
+        .jsr_with_args(0xe1f8, LF_TEMPLATE, LF_LIST)
+        .record_and_halt();
+
+    let (ours, mut nes) = run(&disk, &[], &p.0, 900);
+    assert!(ours.reached, "the routine never returned");
+    assert_eq!(ours.a, 0x00, "a is the status and this load should succeed");
+    assert_eq!(ours.x, ours.a, "x mirrors the status");
+    assert!(ours.y >= 1, "y counts the files loaded, and one was asked for");
+    assert_eq!(nes.peek(0x000e), ours.y, "$0E holds the same count as y");
+
+    // The scribble has to be gone and the file's own bytes in its place.
+    let got: Vec<u8> = (0..32)
+        .map(|i| nes.peek(addr.wrapping_add(i as u16)))
+        .collect();
+    assert_eq!(
+        got,
+        body[..32],
+        "the file was not written over the scribble at ${addr:04x}"
+    );
+
+    if let Some(real) = real_bios() {
+        let (theirs, _) = run(&disk, &real, &p.0, 900);
+        assert!(theirs.reached, "the real BIOS never finished the test program");
+        assert_eq!(
+            (ours.a, ours.x, ours.y, ours.p),
+            (theirs.a, theirs.x, theirs.y, theirs.p),
+            "ours (left) disagrees with the real BIOS (right) on a/x/y/p"
+        );
+    } else {
+        eprintln!("note: no dumps/fds/disksys.rom, so this is not held against the oracle");
+    }
+}
+
+#[test]
+fn load_files_steps_its_return_address_over_the_inline_arguments() {
+    // The two pointer words sit after the jsr, so a routine that returned
+    // normally would execute them as opcodes. Reaching the recording code at
+    // all is the proof; without the fix-up the machine would be somewhere in
+    // the middle of a pointer.
+    let Some(disk) = a_disk() else { return skipped() };
+    let want = wanted_file_id(&disk);
+    let mut p = Prog::default();
+    p.bytes_at(LF_TEMPLATE, &[0xff; 10])
+        .bytes_at(LF_LIST, &[want, 0xff])
+        .jsr_with_args(0xe1f8, LF_TEMPLATE, LF_LIST)
+        .lda(0x5c)
+        .record_and_halt();
+    let (r, _) = run(&disk, &[], &p.0, 900);
+    assert!(r.reached, "control did not resume after the inline arguments");
+    assert_eq!(r.a, 0x5c, "execution resumed at the wrong place");
+}
+
+#[test]
+fn a_template_that_does_not_match_the_disk_is_an_error() {
+    // A disk-ID mismatch returns a BCD code rather than loading anything, and
+    // a caller checks it with beq. Byte 0 of the template maps to $04.
+    let Some(disk) = a_disk() else { return skipped() };
+    let mut bad = [0xffu8; 10];
+    bad[0] = 0x5a; // no real disk has this maker code
+    let mut p = Prog::default();
+    p.bytes_at(LF_TEMPLATE, &bad)
+        .bytes_at(LF_LIST, &[0x00, 0xff])
+        .jsr_with_args(0xe1f8, LF_TEMPLATE, LF_LIST)
+        .record_and_halt();
+    let (ours, _) = run(&disk, &[], &p.0, 1800);
+    assert!(ours.reached, "the routine never returned");
+    assert_ne!(ours.a, 0x00, "a mismatch must not report success");
+    assert_eq!(ours.a, 0x04, "byte 0 of the template maps to BCD $04");
+    assert_eq!(ours.y, 0x00, "nothing should have loaded");
+}
+
+/// A file the disk in this checkout actually carries: its ID, where it loads,
+/// and its bytes. Read out of the image rather than hardcoded, so the test does
+/// not depend on which of the three disks is present.
+///
+/// It picks a file that lands in program RAM with a body worth comparing,
+/// because a test that only checked the return value would pass on a routine
+/// that returned the right numbers and loaded nothing at all.
+fn wanted_file(disk: &[u8]) -> (u8, u16, Vec<u8>) {
+    let side = if disk.starts_with(b"FDS") { &disk[16..] } else { disk };
+    let mut p = 56usize;
+    assert_eq!(side[p], 0x02, "block 2 should follow the disk info");
+    let count = side[p + 1];
+    p += 2;
+    for _ in 0..count {
+        assert_eq!(side[p], 0x03, "a file header should be here");
+        let id = side[p + 2];
+        let addr = u16::from_le_bytes([side[p + 11], side[p + 12]]);
+        let size = u16::from_le_bytes([side[p + 13], side[p + 14]]) as usize;
+        let kind = side[p + 15];
+        let body = side[p + 17..p + 17 + size].to_vec();
+        p += 16 + 1 + size;
+        if kind == 0
+            && size >= 64
+            && addr >= 0x6000
+            && body[..32].iter().any(|&b| b != SCRIBBLE)
+        {
+            return (id, addr, body);
+        }
+    }
+    panic!("this disk has no program-RAM file big enough to check against");
+}
+
+fn wanted_file_id(disk: &[u8]) -> u8 {
+    wanted_file(disk).0
 }

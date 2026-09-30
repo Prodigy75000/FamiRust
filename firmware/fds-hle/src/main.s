@@ -303,8 +303,6 @@ read_to_ppu:
   jmp unimplemented
 .org $E1B2
   jmp unimplemented
-.org $E1F8
-  jmp unimplemented
 .org $E237
   lda #0                    ; $E237 and $E239 are two apart, so this
                             ; one falls into the stub below rather
@@ -1399,6 +1397,538 @@ FONT_TILES = FONT_BYTES / 8
 .assert (FONT_TILES * 8) == FONT_BYTES
 ; And it has to fit in a byte, because X counts the glyphs.
 .assert FONT_TILES <= 255
+
+
+; ===========================================================================
+; $E1F8: LoadFiles
+; ===========================================================================
+;
+; The general "load files from disk" entry, and after the NMI handler the joint
+; most-called routine in the corpus: 41 of the 114 titles. A game uses it to
+; pull in a level or a new bank once it is already running.
+;
+; The interface was measured, not read, and the whole of it is written up in
+; docs/notes/FDS-LOADFILES.md. The short version:
+;
+;   Two little-endian pointer words sit INLINE after the `jsr`, and the routine
+;   rewrites the stacked return address to step over them, so it returns to
+;   jsr + 5. It has to be a real pop, read, push-back-plus-four: Topple Zip
+;   enters by `jmp` with a word it arranged on the stack itself, so a version
+;   that peeked at sp+1/sp+2 without rewriting would break it.
+;
+;   First word  -> a 10-byte disk-ID template, compared against block-1 bytes
+;                  $0F-$18. A template byte of $FF is a per-byte wildcard.
+;   Second word -> a file-ID list, one byte each, terminated by $FF. A file
+;                  loads if its ID appears anywhere in the list. A list whose
+;                  FIRST byte is $FF means the boot set instead: every file
+;                  whose ID is at most the boot read file code at disk-info
+;                  byte $19, the same rule the boot loader uses.
+;
+;   Out: a = x = $00 on success, or the error number in BCD. y = how many file
+;   bodies were loaded, also left in $0E. A requested file that is not on the
+;   side is NOT an error, so a caller that cares has to look at y.
+;
+; The list is re-read from RAM at every header, so a file that loads over the
+; list changes the selection for the files after it. That is real behaviour and
+; comes free from not caching it.
+;
+; ---------------------------------------------------------------------------
+; Two places this deliberately differs
+; ---------------------------------------------------------------------------
+;
+; The real routine transfers under the byte IRQ with $0101 as its state
+; machine. This polls, as our boot loader does. Observably equivalent for every
+; caller profiled: none of them runs game code inside the call, the drive
+; cannot overrun because it will not advance past a byte the CPU has not taken,
+; and $0101 is saved and restored either way. Written down as an assumption
+; because it is one about the other 36 callers.
+;
+; The real prelude spends about 1.67 million cycles on counted delays around
+; the motor. Ours polls the drive and gets on with it, because our drive model
+; spins up in a few hundred cycles rather than a physical second. That makes us
+; faster, which is the safe direction for everything but interrupt dispatch.
+;
+; ---------------------------------------------------------------------------
+; Zero page
+; ---------------------------------------------------------------------------
+;
+; $00-$0E, which is where the real routine works, and the exit values are part
+; of what a game can see. This is NOT the boot loader's scratch at $E0-$E8:
+; those cells are boot-only and are the game's RAM by the time anything calls
+; this.
+LF_P1     = $00           ; 2: disk-ID template pointer, left behind
+LF_P2     = $02           ; 2: file-ID list pointer, left behind
+LF_FRAME  = $04           ; entry stack pointer minus 3
+LF_K05    = $05           ; file kind while looping; ends $02, as measured
+LF_LEFT   = $06           ; files still to walk; ends $00
+LF_BLK    = $07           ; current block type; ends $04
+LF_BOOT   = $08           ; boot read file code, from disk-info byte $19
+LF_SKIP   = $09           ; $FF if the last file was skipped, $00 if loaded
+LF_DST    = $0A           ; 2: destination pointer
+LF_CNT    = $0C           ; 2: bytes left in the block; ends $FFFF
+LF_LOADED = $0E           ; files loaded; returned in y
+
+; The real routine builds EVERY $4025 value from this shadow, which is how the
+; game's mirroring bit survives a load. We read it and never write it until the
+; epilogue, so the low nibble left behind is the caller's own.
+LF_SHADOW = $FA
+LF_MASK   = $FE           ; PPUMASK shadow, for blanking before a PPU file
+
+FDS_EXT   = $4026
+FDS_BATT  = $4033
+
+; A disk that will not read. NOT measured: the real error numbers for a CRC
+; failure, a truncated side, no disk and a flat battery cannot be reached from
+; a disk that also boots, and settling them needs fault injection in fds.rs.
+; This is a placeholder that is at least in the right range and at least
+; nonzero, so a caller's `beq` still sees failure.
+LF_ERR_IO = $21
+
+.org $E1F8
+  jmp load_files
+
+.org $FC40
+
+load_files:
+  ; The frame anchor the real routine leaves at $04. Measured on two callers
+  ; with different entry stack pointers, so it is the offset that is fixed.
+  tsx
+  dex
+  dex
+  dex
+  stx LF_FRAME
+
+  ; ---- the two inline pointer words, and the return address past them ----
+  ; $0C/$0D is the scratch: it is the byte counter later and is not wanted
+  ; until the first block 4.
+  pla                       ; the stacked return address, low byte first
+  sta LF_CNT
+  pla
+  sta LF_CNT+1
+  ldy #1
+  lda (LF_CNT),y
+  sta LF_P1
+  iny
+  lda (LF_CNT),y
+  sta LF_P1+1
+  iny
+  lda (LF_CNT),y
+  sta LF_P2
+  iny
+  lda (LF_CNT),y
+  sta LF_P2+1
+  lda LF_CNT                ; step the return address over the four bytes
+  clc
+  adc #4
+  sta LF_CNT
+  lda LF_CNT+1
+  adc #0
+  pha                       ; high byte back on first
+  lda LF_CNT
+  pha
+
+  lda $0101                 ; the game's IRQ selector; restored on every exit
+  pha
+
+  lda #0
+  sta LF_LOADED
+  sta LF_K05                ; doubles as the retry count until the file loop
+
+; ---- one attempt. A disk-ID mismatch comes back here exactly once ----------
+@attempt:
+  jsr lf_spin
+  jsr lf_info
+  bcs @failed
+  jsr lf_count
+  bcs @failed
+@each_file:
+  lda LF_LEFT
+  beq @done
+  dec LF_LEFT
+  jsr lf_one_file
+  bcc @each_file
+
+@failed:
+  ; Carry set and a holds the code. A disk-ID mismatch is worth one more go at
+  ; the whole thing, which is what the real routine does.
+  tax
+  lda LF_K05
+  bne @give_up
+  inc LF_K05
+  jmp @attempt
+@give_up:
+  txa
+  ldy #0
+  jmp lf_exit
+
+@done:
+  ldy LF_LOADED
+  lda #0
+  ; fall through
+
+; ---------------------------------------------------------------------------
+; The epilogue, taken by success and failure alike
+; ---------------------------------------------------------------------------
+; In: a = status, y = the loaded count. Out: a = x = status, y untouched.
+lf_exit:
+  tax                       ; x mirrors a, which is also x's contract value
+  pla                       ; the IRQ selector saved at entry
+  sta $0101
+  lda LF_SHADOW             ; coast: motor turning, transfer off, IRQ off, and
+  and #$0F                  ; the caller's low nibble kept, mirroring included
+  ora #$23
+  sta LF_SHADOW
+  sta FDS_CTRL
+  lda #$02                  ; the leftovers a game may look at
+  sta LF_K05
+  lda #$FF
+  sta LF_CNT
+  sta LF_CNT+1
+  cli                       ; measured: interrupts are enabled on exit even
+                            ; when the caller arrived with them masked
+  ; Measured exit flags are N=0, V=1, C=0, Z per the status. `bit` on a byte
+  ; with bit 6 set and bit 7 clear gives V and N; `txa` then overwrites N and Z
+  ; from the status itself and leaves V and C alone.
+  bit lf_vflag
+  clc
+  txa                       ; a = status, and its own N and Z with it
+  rts
+
+lf_vflag:
+  .byte $40
+
+; ---------------------------------------------------------------------------
+; The drive, always built from the shadow so the mirroring bit survives
+; ---------------------------------------------------------------------------
+; Returns in a: read mode, transfer disarmed, the caller's mirroring.
+lf_base:
+  lda LF_SHADOW
+  and #$08                  ; bit 3 is mirroring and is the game's business
+  ora #$04                  ; bit 2: read
+  rts
+
+; Stop the motor, start it, wait for the drive. Only the off-to-on edge rewinds
+; the head, and this routine always starts from the beginning of the side.
+lf_spin:
+  jsr lf_base
+  ora #$02                  ; bit0 clear stops it, bit1 set means "do not start"
+  sta FDS_CTRL
+  lda #$FF
+  sta FDS_EXT
+  lda FDS_BATT              ; bit 7 is the battery; read as the real one does
+  jsr lf_base
+  ora #$01                  ; bit0 set, bit1 clear: start, and keep it running
+  sta FDS_CTRL
+@wait:
+  lda FDS_DRIVE
+  and #$03                  ; bit0 no disk, bit1 not ready, both active low
+  bne @wait
+  rts
+
+; Move to the next block: drop the armed bit and raise it, which restarts the
+; drive's gap scan.
+lf_next:
+  jsr lf_base
+  ora #$01
+  sta FDS_CTRL
+  jsr lf_base
+  ora #$41                  ; bit 6: transfer armed
+  sta FDS_CTRL
+  rts
+
+; ---------------------------------------------------------------------------
+; Block 1: check the disk is readable, then match the caller's template
+; ---------------------------------------------------------------------------
+lf_info:
+  lda #$01
+  sta LF_BLK
+  jsr lf_next
+  jsr read_byte
+  bcs @io
+  cmp #$01
+  bne @io
+  ldx #0                    ; x indexes the ten-byte template
+  ldy #1                    ; y indexes the disk-info block
+@byte:
+  jsr read_byte
+  bcs @io
+  cpy #$0F
+  bcc @magic
+  cpy #$19
+  beq @boot_code
+  bcs @next
+  ; $0F..$18: the disk ID, against (LF_P1) with $FF as a per-byte wildcard
+  sta LF_SKIP               ; park the disk's byte; LF_SKIP is free until the
+                            ; file loop gives it its real meaning
+  tya                       ; y is the disk index and the only index register
+  pha                       ; (ptr),y can use, so borrow it for the template
+  txa
+  tay
+  lda (LF_P1),y
+  cmp #$FF
+  beq @wild
+  cmp LF_SKIP
+  bne @mismatch
+@wild:
+  pla
+  tay
+  inx
+  jmp @next
+@magic:
+  ; bytes 1-14 are "*NINTENDO-HVC*", checked against our own copy rather than
+  ; against anything read off the disk
+  cmp lf_magic-1,y
+  bne @io
+  jmp @next
+@boot_code:
+  sta LF_BOOT
+@next:
+  iny
+  cpy #56
+  bne @byte
+  clc
+  rts
+@mismatch:
+  pla                       ; drop the saved disk index; we are leaving
+  lda lf_iderr,x
+  sec
+  rts
+@io:
+  lda #LF_ERR_IO
+  sec
+  rts
+
+; ---------------------------------------------------------------------------
+; Block 2: how many files the side holds
+; ---------------------------------------------------------------------------
+lf_count:
+  lda #$02
+  sta LF_BLK
+  jsr lf_next
+  jsr read_byte
+  bcs @io
+  cmp #$02
+  bne @io
+  jsr read_byte
+  bcs @io
+  sta LF_LEFT
+  clc
+  rts
+@io:
+  lda #LF_ERR_IO
+  sec
+  rts
+
+; ---------------------------------------------------------------------------
+; One file: stream the header, decide, then take or discard the body
+; ---------------------------------------------------------------------------
+lf_one_file:
+  lda #$03
+  sta LF_BLK
+  jsr lf_next
+  jsr read_byte
+  bcs @io
+  cmp #$03
+  bne @io
+  lda #$FF
+  sta LF_SKIP               ; assume passed over until the list says otherwise
+  ldy #1
+@hdr:
+  jsr read_byte
+  bcs @io
+  cpy #$02
+  beq @file_id
+  cpy #$0B
+  beq @addr_lo
+  cpy #$0C
+  beq @addr_hi
+  cpy #$0D
+  beq @size_lo
+  cpy #$0E
+  beq @size_hi
+  cpy #$0F
+  beq @kind
+@hdr_next:
+  iny
+  cpy #16
+  bne @hdr
+  jmp @body
+@file_id:
+  jsr lf_wanted             ; decided here, so the ID never needs storing
+  jmp @hdr_next
+@addr_lo:
+  sta LF_DST
+  jmp @hdr_next
+@addr_hi:
+  sta LF_DST+1
+  jmp @hdr_next
+@size_lo:
+  sta LF_CNT
+  jmp @hdr_next
+@size_hi:
+  sta LF_CNT+1
+  jmp @hdr_next
+@kind:
+  sta LF_K05
+  jmp @hdr_next
+
+@body:
+  lda #$04
+  sta LF_BLK
+  jsr lf_next
+  jsr read_byte
+  bcs @io
+  cmp #$04
+  bne @io
+  lda LF_SKIP
+  beq @take
+  jmp lf_discard
+@take:
+  inc LF_LOADED
+  lda LF_K05
+  beq @to_ram               ; kind 0 is program RAM
+  jmp lf_to_ppu             ; kind 1 pattern RAM, 2 nametable: both PPU space
+@to_ram:
+  jmp lf_to_ram
+@io:
+  lda #LF_ERR_IO
+  sec
+  rts
+
+; ---- is this file one the caller asked for? a holds its ID ----------------
+;
+; Leaves LF_SKIP $00 to take it, $FF to pass. The list is walked from the head
+; every time, which is what makes a file loading over the list change the
+; selection for the files after it. y is the caller's header index and has to
+; come back untouched.
+lf_wanted:
+  sta LF_SKIP               ; park the ID; the verdict overwrites it
+  tya
+  pha
+  ldy #0
+@scan:
+  lda (LF_P2),y
+  cmp #$FF
+  beq @end
+  cmp LF_SKIP
+  beq @take
+  iny
+  bne @scan
+@pass:
+  lda #$FF
+  sta LF_SKIP
+  jmp @out
+@take:
+  lda #$00
+  sta LF_SKIP
+  jmp @out
+@end:
+  cpy #0                    ; $FF as the FIRST entry means the boot set
+  bne @pass
+  lda LF_BOOT
+  cmp LF_SKIP               ; boot code at least the file ID?
+  bcs @take
+  bcc @pass
+@out:
+  pla
+  tay
+  rts
+
+; ---- move LF_CNT bytes into program RAM at LF_DST -------------------------
+lf_to_ram:
+  ldy #0
+@loop:
+  lda LF_CNT
+  ora LF_CNT+1
+  beq @done
+  jsr read_byte
+  bcs @io
+  sta (LF_DST),y
+  iny
+  bne @nowrap
+  inc LF_DST+1
+@nowrap:
+  lda LF_CNT
+  bne @nolo
+  dec LF_CNT+1
+@nolo:
+  dec LF_CNT
+  jmp @loop
+@done:
+  clc
+  rts
+@io:
+  lda #LF_ERR_IO
+  sec
+  rts
+
+; ---- move LF_CNT bytes into video memory at LF_DST ------------------------
+;
+; The screen goes off first, once per file that lands in PPU space, and is NOT
+; put back: games turn rendering on themselves. Measured, including that it
+; happens for PPU files only and never for a plain RAM load.
+lf_to_ppu:
+  lda LF_MASK
+  and #%11100111
+  sta LF_MASK
+  sta PPUMASK
+  bit PPUSTATUS
+  lda LF_DST+1
+  sta PPUADDR
+  lda LF_DST
+  sta PPUADDR
+@loop:
+  lda LF_CNT
+  ora LF_CNT+1
+  beq @done
+  jsr read_byte
+  bcs @io
+  sta PPUDATA
+  lda LF_CNT
+  bne @nolo
+  dec LF_CNT+1
+@nolo:
+  dec LF_CNT
+  jmp @loop
+@done:
+  clc
+  rts
+@io:
+  lda #LF_ERR_IO
+  sec
+  rts
+
+; ---- read LF_CNT bytes and throw them away --------------------------------
+;
+; A passed-over body really is read off the disk a byte at a time, which is why
+; a call wanting one file of ten still costs a whole side.
+lf_discard:
+  lda LF_CNT
+  ora LF_CNT+1
+  beq @done
+  jsr read_byte
+  bcs @io
+  lda LF_CNT
+  bne @nolo
+  dec LF_CNT+1
+@nolo:
+  dec LF_CNT
+  jmp lf_discard
+@done:
+  clc
+  rts
+@io:
+  lda #LF_ERR_IO
+  sec
+  rts
+
+lf_magic:
+  .byte $2A, $4E, $49, $4E, $54, $45, $4E, $44, $4F, $2D, $48, $56, $43, $2A
+
+; Error codes by which template byte failed, in BCD. Byte 9 giving $10 rather
+; than $0A is what proves they are BCD at all.
+lf_iderr:
+  .byte $04, $05, $05, $05, $05, $06, $07, $08, $09, $10
 
 ; ===========================================================================
 ; Vectors

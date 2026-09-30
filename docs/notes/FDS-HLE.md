@@ -198,7 +198,7 @@ for the reasons above and in the script's own header.
 
 ### The routines
 
-Seven of the forty entry points are implemented. The other 33 are stubs that put
+Eight of the forty entry points are implemented. The other 32 are stubs that put
 **NO ROUTINE** on the screen and stop, which is worth its 111 bytes: Zelda hands
 over correctly, runs its own code, jumps to `$EA84` and would otherwise
 disappear into the fill, looking like a hundred different bugs instead of one
@@ -214,7 +214,7 @@ missing routine. `fdstrace` names the address.
 | `$E9C8` | 27 | sprite DMA from page 2 | cycle-exact, 18 |
 | `$EAD2` | 27 | fill whole pages of RAM | 2 cycles fast at entry |
 | `$EA1F` | 26 | read both pads, work out newly-pressed | faster; exit carry not reproduced |
-| `$E1F8` | 41 | **load files from disk** | measured, not written: `FDS-LOADFILES.md` |
+| `$E1F8` | 41 | load files from disk | written; polls where the original takes the byte IRQ |
 
 **Where the cycle counts do not match, ours is faster, never slower.** That is
 deliberate. A game that runs one of these inside vblank has more room than it
@@ -246,7 +246,8 @@ what comes back. That is the oracle at the level the work happens at.
 2. ~~Baseline smoke on the real BIOS, one ledger row per title.~~ The census
    rows and `fds-hle-check.py` are this.
 3. ~~HLE boot with our own graphics and no BIOS file present.~~ Done 2026-09-29.
-4. Routine by routine, each held against the real BIOS. Seven of forty done;
-   the queue by usage is `$E1F8` (measured, see `FDS-LOADFILES.md`), `$EBAF`,
-   `$E1B2`, `$E7BB`, `$E149`, `$EA4C`. Zelda's next blocker is `$E7BB`.
+4. Routine by routine, each held against the real BIOS. Eight of forty done;
+   the queue by usage is `$EBAF` (29 titles, measured), `$E1B2` (18, and what
+   Adian no Tsue asks for first), `$E7BB` (18, and Zelda's next blocker),
+   `$E149`, `$EA4C`.
 5. Cycle accounting per routine, starting from the `cyc/call` column.
