@@ -620,8 +620,99 @@ set_scroll:
   rts
 .org $EAFD
   jmp unimplemented
+; --- $EBAF: copy 16-byte units from RAM into video memory ------------------
+;
+; 29 of the 114 corpus titles call it. Measured with the profiler plus forced
+; registers across several callers:
+;
+;   a = the VRAM address low byte, y = its high byte
+;   x = how many 16-byte units to move; x=0 means 256, which is how BurgerTime
+;       and Deep Dungeon move 4096 bytes in one call
+;   the two bytes after the caller's `jsr` are the SOURCE address, little
+;   endian, and the routine steps its own return address over them
+;
+; The argument order was pinned by the first three writes it makes: a caller
+; entering a=$C0 x=$1C y=$20 wrote $C0, $1C and $20 to $04, $02 and $03 in that
+; order, then set $2006 to $20,$C0 and moved 448 bytes, which is 28 units.
+;
+; $FF is the shared PPUCTRL shadow. It is masked with #$FB, forcing the VRAM
+; increment to +1 and leaving every other bit alone including NMI enable, and
+; the masked value is written to the SHADOW FIRST and then to $2000. Poking
+; $FF=$FF before a call produced writes of $FB; poking $04 produced $00.
+;
+; It does not wait for vblank and does not disable NMI, so a game that calls it
+; with rendering on gets what it asked for.
+;
+; Exit: a is the high byte of the first address past the source data, which
+; falls out of the pointer advance rather than being computed; x=0, y=0, and
+; Z=1 N=0 C=0.
+;
+; We are faster than the original, which spends about 362 cycles a unit against
+; our ~282 by running each unit as two called halves. Faster is the safe
+; direction for a routine a game may run inside vblank: it finishes earlier
+; than the caller budgeted for, never later.
 .org $EBAF
-  jmp unimplemented
+  jmp vram_upload           ; the body is 118 bytes and only 115 sit between
+                            ; this entry point and the next one
+
+.org $FEB0
+vram_upload:
+  sta UP_LO                 ; the three arguments, in the order measured
+  stx UP_UNITS
+  sty UP_HI
+
+  ; ---- the inline source pointer, and the return address past it ----
+  tsx
+  lda $0101,x               ; the stacked return address points at the last
+  sta UP_RET                ; byte of the jsr, so the pointer is at +1 and +2
+  lda $0102,x
+  sta UP_RET+1
+  ldy #1
+  lda (UP_RET),y
+  sta UP_SRC
+  iny
+  lda (UP_RET),y
+  sta UP_SRC+1
+  lda UP_RET                ; step the caller over the two operand bytes
+  clc
+  adc #2
+  sta $0101,x
+  lda UP_RET+1
+  adc #0
+  sta $0102,x               ; $05/$06 keep the PRE-bump copy, as measured
+
+  bit PPUSTATUS
+  lda $FF
+  and #$FB                  ; force the VRAM increment to +1, touch nothing else
+  sta $FF                   ; shadow first, then the register: measured order
+  sta PPUCTRL
+  lda UP_HI
+  sta PPUADDR
+  lda UP_LO
+  sta PPUADDR
+  lda #0
+  sta UP_HI                 ; $03 is left zero
+
+@unit:
+  ldy #0
+@byte:
+  lda (UP_SRC),y
+  sta PPUDATA
+  iny
+  cpy #16
+  bne @byte
+  lda UP_SRC                ; advance by a unit. The adc is why a ends up as
+  clc                       ; the past-end pointer's high byte, which is what
+  adc #16                   ; the real routine returns.
+  sta UP_SRC
+  lda UP_SRC+1
+  adc #0
+  sta UP_SRC+1
+  dec UP_UNITS              ; x=0 on entry therefore means 256 units
+  bne @unit
+  ldx #0
+  ldy #0                    ; sets Z=1 and N=0, the measured exit flags
+  rts
 .org $EC22
   jmp unimplemented
 
@@ -1473,6 +1564,14 @@ LF_LOADED = $0E           ; files loaded; returned in y
 ; epilogue, so the low nibble left behind is the caller's own.
 LF_SHADOW = $FA
 LF_MASK   = $FE           ; PPUMASK shadow, for blanking before a PPU file
+
+; $EBAF's working set. Separate names from LoadFiles' because they are
+; different routines that happen to share the cheap end of zero page.
+UP_SRC    = $00           ; 2: source pointer; ends past the end of the data
+UP_UNITS  = $02           ; units left; ends $00
+UP_HI     = $03           ; VRAM address high on the way in; ends $00
+UP_LO     = $04           ; VRAM address low, left as passed
+UP_RET    = $05           ; 2: the caller's return address before the bump
 
 FDS_EXT   = $4026
 FDS_BATT  = $4033

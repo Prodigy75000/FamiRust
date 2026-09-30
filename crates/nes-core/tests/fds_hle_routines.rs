@@ -559,3 +559,67 @@ fn wanted_file(disk: &[u8]) -> (u8, u16, Vec<u8>) {
 fn wanted_file_id(disk: &[u8]) -> u8 {
     wanted_file(disk).0
 }
+
+#[test]
+fn vram_upload_at_ebaf_matches_the_real_bios() {
+    // $EBAF, entered by 29 of the 114 corpus titles. a and y are the VRAM
+    // address, x the number of 16-byte units, and the source address is the
+    // word inline after the jsr.
+    //
+    // NMI stays off: $FF has bit 7 clear, because this routine writes the
+    // shadow straight at $2000 and an NMI would hand the machine to the game.
+    const SRC: u16 = 0x0760;
+    let Some(disk) = a_disk() else { return skipped() };
+    let pattern: Vec<u8> = (0..32u8).map(|i| i.wrapping_mul(7).wrapping_add(3)).collect();
+    let mut p = Prog::default();
+    p.poke(0x2000, 0x00)
+        .poke(0x00ff, 0x34) // bit 2 set, so the mask is observable
+        .bytes_at(SRC, &pattern)
+        .lda(0x00) // VRAM $2000
+        .ldy(0x20)
+        .ldx(0x02); // two units, 32 bytes
+    // One inline word here, not two: this routine takes a single source
+    // pointer where LoadFiles takes a template and a list.
+    p.jsr(0xebaf);
+    p.0.extend_from_slice(&SRC.to_le_bytes());
+    p.record_and_halt();
+
+    let (ours, mut nes) = run(&disk, &[], &p.0, 120);
+    assert!(ours.reached, "the routine never returned");
+    assert_eq!((ours.x, ours.y), (0x00, 0x00), "x and y are zero on exit");
+    // a is the high byte of the first address past the source data.
+    assert_eq!(ours.a, ((SRC as u32 + 32) >> 8) as u8, "a is the past-end high byte");
+    // The mask is exactly $FB: bit 2 off, everything else kept.
+    assert_eq!(nes.peek(0x00ff), 0x30, "the shadow keeps the masked value");
+    assert_eq!(nes.dbg_ppu_ctrl(), 0x30, "and $2000 gets the same");
+    assert_eq!(&nes.dbg_ciram()[..32], &pattern[..], "the bytes should be in VRAM");
+    assert_eq!(nes.peek(0x0004), 0x00, "$04 keeps the VRAM low byte as passed");
+    assert_eq!(nes.peek(0x0002), 0x00, "$02 counts down to zero");
+
+    if let Some(real) = real_bios() {
+        let (theirs, _) = run(&disk, &real, &p.0, 120);
+        assert!(theirs.reached, "the real BIOS never finished the test program");
+        assert_eq!(
+            (ours.a, ours.x, ours.y),
+            (theirs.a, theirs.x, theirs.y),
+            "ours (left) disagrees with the real BIOS (right)"
+        );
+    }
+}
+
+#[test]
+fn vram_upload_steps_over_its_inline_source_pointer() {
+    // Same shape as LoadFiles: the pointer sits after the jsr and would be
+    // executed as opcodes if the return address were not stepped on.
+    const SRC: u16 = 0x0760;
+    let Some(disk) = a_disk() else { return skipped() };
+    let mut p = Prog::default();
+    p.poke(0x2000, 0x00).poke(0x00ff, 0x00).bytes_at(SRC, &[0x11; 16]);
+    p.lda(0x00).ldy(0x20).ldx(0x01);
+    p.jsr(0xebaf);
+    p.0.extend_from_slice(&SRC.to_le_bytes());
+    p.lda(0x3d).record_and_halt();
+    let (r, _) = run(&disk, &[], &p.0, 120);
+    assert!(r.reached, "control did not resume after the inline pointer");
+    assert_eq!(r.a, 0x3d, "execution resumed at the wrong place");
+}
