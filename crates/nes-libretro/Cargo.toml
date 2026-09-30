@@ -9,7 +9,12 @@ description = "libretro C ABI front-end for the FamiRust clean-room NES / Famico
 # cdylib -> libnescore_libretro.so; renamed to the libretro convention on
 # deploy (famirust_nes). Deploys to Trophy Hub as its own .so.
 name = "nescore_libretro"
-crate-type = ["cdylib"]
+# `rlib` alongside the shipped `cdylib` so the FFI entry points can be driven
+# from an integration test. The memory-map defect lived precisely in the gap
+# between what the core believed it sent and what a front-end received, and
+# that gap is only testable by calling the exported functions the way a
+# front-end does. The extra artifact is not shipped.
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 nes-core = { path = "../nes-core" }

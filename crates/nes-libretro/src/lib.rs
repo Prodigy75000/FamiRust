@@ -70,7 +70,8 @@ struct retro_system_av_info {
 }
 
 #[repr(C)]
-struct retro_game_info {
+#[doc(hidden)]
+pub struct retro_game_info {
     path: *const c_char,
     data: *const c_void,
     size: usize,
@@ -88,6 +89,116 @@ const RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY: u32 = 9;
 /// Classic disk-control interface: how a frontend drives the FDS disk/side swap
 /// (Trophy Hub's "SIDE" button). Registered only when an FDS disk is loaded.
 const RETRO_ENVIRONMENT_SET_DISK_CONTROL_INTERFACE: u32 = 13;
+
+/// SET_MEMORY_MAPS is `36 | EXPERIMENTAL`, not a bare 36.
+///
+/// FamiRust published no map at all until 2026-09-30, which is worse than a
+/// wrong constant because there was nothing to find. Without a map a front-end
+/// falls back to laying the console's regions over whatever
+/// `retro_get_memory_data` returns for SYSTEM_RAM, one after another. Ours is
+/// the 2 KiB of internal RAM, so anything RetroAchievements wanted beyond it
+/// pointed somewhere that is not what the region claims to be.
+///
+/// The precedent is not hypothetical. PocketRustAdvance had the bare-36 version
+/// of this bug and it awarded the owner three achievements he had not earned,
+/// from walking through menus. Those are written to an account server-side and
+/// cannot be taken back. FamiRust is the DEFAULT NES core, so the exposure here
+/// is every NES player rather than one.
+const RETRO_ENVIRONMENT_SET_MEMORY_MAPS: u32 = 36 | 0x1_0000;
+
+const RETRO_MEMDESC_SYSTEM_RAM: u64 = 1 << 2;
+const RETRO_MEMDESC_SAVE_RAM: u64 = 1 << 3;
+
+/// One entry of the address-space table published through SET_MEMORY_MAPS.
+///
+/// `select` = 0 asks the front-end to match an address explicitly against
+/// `[start, start + len)`. The NES mirrors its internal RAM through
+/// `$0800-$1FFF`, and that mirroring is deliberately NOT described: a region
+/// four times the size of the RAM behind it is an invitation to read the same
+/// byte at four addresses and call them different things. Achievements are
+/// written against the canonical `$0000-$07FF`.
+#[repr(C)]
+struct retro_memory_descriptor {
+    flags: u64,
+    ptr: *mut c_void,
+    offset: usize,
+    start: usize,
+    select: usize,
+    disconnect: usize,
+    len: usize,
+    addrspace: *const std::os::raw::c_char,
+}
+
+#[repr(C)]
+struct retro_memory_map {
+    descriptors: *const retro_memory_descriptor,
+    num_descriptors: std::os::raw::c_uint,
+}
+
+/// Publish the address space so the front-end does not have to guess it.
+///
+/// Called from [`machine_rebuilt`] only. The pointers here are into the `Nes`,
+/// and `retro_reset` builds a new one, so a map published once at load would
+/// point into a freed machine after the first reset. That is the dangerous part
+/// of this interface: rc_client resets the core itself when hardcore mode is
+/// toggled, so RetroAchievements can trigger the very corruption it then reads.
+fn publish_memory_map(s: &mut State) {
+    let Some(env) = s.env else { return };
+    let Some(core) = &mut s.core else { return };
+
+    let mut descs: Vec<retro_memory_descriptor> = Vec::new();
+    descs.push(retro_memory_descriptor {
+        flags: RETRO_MEMDESC_SYSTEM_RAM,
+        ptr: core.system_ram().as_mut_ptr() as *mut c_void,
+        offset: 0,
+        start: 0x0000,
+        select: 0,
+        disconnect: 0,
+        len: 0x800,
+        addrspace: b"RAM\0".as_ptr() as *const std::os::raw::c_char,
+    });
+    // Cartridge work RAM at $6000, when the mapper has any. The FDS RAM adapter
+    // deliberately reports none: its 32 KiB at $6000-$DFFF is program memory
+    // reloaded from the disk rather than a save, and calling it SAVE_RAM would
+    // tell the front-end to persist a copy of the game's own code.
+    if let Some(save) = core.save_ram() {
+        if !save.is_empty() {
+            let len = save.len();
+            descs.push(retro_memory_descriptor {
+                flags: RETRO_MEMDESC_SAVE_RAM,
+                ptr: save.as_mut_ptr() as *mut c_void,
+                offset: 0,
+                start: 0x6000,
+                select: 0,
+                disconnect: 0,
+                len,
+                addrspace: b"SRAM\0".as_ptr() as *const std::os::raw::c_char,
+            });
+        }
+    }
+
+    let map = retro_memory_map {
+        descriptors: descs.as_ptr(),
+        num_descriptors: descs.len() as std::os::raw::c_uint,
+    };
+    let ok = unsafe {
+        env(
+            RETRO_ENVIRONMENT_SET_MEMORY_MAPS,
+            &map as *const retro_memory_map as *mut c_void,
+        )
+    };
+    let n = descs.len();
+    logline(s, &format!("SET_MEMORY_MAPS: {n} descriptor(s), accepted={ok}"));
+}
+
+/// Everything that has to happen when the machine is replaced.
+///
+/// One function called from every path that builds a `Nes`, rather than two
+/// call sites that both have to be remembered. The map points into the machine,
+/// so forgetting it after a reset leaves the front-end reading freed memory.
+fn machine_rebuilt(s: &mut State) {
+    publish_memory_map(s);
+}
 
 #[repr(C)]
 struct retro_disk_control_callback {
@@ -390,6 +501,7 @@ pub extern "C" fn retro_reset() {
             s.disk_index = 0;
             s.disk_ejected = false;
         }
+        machine_rebuilt(s);
     });
 }
 
@@ -435,6 +547,7 @@ pub unsafe extern "C" fn retro_load_game(info: *const retro_game_info) -> bool {
                     s.disk_ejected = false;
                     s.core = Some(core);
                     register_disk_control(s.env);
+                    machine_rebuilt(s);
                     logline(s, &format!("loaded FDS disk, {sides} side(s)"));
                     true
                 }
@@ -449,6 +562,7 @@ pub unsafe extern "C" fn retro_load_game(info: *const retro_game_info) -> bool {
                 s.rom = rom;
                 s.is_fds = false;
                 s.core = Some(core);
+                machine_rebuilt(s);
                 logline(s, &format!("loaded ROM, {} bytes", s.rom.len()));
                 true
             }
