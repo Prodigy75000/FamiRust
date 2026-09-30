@@ -276,9 +276,16 @@ impl State {
     }
 }
 
+/// Log a line through the front-end's logger.
+///
+/// No name prefix of our own. The host already tags everything that comes out
+/// of here as `[FamiRust/core]`, so adding one produced
+/// `[FamiRust/core] [FamiRust] ...` on every line the core has ever logged.
+/// Spotted in a device capture by trophyhubandroid-84, who was reading our log
+/// for something else entirely.
 fn logline(s: &State, msg: &str) {
     if let (Some(log), Ok(c)) = (s.log, std::ffi::CString::new(msg)) {
-        unsafe { log(RETRO_LOG_INFO, c"[FamiRust] %s\n".as_ptr(), c.as_ptr()) };
+        unsafe { log(RETRO_LOG_INFO, c"%s\n".as_ptr(), c.as_ptr()) };
     }
 }
 

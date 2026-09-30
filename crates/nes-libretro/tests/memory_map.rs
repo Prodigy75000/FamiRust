@@ -153,6 +153,23 @@ fn the_first_region_is_the_internal_ram_at_zero() {
 }
 
 #[test]
+fn a_cart_without_work_ram_publishes_one_descriptor_and_that_is_correct() {
+    // Contra is UNROM (mapper 2), which has no PRG-RAM at $6000, so one
+    // descriptor is the right answer and a second would be a lie about the
+    // board. Recorded because the prediction that went to the front-end agent
+    // said two, and a wrong expectation about a cartridge is exactly the kind
+    // of thing that gets a correct core "fixed".
+    let _guard = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    load(&a_cartridge());
+    let seen = SEEN.lock().unwrap();
+    assert_eq!(
+        seen.len(),
+        1,
+        "a cartridge with no work RAM has exactly one region to describe"
+    );
+}
+
+#[test]
 fn the_map_is_published_again_after_a_reset() {
     let _guard = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     // The pointers are into the machine and `retro_reset` builds a new one, so
