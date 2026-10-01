@@ -207,6 +207,40 @@ rather than the BIOS. They are worth recording because each is easy to repeat:
 Work RAM, leftover boot artwork and the registers are reported and not required,
 for the reasons above and in the script's own header.
 
+### `$0101` is not the mirror of `$0100`
+
+Written down because the symmetry is inviting and it is wrong. `$0100` is a
+three-way NMI vector selector tested with `bit`; `$0101` looked like the same
+thing for the single IRQ vector, so the first IRQ handler here dispatched on
+bit 7 and said so in a comment.
+
+Measured by forcing the byte and watching where control goes:
+
+| `$0101` | what the real BIOS does |
+|---|---|
+| `$C0` | hands the interrupt to the game through `$DFFE`, 14 cycles, a plain `jmp`. Seen live on Bio Miracle and Arumana no Kiseki |
+| `$80` | 164 cycles, and it reads `$4030`, the drive's status register |
+| `$40` | into the BIOS's own transfer machinery around `$E6A6`. Seen live on Akumajou Dracula |
+| `$00` | 33 cycles, a third path |
+
+So it is the state machine of the BIOS's own disk-transfer interrupt, and only
+`$C0` means "this one belongs to the game". That agrees with what profiling
+`$E1F8` found separately: it drives `$0101` through a load, holding `$40` per
+block and counting `$08` down to `$00` in the gaps, and restores the caller's
+value on exit.
+
+**Our loader polls the drive and the timer is off at boot, so we have no
+transfer to service**, and every interrupt after handover is the game's. We
+therefore dispatch on bit 7 rather than on `$C0` exactly. That is a deliberate
+simplification of a rule we have measured and chosen not to implement, which is
+a different thing from an approximation of one we never worked out. Returning
+instead would drop an interrupt a game enabled on purpose.
+
+Open: what the `$80` path does once it reads `$4030` and finds nothing pending.
+That is the case a game would actually hit, because `$80` is what boot leaves
+in `$0101`. Settling it needs the transfer machinery built, which is the same
+work as taking transfer interrupts in the loader.
+
 ### The routines
 
 Thirteen of the forty entry points are implemented. The other 27 are stubs that put

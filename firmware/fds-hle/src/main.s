@@ -1072,23 +1072,44 @@ nmi_arm_end:
 ; $E1C7: the IRQ handler
 ; ===========================================================================
 ;
-; $0101 selects here the way $0100 does for NMI, and the BIOS leaves it $80,
-; bit 7 set. Only one vector exists to dispatch to, so the test is a single
-; bit rather than a three-way split.
+; $0101 is NOT a two-way selector, and the symmetry with $0100 that this
+; comment used to claim was wrong. Measured by forcing it and watching where
+; control goes:
 ;
-; The real handler does more than this: on a disk-transfer interrupt it services
-; the drive itself and never leaves the window, which is how a game that hands
-; its loading to the BIOS gets its data. That belongs with the rest of the load
-; routines in step four. It is not needed yet because this BIOS generates no
-; interrupts of its own: the timer is switched off at boot and the loader polls
-; the drive rather than taking transfer interrupts, so every interrupt that
-; arrives after handover is one the game asked for.
+;   $C0   hand the interrupt to the game, through $DFFE. 14 cycles, a plain
+;         `jmp`. Seen live on Bio Miracle and Arumana no Kiseki.
+;   $80   164 cycles, and it READS $4030. That is the drive's status register,
+;         so this is the BIOS asking whether the drive caused the interrupt.
+;   $40   dives into the BIOS's own transfer machinery around $E6A6. Seen live
+;         on Akumajou Dracula, whose interrupt arrives while the BIOS is
+;         already running.
+;   $00   33 cycles, a third path.
 ;
-; This dispatch costs 11 cycles against the real one's measured 14. The
-; difference is left rather than padded out with an instruction chosen only for
-; its duration: an IRQ handler is entered on a timer the game itself programmed,
-; so a fixed latency shifts every interrupt equally instead of moving one thing
-; relative to another.
+; So $0101 is the state machine of the BIOS's own disk-transfer interrupt, and
+; only $C0 means "this one is the game's". That matches what profiling $E1F8
+; found independently: it uses $0101 throughout a load as its transfer state,
+; holding $40 per block and counting $08 down to $00 in the gaps, and restores
+; the caller's value on the way out.
+;
+; **We have no transfer to service.** Our loader polls the drive rather than
+; taking its interrupts, and the timer is off at boot, so every interrupt
+; arriving after handover is one the game asked for and the only sensible thing
+; to do with it is give it to the game. Dispatching on bit 7 rather than on $C0
+; exactly is therefore a deliberate simplification of a rule we have measured
+; and chosen not to implement, not an approximation of one we failed to work
+; out. Returning instead would drop an interrupt a game enabled on purpose.
+;
+; What is NOT known is what the $80 path does after it reads $4030 and finds no
+; drive interrupt pending, which is the case a game would actually hit, since
+; $80 is what boot leaves in $0101. Settling it needs the BIOS's transfer
+; machinery implemented, which is the same work as taking transfer interrupts
+; in the loader, and neither is needed while the loader polls.
+;
+; This dispatch costs 11 cycles against the real one's 14 on the $C0 path. The
+; difference is left rather than padded with an instruction chosen for its
+; duration: an IRQ is entered on a timer the game programmed, so a fixed
+; latency shifts every interrupt equally rather than moving one relative to
+; another.
 .org $E1C7
 irq:
   bit $0101
