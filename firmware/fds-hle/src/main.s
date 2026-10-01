@@ -301,8 +301,46 @@ read_to_ppu:
   jmp unimplemented
 .org $E185
   jmp unimplemented
+; --- $E1B2: wait for the next vblank NMI -----------------------------------
+;
+; 18 of the 114 corpus titles call it, it is the first thing Adian no Tsue asks
+; for, and four titles are stopped on it outright.
+;
+; Not a disk routine, despite a 27,870-cycle reading from the census that looked
+; like one. Across all 18 callers the cost runs 256 to 29,773 cycles and never
+; exceeds one NTSC frame, which is the shape of "until the next vblank" rather
+; than of any transfer. It touches nothing in $4020-$40FF at all.
+;
+; It parks the caller on the stack, enables NMI through the $FF shadow, and
+; dead-spins. The spin is a spin and not a poll: zero external accesses happen
+; during the wait, so it never looks at $2002. The NMI handler above finds the
+; selector at zero, switches NMI back off, drops the interrupt frame and
+; returns straight past this routine to whoever called it.
+;
+; Takes nothing, cannot fail, and gives back a, x and y untouched. Carry and
+; decimal survive, overflow is cleared by the handler's `bit`, and interrupts
+; come back DISABLED because the NMI's own I is never cleared.
+;
+; The spin has to be at exactly $E1C5. That is the interrupted PC left on the
+; stack by every measured call, and it is also one byte short of the IRQ entry
+; at $E1C7, so there is room for the branch and nothing else.
 .org $E1B2
-  jmp unimplemented
+vint_wait:
+  pha                       ; a comes back untouched; this is where it waits
+  lda $0100
+  pha                       ; saved and restored, not reset: a caller entering
+                            ; with $0100=$80 came back out with $80
+  lda #$00
+  sta $0100                 ; zero means "the NMI handler owns this exit"
+  lda $FF
+  ora #$80                  ; NMI on; forced $FF=$7F wrote $FF, so bit 7 is
+  sta $FF                   ; the only bit this adds
+  sta PPUCTRL
+@spin:
+  bmi @spin                 ; a is shadow|$80, so N is set and this is taken
+                            ; forever; `rti` restores flags, so a game IRQ
+                            ; landing mid-wait resumes the spin correctly
+.assert @spin == $E1C5
 .org $E237
   lda #0                    ; $E237 and $E239 are two apart, so this
                             ; one falls into the stub below rather
@@ -765,16 +803,50 @@ nmi:
 @vector2:
   jmp (VEC_NMI2)
 @low:
-  bvc @none                 ; both clear: no handler was ever selected
+  bvc @none                 ; both clear: a vint_wait is parked on the stack
   jmp (VEC_NMI1)
+
+; ---- $0100 = $00: finish the wait that $E1B2 started ----------------------
+;
+; This arm was an `rti` and that was wrong. The doctrine table called this row
+; "never observed; we return", which it no longer is: profiling $E1B2 showed
+; what a zero selector actually means. It is not "no handler installed", it is
+; "somebody is parked in vint_wait and the NMI owns their exit". So this does
+; not return to the interrupted spin, it throws the interrupt frame away and
+; returns to whoever called $E1B2, several frames up the stack.
+;
+; Measured: the shadow rule is exactly `and #$7F`, with a forced $FF=$7F
+; writing $FF to $2000 and then $7F back, so bit 7 is the only bit this ever
+; removes. $2002 is read once, which eats the vblank flag and resets the write
+; latch. The selector is RESTORED from the stack rather than reset to $C0: a
+; caller that entered with $0100=$80 came back out with $80.
+;
+; It also closes a race for nothing: an NMI arriving between vint_wait's
+; `sta $0100` and its `sta PPUCTRL`, which a caller with NMI already enabled
+; can cause, lands here and still returns correctly.
 @none:
-  rti
+  lda $FF
+  and #$7F                  ; NMI off; every other bit of the shadow survives
+  sta $FF
+  sta PPUCTRL
+  lda PPUSTATUS             ; eat the vblank flag and reset the write latch
+  pla                       ; the interrupt frame: P, then PCL, then PCH
+  pla
+  pla
+  pla                       ; the selector vint_wait pushed
+  sta $0100
+  pla                       ; the caller's a, which sets the exit N and Z
+  rts                       ; to vint_wait's caller, not to the spin
 
 ; The layout above is not free-floating: these are the addresses the real
 ; handler's own control flow visits, so a game that has somehow learned them
-; still lands on the right thing.
+; still lands on the right thing. The exit arm's length is load-bearing too:
+; 21 bytes from $E19D is exactly $E1B2, the entry it serves.
 .assert @vector2 == $E195
 .assert @low == $E198
+.assert @none == $E19D
+.assert nmi_arm_end == $E1B2
+nmi_arm_end:
 
 ; ===========================================================================
 ; $E1C7: the IRQ handler

@@ -153,7 +153,18 @@ for whether their value predicts the vector. Exactly one survives.
 | `$C0` | 1 | 1 | 3, `$DFFA`. The value the BIOS leaves at boot |
 | `$80` | 1 | 0 | 2, `$DFF8` |
 | `$40` | 0 | 1 | 1, `$DFF6` |
-| `$00` | 0 | 0 | never observed; we return |
+| `$00` | 0 | 0 | a `$E1B2` wait is parked: finish it |
+
+The `$00` row was marked "never observed; we return" and the `rti` we had put
+there was WRONG. Profiling `$E1B2` showed what a zero selector means: not "no
+handler installed" but "somebody is parked in a vblank wait and the NMI owns
+their exit". That arm now drops the interrupt frame and returns to whoever
+called `$E1B2`, several frames up the stack. Three byte-budget predictions
+agree with it and are asserted at build time: the arm begins at `$E19D` where
+our branch targets already put it, it is exactly 21 bytes so it ends on
+`$E1B2`, and `$E1B2`'s own prelude is 19 bytes so its spin sits at `$E1C5`,
+which is the interrupted PC on the stack in every measured call and one byte
+short of the IRQ entry.
 
 The cycle counts confirm it independently. A `bit` test plus two branches plus
 `jmp (ind)` costs 13 cycles for `$C0` and 14 for either of the others, which is
@@ -198,7 +209,7 @@ for the reasons above and in the script's own header.
 
 ### The routines
 
-Ten of the forty entry points are implemented. The other 30 are stubs that put
+Eleven of the forty entry points are implemented. The other 29 are stubs that put
 **NO ROUTINE** on the screen and stop, which is worth its 111 bytes: Zelda hands
 over correctly, runs its own code, jumps to `$EA84` and would otherwise
 disappear into the fill, looking like a hundred different bugs instead of one
@@ -216,6 +227,7 @@ missing routine. `fdstrace` names the address.
 | `$EA1F` | 26 | read both pads, work out newly-pressed | faster; exit carry not reproduced |
 | `$E1F8` | 41 | load files from disk | written; polls where the original takes the byte IRQ |
 | `$EBAF` | 29 | copy 16-byte units from RAM to video memory | faster: ~282 cycles a unit against 362 |
+| `$E1B2` | 18 | wait for the next vblank NMI | and it corrected the NMI handler, below |
 
 **Where the cycle counts do not match, ours is faster, never slower.** That is
 deliberate. A game that runs one of these inside vblank has more room than it
@@ -241,7 +253,7 @@ question. Measured 2026-10-01, with ten routines written:
 | entry | titles that call it | titles STUCK on it |
 |---|---|---|
 | `$E149` | 17 | **15** |
-| `$E161` | 13 | **9** |
+| `$E161` | 13 | **9**, now 10 |
 | `$EA4C` | 17 | **8** |
 | `$E7BB` | 18 | **6** |
 | `$EAFD` | 11 | **5** |

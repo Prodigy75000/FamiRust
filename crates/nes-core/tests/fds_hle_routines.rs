@@ -623,3 +623,47 @@ fn vram_upload_steps_over_its_inline_source_pointer() {
     assert!(r.reached, "control did not resume after the inline pointer");
     assert_eq!(r.a, 0x3d, "execution resumed at the wrong place");
 }
+
+#[test]
+fn vint_wait_at_e1b2_returns_within_a_frame_and_matches_the_real_bios() {
+    // $E1B2, entered by 18 of 114 titles and the first thing Adian no Tsue
+    // asks for. It waits for the next vblank NMI: no arguments, no failure
+    // path, and a, x and y come back untouched.
+    if a_disk().is_none() {
+        return skipped();
+    }
+    let mut p = Prog::default();
+    p.lda(0x3b).ldx(0x5a).ldy(0xa5).jsr(0xe1b2).record_and_halt();
+    // Three frames is comfortably more than the one frame it can ever take.
+    let Some((r, mut nes)) = both(&p.0, 3) else { return skipped() };
+    assert!(r.reached, "it never came back, so the wait never ended");
+    assert_eq!((r.a, r.x, r.y), (0x3b, 0x5a, 0xa5), "the registers are the caller's");
+    // It leaves NMI off, in the shadow and in the register alike.
+    assert_eq!(nes.peek(0x00ff) & 0x80, 0, "bit 7 of the shadow should be clear");
+    assert_eq!(nes.dbg_ppu_ctrl() & 0x80, 0, "and NMI off in $2000");
+}
+
+#[test]
+fn vint_wait_restores_the_nmi_selector_rather_than_resetting_it() {
+    // $0100 is saved on the stack and put back. A version that reset it to the
+    // boot default of $C0 would silently move a game off vector 1 or 2.
+    let Some(disk) = a_disk() else { return skipped() };
+    let mut p = Prog::default();
+    p.poke(0x0100, 0x80).jsr(0xe1b2).record_and_halt();
+    let (r, mut nes) = run(&disk, &[], &p.0, 3);
+    assert!(r.reached);
+    assert_eq!(nes.peek(0x0100), 0x80, "the selector should come back as it was");
+}
+
+#[test]
+fn vint_wait_keeps_every_bit_of_the_ppuctrl_shadow_but_the_top_one() {
+    // The rule is exactly `ora #$80` going in and `and #$7F` coming out.
+    // Anything coarser would quietly change the sprite size, the pattern table
+    // or the VRAM increment on its way past.
+    let Some(disk) = a_disk() else { return skipped() };
+    let mut p = Prog::default();
+    p.poke(0x00ff, 0x7f).jsr(0xe1b2).record_and_halt();
+    let (r, mut nes) = run(&disk, &[], &p.0, 3);
+    assert!(r.reached);
+    assert_eq!(nes.peek(0x00ff), 0x7f, "all seven low bits should survive");
+}
