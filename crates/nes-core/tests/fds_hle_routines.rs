@@ -204,6 +204,48 @@ fn run(disk: &[u8], bios: &[u8], prog: &[u8], frames: u64) -> (Outcome, nes_core
     (out, nes)
 }
 
+/// Like [`run`], but with a button pattern held on pad 1 for the whole thing.
+///
+/// Buttons are in HARDWARE order here (A=$01 up to Right=$80). The BIOS shifts
+/// them in the other way round, so what lands in `$F5` has A at bit 7 and
+/// Right at bit 0. Getting that backwards makes a controller test pass on a
+/// routine that reverses the pad.
+fn run_holding(disk: &[u8], bios: &[u8], prog: &[u8], frames: u64, buttons: u8)
+    -> (Outcome, nes_core::Nes)
+{
+    let mut nes = nes_core::Nes::from_fds(disk, bios).expect("disk should parse");
+    let deadline = nes.dbg_frame() + 1500;
+    while nes.dbg_frame() < deadline {
+        let pc = nes.dbg_pc();
+        if pc < BIOS_BASE {
+            let v = u16::from(nes.peek(VEC_RESET)) | (u16::from(nes.peek(VEC_RESET + 1)) << 8);
+            if pc == v {
+                break;
+            }
+        }
+        nes.step();
+    }
+    assert!(nes.dbg_pc() < BIOS_BASE, "never reached handover");
+    nes.set_buttons(0, buttons);
+    for (i, b) in prog.iter().enumerate() {
+        nes.dbg_poke(PROG + i as u16, *b);
+    }
+    nes.dbg_poke(OUT_SENTINEL, 0);
+    nes.dbg_set_pc(PROG);
+    let stop = nes.dbg_frame() + frames;
+    while nes.dbg_frame() < stop && !nes.dbg_halted() && nes.peek(OUT_SENTINEL) != DONE {
+        nes.step();
+    }
+    let out = Outcome {
+        reached: nes.peek(OUT_SENTINEL) == DONE,
+        a: nes.peek(OUT),
+        x: nes.peek(OUT + 1),
+        y: nes.peek(OUT + 2),
+        p: nes.peek(OUT + 3),
+    };
+    (out, nes)
+}
+
 /// Run the same program under ours and, if both are present, under the real
 /// BIOS and a real disk, and require the two to agree.
 fn both(prog: &[u8], frames: u64) -> Option<(Outcome, nes_core::Nes)> {
@@ -251,11 +293,19 @@ fn cycles_of_call(disk: &[u8], bios: &[u8], addr: u16) -> u64 {
     }
     let sp_in = nes.cpu.sp;
     let start = nes.dbg_cycles();
+    // A deadline, because a routine that never returns would otherwise hang
+    // the whole suite rather than fail one test. Two frames is far more than
+    // any routine measured here takes.
+    let give_up = start + 2 * 29_781;
     loop {
         nes.step();
         if nes.dbg_pc() < BIOS_BASE && nes.cpu.sp >= sp_in {
             break;
         }
+        assert!(
+            nes.dbg_cycles() < give_up,
+            "${addr:04x} did not return within two frames"
+        );
     }
     nes.dbg_cycles() - start
 }
@@ -975,4 +1025,98 @@ fn a_non_palette_entry_does_not_reset_the_address() {
     // The address should have carried on from $2002, not jumped to $0000.
     assert_eq!(nes.dbg_ciram()[2], 0x5a, "the write should continue in the nametable");
     assert_ne!(nes.dbg_chr_ram()[0], 0x5a, "and not have been reset to $0000");
+}
+
+#[test]
+fn verifying_pad_read_at_ea4c_matches_the_real_bios() {
+    // $EA4C is $EA1F with a verification pass: read both pads, read again, and
+    // only believe an answer that repeats. 17 titles call it and twelve were
+    // stopped on it.
+    //
+    // The trap here is a test that proves nothing. With no buttons held and no
+    // previous state, every byte involved is zero and the test passes against a
+    // routine that simply zeroes $F5-$F8. So: hold a real pattern, and plant a
+    // previous-held value so "newly pressed" has to be computed rather than
+    // copied.
+    let Some(disk) = a_disk() else { return skipped() };
+    const HELD_HW: u8 = 0x05; // A | Select, in hardware order
+    const HELD_BIOS: u8 = 0xa0; // the same two, as the BIOS stores them
+    let mut p = Prog::default();
+    p.poke(0x00fb, 0x00) // strobe byte
+        .poke(0x00f7, 0x20) // pad 1 was already holding Select
+        .poke(0x00f8, 0x00)
+        .jsr(0xea4c)
+        .record_and_halt();
+
+    let (ours, mut nes) = run_holding(&disk, &[], &p.0, 10, HELD_HW);
+    assert!(ours.reached, "the routine never returned");
+    assert_eq!(nes.peek(0x00f7), HELD_BIOS, "$F7 should hold what is pressed now");
+    assert_eq!(
+        nes.peek(0x00f5),
+        HELD_BIOS & !0x20,
+        "newly pressed is what is held now and was not held before"
+    );
+    assert_eq!(ours.a, nes.peek(0x00f5), "a is the new $F5");
+    assert_eq!(ours.y, HELD_BIOS, "y is the new $F7");
+    assert_eq!(ours.x, 0xff, "x is $FF on exit");
+    assert_eq!(ours.p & 0x01, 0x01, "carry is set by the compare that passed");
+
+    if let Some(real) = real_bios() {
+        let (theirs, mut rn) = run_holding(&disk, &real, &p.0, 10, HELD_HW);
+        assert!(theirs.reached, "the real BIOS never finished the test program");
+        assert_eq!(
+            (ours.a, ours.x, ours.y, ours.p),
+            (theirs.a, theirs.x, theirs.y, theirs.p),
+            "ours (left) disagrees with the real BIOS (right)"
+        );
+        for cell in [0x00f5u16, 0x00f6, 0x00f7, 0x00f8] {
+            assert_eq!(
+                nes.peek(cell),
+                rn.peek(cell),
+                "${cell:04x} differs between the two BIOSes"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_verifying_read_really_reads_twice() {
+    // The real routine costs 873 cycles, constant across all 17 callers, and
+    // it is long because it reads the pads TWICE rather than because it drives
+    // anything. Ours costs 832: the same two passes, slightly cheaper.
+    //
+    // Asserting 873 exactly would be asserting an implementation detail of
+    // somebody else's merge step. What actually matters is that the second
+    // read happens at all, because a single-pass version would be a $EA1F with
+    // a longer name and no verification in it. So compare against $EA1F: the
+    // difference has to be most of another read pass.
+    //
+    // Being faster is safe here, as everywhere in this BIOS except $E149,
+    // where the duration is the product.
+    let Some(disk) = a_disk() else { return skipped() };
+    let once = cycles_of_call(&disk, &[], 0xea1f);
+    let twice = cycles_of_call(&disk, &[], 0xea4c);
+    assert!(
+        twice > once + 300,
+        "$EA4C took {twice} against $EA1F's {once}, which is not a second read"
+    );
+    if let Some(real) = real_bios() {
+        let theirs = cycles_of_call(&disk, &real, 0xea4c);
+        assert_eq!(theirs, 873, "the oracle's number, in case it ever moves");
+        assert!(twice <= theirs, "ours ({twice}) must not be slower than {theirs}");
+    }
+}
+
+#[test]
+fn the_plain_pad_read_still_works_after_sharing_its_read_pass() {
+    // $EA1F and $EA4C now share one strobe-and-shift pass. This is here so a
+    // change to the shared half cannot quietly break the simpler caller.
+    let Some(disk) = a_disk() else { return skipped() };
+    let mut p = Prog::default();
+    p.poke(0x00fb, 0x00).poke(0x00f7, 0x00).jsr(0xea1f).record_and_halt();
+    let (ours, mut nes) = run_holding(&disk, &[], &p.0, 10, 0x05);
+    assert!(ours.reached);
+    assert_eq!(nes.peek(0x00f7), 0xa0, "held, with A at bit 7");
+    assert_eq!(nes.peek(0x00f5), 0xa0, "all of it newly pressed");
+    assert_eq!(ours.x, 0xff);
 }

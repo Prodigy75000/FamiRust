@@ -52,14 +52,29 @@ CORPUS = "out/corpus"
 BIOS = "dumps/fds/disksys.rom"
 
 
+# An ENTRY is control arriving at a routine. An `rts`/`rti` landing in the BIOS
+# is a RESUMPTION: the BIOS continuing after it called out through the
+# $DFF6-$DFFF vectors, so the address is wherever it happened to be rather than
+# anything published. The census summary already separates them; the per-title
+# JSON does not, and this read both as entries.
+#
+# That mattered: it reported the band around $E14A-$E15B as entry points called
+# by several titles each, when those are games' NMI handlers returning into the
+# middle of $E149's and $E153's delay loops. Caught by a profiling agent who
+# noticed the "entries" had no consistent cost.
+ENTRY_KINDS = ("jsr", "jmp", "jmp()", "brk", "nmi", "irq", "reset")
+
+
 def census():
-    """title -> set of entry addresses that title was seen entering."""
+    """title -> set of addresses that title was seen ENTERING, not resuming."""
     out = {}
     for p in sorted(glob.glob(os.path.join(ROWS, "*.json"))):
         with open(p, encoding="utf-8") as f:
             row = json.load(f)
         title = os.path.splitext(os.path.basename(p))[0]
-        out[title] = {t["to"] for t in row.get("targets", [])}
+        out[title] = {
+            t["to"] for t in row.get("targets", []) if t.get("kind") in ENTRY_KINDS
+        }
     return out
 
 

@@ -653,8 +653,51 @@ sprite_dma:
 .org $EA1F
   jmp read_pads             ; body below; 70 bytes will not fit in 45
 
+; --- $EA4C: read both pads twice and only believe a repeated answer --------
+;
+; 17 of the 114 corpus titles call it and twelve were stopped on it. It is
+; $EA1F with a verification pass: read both pads, read them again, and if the
+; two merged answers disagree take the newer one as the reference and read once
+; more. That is the classic defence against a read corrupted mid-way by the
+; DPCM channel stealing a cycle from the controller port.
+;
+; It takes no arguments, touches no disk and no PPU, and cannot fail; it simply
+; does not return until two consecutive reads agree. The real one costs 873
+; cycles when they agree, which is every call unless the input moves during it,
+; and about 417 more per retry. Ours costs 832: the same two passes with a
+; cheaper merge, and faster is safe here as everywhere but $E149. Under buttons deliberately alternated every pass it was still
+; going after 4,797 passes, so there is no retry cap to reproduce.
+;
+; The retry lands back on the STASH and not on the entry, so each attempt
+; compares against the most recent read rather than against the first one.
+; Measured by flipping pad 1 and pad 2 separately part way through a call.
+;
+; Exit: a is the new $F5 and y the new $F7, both pad 1; x is $FF; N set and Z
+; clear from the final `dex`; carry SET from the compare that passed.
 .org $EA4C
-  jmp unimplemented
+verify_pads:
+  jsr pads_held
+@stash:
+  ldx $F5                   ; the answer so far, re-taken on every retry
+  lda $F6
+  pha
+  jsr pads_held
+  pla
+  cmp $F6                   ; pad 2 is compared first: a pad-2 mismatch was
+  bne @stash                ; measured skipping the pad-1 compare entirely
+  cpx $F5
+  bne @stash
+  ldx #$01                  ; pad 2 then pad 1, so a and y end as pad 1's
+@diff:
+  lda $F5,x                 ; newly pressed = held now AND NOT held before
+  tay
+  eor $F7,x
+  and $F5,x
+  sta $F5,x
+  sty $F7,x
+  dex
+  bpl @diff                 ; x falls out $FF, with N set and Z clear
+  rts
 ; --- $EA84: fill a page of video memory ------------------------------------
 ;
 ; 41 of the 114 corpus titles call it, the joint most-called routine after the
@@ -809,13 +852,24 @@ mem_fill:
   bne @page
   rts
 
-read_pads:
+; One strobe-and-shift pass, shared by $EA1F and $EA4C.
+;
+; Split out because $EA4C is measurably this routine run twice with a compare
+; between, so the two entry points are one read pass and two different things
+; done with it. Leaves the merged held state in $F5 and $F6 and the raw
+; expansion bytes in $00 and $01.
+pads_held:
   ldy $FB
   iny
   sty JOY1                  ; strobe on:  $FB + 1
   dey
   sty JOY1                  ; strobe off: $FB
-  ldx #$07
+  ldy #$07                  ; the bit counter is Y, deliberately, so that X
+                            ; survives a call. $EA4C stashes its first answer
+                            ; in X across a second call to this, and when the
+                            ; counter was X that stash was silently destroyed
+                            ; and the two answers could never agree: the
+                            ; routine spun forever instead of returning.
 @bit:
   lda JOY1
   lsr a                     ; bit 0 is the pad that is wired to the port
@@ -827,14 +881,18 @@ read_pads:
   rol $F6
   lsr a
   rol $01
-  dex
-  bpl @bit                  ; eight bits, and x falls out as $FF
+  dey
+  bpl @bit                  ; eight bits
   lda $00                   ; the expansion pad merges into the wired one
   ora $F5
   sta $F5
   lda $01
   ora $F6
   sta $F6
+  rts
+
+read_pads:
+  jsr pads_held
   lda $F6                   ; pad 2: newly = held AND NOT was-held
   tay
   eor $F8

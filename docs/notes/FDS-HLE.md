@@ -243,7 +243,7 @@ work as taking transfer interrupts in the loader.
 
 ### The routines
 
-Thirteen of the forty entry points are implemented. The other 27 are stubs that put
+Fourteen of the forty entry points are implemented. The other 26 are stubs that put
 **NO ROUTINE** on the screen and stop, which is worth its 111 bytes: Zelda hands
 over correctly, runs its own code, jumps to `$EA84` and would otherwise
 disappear into the fill, looking like a hundred different bugs instead of one
@@ -264,6 +264,7 @@ missing routine. `fdstrace` names the address.
 | `$E1B2` | 18 | wait for the next vblank NMI | and it corrected the NMI handler, below |
 | `$E7BB` | 18 | walk a VRAM write structure the caller points at | a little language, measured field by field |
 | `$E149` | 17 | delay exactly 131 cycles | cycle-exact, and the one place faster is WRONG |
+| `$EA4C` | 17 | read both pads twice and believe a repeated answer | shares its read pass with `$EA1F` |
 
 **Where the cycle counts do not match, ours is faster, never slower.** That is
 deliberate. A game that runs one of these inside vblank has more room than it
@@ -305,12 +306,11 @@ updates:
 
 | entry | titles stuck on it now |
 |---|---|
-| `$EA4C` | **12** |
 | `$E161` | **10** |
 
-**65 of the 114 now reach their own code without asking for a routine we have
-not written**, up from 50, in an unattended 1800-frame run with START mashed.
-49 are still stopped by a missing routine. Sixty-five is NOT "sixty-five titles
+**76 of the 114 now reach their own code without asking for a routine we have
+not written**, up from 50 when the queue was first measured, in an unattended
+1800-frame run with START mashed. 38 are still stopped by a missing routine. Sixty-five is NOT "sixty-five titles
 play correctly": thirty seconds of unattended running reaches what it reaches,
 and a game that needs a routine only when you open its menu has not asked yet.
 
@@ -333,7 +333,7 @@ what comes back. That is the oracle at the level the work happens at.
 2. ~~Baseline smoke on the real BIOS, one ledger row per title.~~ The census
    rows and `fds-hle-check.py` are this.
 3. ~~HLE boot with our own graphics and no BIOS file present.~~ Done 2026-09-29.
-4. Routine by routine, each held against the real BIOS. Thirteen of forty done;
-   the queue by BLOCKING is `$EA4C` (12 titles), then `$E161` (10). Neither is
-   measured yet.
+4. Routine by routine, each held against the real BIOS. Fourteen of forty done;
+   the queue by BLOCKING is `$E161` (10 titles), which is measured and is one
+   of a family of five PPUMASK entries.
 5. Cycle accounting per routine, starting from the `cyc/call` column.
