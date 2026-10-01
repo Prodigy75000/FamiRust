@@ -333,7 +333,9 @@ what comes back. That is the oracle at the level the work happens at.
 2. ~~Baseline smoke on the real BIOS, one ledger row per title.~~ The census
    rows and `fds-hle-check.py` are this.
 3. ~~HLE boot with our own graphics and no BIOS file present.~~ Done 2026-09-29.
-4. Routine by routine, each held against the real BIOS. Fourteen of forty done;
-   the queue by BLOCKING is `$E161` (10 titles), which is measured and is one
-   of a family of five PPUMASK entries.
+4. Routine by routine, each held against the real BIOS. Fourteen of forty done.
+   The queue by BLOCKING is `$E161` (10 titles), and it is one of a family of
+   five PPUMASK entries that come nearly free together. That family and
+   `$E153` are measured and ready to write: see
+   [`FDS-ROUTINES-PENDING.md`](FDS-ROUTINES-PENDING.md).
 5. Cycle accounting per routine, starting from the `cyc/call` column.
