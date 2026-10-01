@@ -98,6 +98,29 @@ impl Prog {
         }
         self
     }
+    /// Zero the first 128 bytes of the nametable.
+    ///
+    /// Without this a VRAM comparison between the two BIOSes compares their
+    /// BOOT SCREENS: the real one leaves its blank tile $24 across the
+    /// nametable and ours leaves zeroes, so every byte the test did not write
+    /// differs and every byte it did write agrees. That looks like a broken
+    /// routine and is a broken test.
+    fn clear_vram(&mut self) -> &mut Self {
+        self.0.extend_from_slice(&[
+            0x2c, 0x02, 0x20, // bit $2002, reset the address latch
+            0xa9, 0x20, 0x8d, 0x06, 0x20, // $2006 = $20
+            0xa9, 0x00, 0x8d, 0x06, 0x20, // $2006 = $00
+            0xa2, 0x80, // ldx #128
+            0x8d, 0x07, 0x20, // sta $2007 with a still zero
+            0xca, 0xd0, 0xfa, // dex : bne
+        ]);
+        self
+    }
+    /// Emit raw opcode bytes, for the handful of instructions with no helper.
+    fn raw(&mut self, bytes: &[u8]) -> &mut Self {
+        self.0.extend_from_slice(bytes);
+        self
+    }
     fn jsr(&mut self, addr: u16) -> &mut Self {
         self.0.extend_from_slice(&[0x20, addr as u8, (addr >> 8) as u8]);
         self
@@ -198,6 +221,43 @@ fn both(prog: &[u8], frames: u64) -> Option<(Outcome, nes_core::Nes)> {
         eprintln!("note: no dumps/fds/disksys.rom, so this is not held against the oracle");
     }
     Some((ours, nes))
+}
+
+/// Cycles spent inside one call to `addr`, made from a planted caller.
+///
+/// Measured rather than asserted from the source, because a delay routine's
+/// whole product is its duration and a comment claiming 131 is not evidence.
+fn cycles_of_call(disk: &[u8], bios: &[u8], addr: u16) -> u64 {
+    let mut p = Prog::default();
+    p.jsr(addr).record_and_halt();
+    let mut nes = nes_core::Nes::from_fds(disk, bios).expect("disk should parse");
+    let deadline = nes.dbg_frame() + 1500;
+    while nes.dbg_frame() < deadline {
+        let pc = nes.dbg_pc();
+        if pc < BIOS_BASE {
+            let v = u16::from(nes.peek(VEC_RESET)) | (u16::from(nes.peek(VEC_RESET + 1)) << 8);
+            if pc == v {
+                break;
+            }
+        }
+        nes.step();
+    }
+    for (i, b) in p.0.iter().enumerate() {
+        nes.dbg_poke(PROG + i as u16, *b);
+    }
+    nes.dbg_set_pc(PROG);
+    while nes.dbg_pc() != addr {
+        nes.step();
+    }
+    let sp_in = nes.cpu.sp;
+    let start = nes.dbg_cycles();
+    loop {
+        nes.step();
+        if nes.dbg_pc() < BIOS_BASE && nes.cpu.sp >= sp_in {
+            break;
+        }
+    }
+    nes.dbg_cycles() - start
 }
 
 fn skipped() {
@@ -666,4 +726,253 @@ fn vint_wait_keeps_every_bit_of_the_ppuctrl_shadow_but_the_top_one() {
     let (r, mut nes) = run(&disk, &[], &p.0, 3);
     assert!(r.reached);
     assert_eq!(nes.peek(0x00ff), 0x7f, "all seven low bits should survive");
+}
+
+#[test]
+fn delay_at_e149_takes_exactly_131_cycles() {
+    // $E149 is the most-called routine in the corpus, 1,054,357 calls across
+    // 17 titles, and 15 titles were stopped on it. It does nothing but take
+    // time, so the time IS the contract.
+    //
+    // This is the one routine where our usual rule inverts. Everywhere else
+    // being faster than the original is safe, because a caller that budgeted
+    // for the slow version still fits. Here a game counting these to pace a
+    // PPU access would get a shorter wait than it asked for.
+    let Some(disk) = a_disk() else { return skipped() };
+    assert_eq!(cycles_of_call(&disk, &[], 0xe149), 131);
+    if let Some(real) = real_bios() {
+        assert_eq!(
+            cycles_of_call(&disk, &real, 0xe149),
+            131,
+            "the real BIOS should agree, or the number above is the wrong one"
+        );
+    }
+}
+
+#[test]
+fn the_delay_preserves_everything_and_clears_carry_and_overflow() {
+    // a, x and y come back untouched, N and Z follow a, and C and V come out
+    // clear whatever went in: the real one returns p=$20 for an entry of $61.
+    if a_disk().is_none() {
+        return skipped();
+    }
+    let mut p = Prog::default();
+    // `sec` puts carry in before the call, so "comes out clear" means something.
+    p.lda(0x3c).ldx(0x5a).ldy(0xa5);
+    p.0.push(0x38); // sec
+    p.jsr(0xe149).record_and_halt();
+    let Some((r, _)) = both(&p.0, 10) else { return skipped() };
+    assert!(r.reached);
+    assert_eq!((r.a, r.x, r.y), (0x3c, 0x5a, 0xa5), "the registers are the caller's");
+    assert_eq!(r.p & 0x01, 0, "carry should come out clear");
+    assert_eq!(r.p & 0x40, 0, "overflow should come out clear");
+}
+
+#[test]
+fn the_delay_is_decimal_proof() {
+    // Forced into the real routine with D=1 it still took 131, so whatever
+    // counts inside it is not an adc/sbc chain. Ours shifts, which cannot
+    // care, and this is the test that stops someone "simplifying" it into
+    // arithmetic later.
+    let Some(disk) = a_disk() else { return skipped() };
+    let mut p = Prog::default();
+    p.0.push(0xf8); // sed
+    p.jsr(0xe149);
+    p.0.push(0xd8); // cld, so the harness's own recording is unaffected
+    p.record_and_halt();
+    let (r, _) = run(&disk, &[], &p.0, 10);
+    assert!(r.reached, "it never returned with decimal mode set");
+    // And the count itself must not move. Measured separately because the
+    // program above cannot report its own cycles.
+    assert_eq!(cycles_of_call(&disk, &[], 0xe149), 131);
+}
+
+/// Where a `$E7BB` test builds its structure.
+const STRUCT_AT: u16 = 0x0760;
+
+/// Run a hand-built VRAM structure through `$E7BB` under both BIOSes and
+/// return what ours did, plus its machine.
+///
+/// Comparing this routine by watching a game does not work: by the time a title
+/// reaches it the two runs have taken different paths and are pointing it at
+/// different structures. Building the structure here is the only way to ask
+/// both BIOSes the same question.
+fn walk_struct(bytes: &[u8]) -> Option<(Outcome, nes_core::Nes)> {
+    let disk = a_disk()?;
+    let mut p = Prog::default();
+    p.poke(0x2000, 0x00).poke(0x00ff, 0x00).clear_vram();
+    p.bytes_at(STRUCT_AT, bytes);
+    p.jsr(0xe7bb);
+    p.0.extend_from_slice(&STRUCT_AT.to_le_bytes());
+    p.record_and_halt();
+
+    let (ours, nes) = run(&disk, &[], &p.0, 30);
+    if let Some(real) = real_bios() {
+        let (theirs, mut rn) = run(&disk, &real, &p.0, 30);
+        assert!(theirs.reached, "the real BIOS never finished the test program");
+        assert_eq!(
+            (ours.a, ours.y),
+            (theirs.a, theirs.y),
+            "ours (left) disagrees with the real BIOS (right) on a/y"
+        );
+        let mut ours_nes = nes;
+        assert_eq!(
+            ours_nes.dbg_ciram()[..64],
+            rn.dbg_ciram()[..64],
+            "the two BIOSes wrote different video memory"
+        );
+        assert_eq!(ours_nes.peek(0x00ff), rn.peek(0x00ff), "the PPUCTRL shadow");
+        return Some((ours, ours_nes));
+    }
+    Some((ours, nes))
+}
+
+#[test]
+fn vram_struct_at_e7bb_writes_a_plain_entry() {
+    // Address high, address low, a length byte, then that many bytes.
+    let Some((r, mut nes)) =
+        walk_struct(&[0x20, 0x00, 0x04, 0xde, 0xad, 0xbe, 0xef, 0xff])
+    else {
+        return skipped();
+    };
+    assert!(r.reached, "the routine never returned");
+    assert_eq!(r.a, 0xff, "a is the terminator byte");
+    assert_eq!(r.y, 0x00, "y is zero on exit");
+    assert_eq!(&nes.dbg_ciram()[..4], &[0xde, 0xad, 0xbe, 0xef]);
+}
+
+#[test]
+fn vram_struct_repeats_one_byte_when_bit_six_is_set() {
+    // bit 6 of the length byte means "one data byte, written count times".
+    let Some((r, mut nes)) = walk_struct(&[0x20, 0x00, 0x46, 0x5a, 0xff]) else {
+        return skipped();
+    };
+    assert!(r.reached);
+    assert_eq!(&nes.dbg_ciram()[..6], &[0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a]);
+    assert_ne!(nes.dbg_ciram()[6], 0x5a, "six, and no more than six");
+}
+
+#[test]
+fn a_count_of_zero_means_sixty_four() {
+    // Zero in bits 0-5 is sixty-four, not nothing. Reading it as nothing would
+    // silently drop a whole row of a nametable.
+    let Some((r, mut nes)) = walk_struct(&[0x20, 0x00, 0x40, 0x3c, 0xff]) else {
+        return skipped();
+    };
+    assert!(r.reached);
+    assert!(nes.dbg_ciram()[..64].iter().all(|&b| b == 0x3c), "64 bytes");
+    assert_ne!(nes.dbg_ciram()[64], 0x3c, "and not 65");
+}
+
+#[test]
+fn any_byte_with_bit_seven_set_ends_the_structure() {
+    // Not just $FF. $80 and $BE both terminate, and the byte itself comes back.
+    for end in [0xffu8, 0x80, 0xbe] {
+        let Some((r, _)) = walk_struct(&[0x20, 0x00, 0x02, 0x11, 0x22, end]) else {
+            return skipped();
+        };
+        assert!(r.reached, "terminator ${end:02x} did not end the walk");
+        assert_eq!(r.a, end, "a should be the terminator that ended it");
+    }
+}
+
+#[test]
+fn a_struct_can_call_and_return() {
+    // $4C pushes the current position and jumps; $60 pops and resumes three
+    // bytes on, past the $4C and its operand.
+    const SUB: u16 = 0x0790;
+    let Some(disk) = a_disk() else { return skipped() };
+    let mut p = Prog::default();
+    p.poke(0x2000, 0x00).poke(0x00ff, 0x00).clear_vram();
+    // main: call SUB, then write $77 twice, then end.
+    p.bytes_at(STRUCT_AT, &[0x4c, SUB as u8, (SUB >> 8) as u8,
+                           0x20, 0x08, 0x02, 0x77, 0x77, 0xff]);
+    // sub: write $11 $22 at $2000, then return.
+    p.bytes_at(SUB, &[0x20, 0x00, 0x02, 0x11, 0x22, 0x60]);
+    p.jsr(0xe7bb);
+    p.0.extend_from_slice(&STRUCT_AT.to_le_bytes());
+    p.record_and_halt();
+
+    let (ours, mut nes) = run(&disk, &[], &p.0, 30);
+    assert!(ours.reached, "the routine never returned");
+    assert_eq!(&nes.dbg_ciram()[..2], &[0x11, 0x22], "the called struct ran");
+    assert_eq!(&nes.dbg_ciram()[8..10], &[0x77, 0x77], "and it came back");
+    if let Some(real) = real_bios() {
+        let (theirs, rn) = run(&disk, &real, &p.0, 30);
+        assert!(theirs.reached);
+        assert_eq!(nes.dbg_ciram()[..16], rn.dbg_ciram()[..16]);
+        assert_eq!(ours.a, theirs.a);
+    }
+}
+
+#[test]
+fn bit_seven_of_the_length_byte_sets_the_vram_increment_and_keeps_it() {
+    // It writes (shadow & ~$04) with bit 2 put back when the flag is set, and
+    // the shadow KEEPS the result, so the stepping outlives the call.
+    let Some((r, mut nes)) = walk_struct(&[0x20, 0x00, 0x82, 0x11, 0x22, 0xff]) else {
+        return skipped();
+    };
+    assert!(r.reached);
+    assert_eq!(nes.peek(0x00ff) & 0x04, 0x04, "bit 2 should be left set");
+    assert_eq!(nes.dbg_ppu_ctrl() & 0x04, 0x04, "and $2000 should agree");
+}
+
+#[test]
+fn a_palette_entry_leaves_the_vram_address_at_zero() {
+    // After an entry whose address high byte is $3F, and only then, the
+    // routine writes $2006 four more times with $3F,$00 and then $00,$00.
+    // That is the palette-safe reset: a PPU left addressing inside the palette
+    // shows that palette entry in place of the backdrop, which is a visible
+    // coloured band across the screen.
+    //
+    // The effect is observable as where the NEXT $2007 write lands. Without
+    // the reset the address is still in the palette; with it, at $0000, which
+    // is pattern memory. This test exists because dropping the reset entirely
+    // was the one mutation the rest of the suite did not notice.
+    let Some(disk) = a_disk() else { return skipped() };
+    let mut p = Prog::default();
+    p.poke(0x2000, 0x00).poke(0x00ff, 0x00).clear_vram();
+    p.bytes_at(STRUCT_AT, &[0x3f, 0x00, 0x04, 0x0f, 0x11, 0x22, 0x33, 0xff]);
+    p.jsr(0xe7bb);
+    p.0.extend_from_slice(&STRUCT_AT.to_le_bytes());
+    // Now write a sentinel through $2007 and see where the PPU put it.
+    p.lda(0x5a).raw(&[0x8d, 0x07, 0x20]);
+    p.record_and_halt();
+
+    let (ours, nes) = run(&disk, &[], &p.0, 30);
+    assert!(ours.reached, "the routine never returned");
+    assert_eq!(
+        nes.dbg_chr_ram()[0],
+        0x5a,
+        "the next write should have landed at $0000, so the address was reset"
+    );
+    if let Some(real) = real_bios() {
+        let (theirs, rn) = run(&disk, &real, &p.0, 30);
+        assert!(theirs.reached);
+        assert_eq!(
+            nes.dbg_chr_ram()[0], rn.dbg_chr_ram()[0],
+            "ours and the real BIOS should leave the address in the same place"
+        );
+    }
+}
+
+#[test]
+fn a_non_palette_entry_does_not_reset_the_address() {
+    // The other half: $2F and $3E were both measured NOT to trigger it, so the
+    // test is `== $3F` and not "anything palette-ish". Without this, a reset
+    // applied unconditionally would pass the test above.
+    let Some(disk) = a_disk() else { return skipped() };
+    let mut p = Prog::default();
+    p.poke(0x2000, 0x00).poke(0x00ff, 0x00).clear_vram();
+    p.bytes_at(STRUCT_AT, &[0x20, 0x00, 0x02, 0x11, 0x22, 0xff]);
+    p.jsr(0xe7bb);
+    p.0.extend_from_slice(&STRUCT_AT.to_le_bytes());
+    p.lda(0x5a).raw(&[0x8d, 0x07, 0x20]);
+    p.record_and_halt();
+
+    let (ours, nes) = run(&disk, &[], &p.0, 30);
+    assert!(ours.reached);
+    // The address should have carried on from $2002, not jumped to $0000.
+    assert_eq!(nes.dbg_ciram()[2], 0x5a, "the write should continue in the nametable");
+    assert_ne!(nes.dbg_chr_ram()[0], 0x5a, "and not have been reset to $0000");
 }

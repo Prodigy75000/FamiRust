@@ -287,8 +287,56 @@ read_to_ppu:
 ; The addresses come from docs/notes/FDS-CENSUS-2026-09-29.md, ordered as they
 ; sit in memory rather than by how often they are called.
 
+; --- $E149: delay exactly 131 cycles ---------------------------------------
+;
+; The most-called routine in the corpus by a wide margin: 1,054,357 calls
+; across 17 titles, and the single biggest blocker, with 15 titles stopped on
+; it. Falsion calls it about 64 times a frame, Green Beret 57, and Suishou no
+; Dragon from 42 distinct sites. At 131 cycles it is about 1.15 scanlines, which
+; is the shape of a timing quantum that games multiply rather than a routine
+; that does anything.
+;
+; It does nothing but take time. The entire bus activity of one real call is
+; the `pha` of a, the `pla` reading it back, and the `rts`: no zero page, no
+; hardware, nothing. Ours has to be the same, because a routine that runs a
+; million times and dirties one cell is a corpus-wide bug.
+;
+; **This is the one routine where "faster is safe" is wrong.** Everywhere else
+; in this BIOS we are happy to beat the original, because a game that budgeted
+; for the slow version still fits. Here the duration IS the product: a game
+; counting these to pace a PPU access gets a shorter wait than it asked for.
+; So 131 exactly, measured min=max over 48 calls on six titles.
+;
+; It also has to be decimal-proof. Forced into the call with D=1 the real one
+; still took 131, so whatever counts inside it is not an `adc`/`sbc` chain.
+; Ours shifts instead, which cannot care.
+;
+; Exit: a, x and y preserved, N and Z from a, D and I preserved, and C and V
+; forced CLEAR whatever came in (p=$61 in came back $20).
 .org $E149
-  jmp unimplemented
+  jmp delay_131             ; 3 of the 131; the body will not fit in the ten
+                            ; bytes before the next entry point
+
+.org $FB28
+delay_131:
+  pha                       ; 3   the one bus write the real one makes
+  lda #$80                  ; 2
+@shift:
+  lsr a                     ; 2   eight shifts, seven of them branching back:
+  bne @shift                ; 3   7*(2+3) + (2+2) = 39, and no arithmetic, so
+                            ;     decimal mode cannot change the count
+  clc                       ; 2   measured clear on exit regardless of entry
+  clv                       ; 2
+  .byte $EA, $EA, $EA, $EA, $EA, $EA, $EA  ; 7 nops, 14 cycles
+  .byte $EA, $EA, $EA, $EA, $EA, $EA, $EA  ; 7 nops, 14 cycles
+  .byte $EA, $EA, $EA, $EA, $EA, $EA, $EA  ; 7 nops, 14 cycles
+  .byte $EA, $EA, $EA, $EA, $EA, $EA, $EA  ; 7 nops, 14 cycles
+  .byte $EA, $EA, $EA, $EA, $EA, $EA, $EA  ; 7 nops, 14 cycles
+  pla                       ; 4   restores a and sets N and Z from it
+  rts                       ; 6
+; 3 + 3 + 2 + 39 + 2 + 2 + 70 + 4 + 6 = 131
+.assert (delay_131_end - delay_131) == 45
+delay_131_end:
 .org $E153
   jmp unimplemented
 .org $E161
@@ -365,8 +413,180 @@ vint_wait:
   jmp unimplemented
 .org $E778
   jmp unimplemented
+; --- $E7BB: walk a VRAM write structure the caller points at inline ---------
+;
+; 18 of the 114 corpus titles call it and six are stopped on it, Zelda among
+; them. The two bytes after the `jsr` are a little-endian pointer to a
+; structure, and the routine steps its own return address over them, so it
+; comes back to jsr+5. Same convention as $E1F8 and $EBAF.
+;
+; The structure is a little language, and every part of it below was pinned by
+; poking a real one field at a time rather than inferred:
+;
+;   first byte with bit 7 SET      end. The byte itself comes back in a, so it
+;                                  is not only $FF: $80 and $BE both ended one.
+;   $4C lo hi                      push this position, continue at $hhll. The
+;                                  operand is little-endian, unlike the VRAM
+;                                  addresses below, which are big-endian.
+;   $60                            pop, and resume three bytes past the $4C.
+;   anything else                  a VRAM entry: this byte is the address high,
+;                                  then the low, then a length byte.
+;
+; The length byte splits three ways:
+;   bit 7   step the VRAM address by 32 instead of 1. $2000 is written with
+;           (shadow & ~$04) with bit 2 put back if set, and the SHADOW KEEPS
+;           IT, so the stepping outlives the call. Forced $FF=$FF wrote $FB
+;           plain and $FF with bit 7, which is what pins the mask as exactly
+;           bit 2.
+;   bit 6   repeat: ONE data byte follows and is written `count` times.
+;   0-5     the count, and zero means 64, not nothing. A forced $00 wrote
+;           $2007 exactly 64 times.
+;
+; After an entry whose address high byte is exactly $3F, and only then, it
+; writes $2006 four more times with $3F,$00 and then $00,$00. That is the
+; palette-safe reset: leaving the address inside the palette makes the PPU
+; show the palette entry instead of the backdrop. $2F, $3E and $7F were all
+; measured NOT to trigger it.
+;
+; One $2002 read happens per element, which resets the address latch, and x is
+; left holding the last one. Nothing can sensibly use that, but it costs
+; nothing to reproduce by reading into x in the first place.
+;
+; Exit: rts to jsr+5, a is the terminator so N is always set and Z clear, y is
+; zero, and the carry is incidental. $00/$01 are left pointing at the
+; terminator and $05/$06 at the caller's jsr+2.
 .org $E7BB
-  jmp unimplemented
+  jmp vram_struct
+
+.org $F320
+vram_struct:
+  tsx                       ; the inline pointer, read through the stacked
+  lda $0101,x               ; return address, which points at the jsr's last
+  sta $05                   ; byte. $05/$06 keep the pre-bump copy, measured.
+  lda $0102,x
+  sta $06
+  ldy #$01
+  lda ($05),y
+  sta $00
+  iny
+  lda ($05),y
+  sta $01
+  lda $05                   ; step the caller over the operand
+  clc
+  adc #$02
+  sta $0101,x
+  lda $06
+  adc #$00
+  sta $0102,x
+
+@element:
+  ldx PPUSTATUS             ; one per element; resets the address latch, and
+  ldy #$00                  ; leaves x holding the last value read
+  lda ($00),y
+  bpl @live                 ; any bit-7 byte ends the structure, and the
+  rts                       ; terminator itself comes back in a, so N is
+                            ; always set and Z clear. y is zero here and x
+                            ; holds the $2002 read just above.
+@live:
+  cmp #$4C
+  beq @call
+  cmp #$60
+  beq @back
+
+  ; ---- a VRAM entry ----
+  pha                       ; the address high, kept for the $3F test
+  sta PPUADDR
+  iny
+  lda ($00),y
+  sta PPUADDR
+  iny
+  lda ($00),y               ; the length byte
+  pha
+  and #$80                  ; bit 7 chooses the VRAM stepping
+  beq @step1
+  lda $FF
+  ora #$04
+  jmp @setctrl
+@step1:
+  lda $FF
+  and #$FB
+@setctrl:
+  sta $FF                   ; the shadow keeps it: measured
+  sta PPUCTRL
+  pla
+  pha                       ; the length byte, wanted twice
+  and #$3F
+  bne @count
+  lda #$40                  ; a count of zero means sixty-four
+@count:
+  tax
+  pla
+  and #$40
+  bne @repeat
+
+@copy:                      ; `count` bytes straight through
+  iny
+  lda ($00),y
+  sta PPUDATA
+  dex
+  bne @copy
+  jmp @entry_done
+
+@repeat:                    ; one byte, written `count` times
+  iny
+  lda ($00),y
+@rep:
+  sta PPUDATA
+  dex
+  bne @rep
+
+@entry_done:
+  pla                       ; the address high from the top of the entry
+  cmp #$3F
+  bne @advance
+  lda #$3F                  ; the palette-safe reset: point at $3F00, then at
+  sta PPUADDR               ; $0000, so the PPU is not left showing a palette
+  lda #$00                  ; entry in place of the backdrop
+  sta PPUADDR
+  sta PPUADDR
+  sta PPUADDR
+@advance:
+  tya                       ; y indexes the last byte consumed, so the step is
+  sec                       ; y + 1
+  adc $00
+  sta $00
+  bcc @loop
+  inc $01
+@loop:
+  jmp @element
+
+@call:
+  lda $00                   ; push this position, low byte first: measured
+  pha
+  lda $01
+  pha
+  ldy #$01
+  lda ($00),y               ; the operand IS little-endian here
+  tax
+  iny
+  lda ($00),y
+  sta $01
+  stx $00
+  jmp @element
+
+@back:
+  pla                       ; high byte first, mirroring the push
+  sta $01
+  pla
+  clc
+  adc #$03                  ; resume past the three bytes of the $4C. No
+  sta $00                   ; measured case crossed a page; carry anyway
+  bcc @loop2
+  inc $01
+@loop2:
+  jmp @element
+
+
 .org $E844
   jmp unimplemented
 .org $E86A

@@ -209,7 +209,7 @@ for the reasons above and in the script's own header.
 
 ### The routines
 
-Eleven of the forty entry points are implemented. The other 29 are stubs that put
+Thirteen of the forty entry points are implemented. The other 27 are stubs that put
 **NO ROUTINE** on the screen and stop, which is worth its 111 bytes: Zelda hands
 over correctly, runs its own code, jumps to `$EA84` and would otherwise
 disappear into the fill, looking like a hundred different bugs instead of one
@@ -228,6 +228,8 @@ missing routine. `fdstrace` names the address.
 | `$E1F8` | 41 | load files from disk | written; polls where the original takes the byte IRQ |
 | `$EBAF` | 29 | copy 16-byte units from RAM to video memory | faster: ~282 cycles a unit against 362 |
 | `$E1B2` | 18 | wait for the next vblank NMI | and it corrected the NMI handler, below |
+| `$E7BB` | 18 | walk a VRAM write structure the caller points at | a little language, measured field by field |
+| `$E149` | 17 | delay exactly 131 cycles | cycle-exact, and the one place faster is WRONG |
 
 **Where the cycle counts do not match, ours is faster, never slower.** That is
 deliberate. A game that runs one of these inside vblank has more room than it
@@ -253,23 +255,30 @@ question. Measured 2026-10-01, with ten routines written:
 | entry | titles that call it | titles STUCK on it |
 |---|---|---|
 | `$E149` | 17 | **15** |
-| `$E161` | 13 | **9**, now 10 |
+| `$E161` | 13 | **9** |
 | `$EA4C` | 17 | **8** |
 | `$E7BB` | 18 | **6** |
 | `$EAFD` | 11 | **5** |
 | `$E9B1` | 10 | **4** |
 | `$E1B2` | 18 | **4** |
 
-The two the census ranked joint first, `$E1B2` and `$E7BB`, block four and six
-titles. `$E149`, ranked below both, blocks fifteen. Popularity and blocking are
+The two the census ranked joint first, `$E1B2` and `$E7BB`, blocked four and six
+titles. `$E149`, ranked below both, blocked fifteen. Popularity and blocking are
 different numbers and only one of them is a work queue.
 
-**50 of the 114 reach their own code and never ask for a routine we have not
-written**, in an unattended 1800-frame run with START mashed. One is stuck in a
-BIOS loop and 63 are stopped by a missing routine. Fifty is not "fifty titles
-play correctly": an unattended run of thirty seconds reaches what it reaches,
-and a game that needs a routine only when you open its menu will not have asked
-yet.
+Re-measured after writing those three, which is the point of a queue that
+updates:
+
+| entry | titles stuck on it now |
+|---|---|
+| `$EA4C` | **12** |
+| `$E161` | **10** |
+
+**65 of the 114 now reach their own code without asking for a routine we have
+not written**, up from 50, in an unattended 1800-frame run with START mashed.
+49 are still stopped by a missing routine. Sixty-five is NOT "sixty-five titles
+play correctly": thirty seconds of unattended running reaches what it reaches,
+and a game that needs a routine only when you open its menu has not asked yet.
 
 ### How a routine gets worked out
 
@@ -290,8 +299,7 @@ what comes back. That is the oracle at the level the work happens at.
 2. ~~Baseline smoke on the real BIOS, one ledger row per title.~~ The census
    rows and `fds-hle-check.py` are this.
 3. ~~HLE boot with our own graphics and no BIOS file present.~~ Done 2026-09-29.
-4. Routine by routine, each held against the real BIOS. Nine of forty done;
-   the queue by usage is `$E1B2` (18 titles, and what Adian no Tsue asks for
-   first), `$E7BB` (18, and Zelda's next blocker), `$E149` (17), `$EA4C` (17),
-   `$E161` (13). None of them is measured yet.
+4. Routine by routine, each held against the real BIOS. Thirteen of forty done;
+   the queue by BLOCKING is `$EA4C` (12 titles), then `$E161` (10). Neither is
+   measured yet.
 5. Cycle accounting per routine, starting from the `cyc/call` column.
