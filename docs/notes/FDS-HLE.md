@@ -198,7 +198,7 @@ for the reasons above and in the script's own header.
 
 ### The routines
 
-Nine of the forty entry points are implemented. The other 31 are stubs that put
+Ten of the forty entry points are implemented. The other 30 are stubs that put
 **NO ROUTINE** on the screen and stop, which is worth its 111 bytes: Zelda hands
 over correctly, runs its own code, jumps to `$EA84` and would otherwise
 disappear into the fill, looking like a hundred different bugs instead of one
@@ -227,6 +227,37 @@ Four of the seven came out cycle-exact without being aimed at, which is the
 strongest evidence available that the reconstructions are right rather than
 merely adequate. `$EA84` in particular lands its `rts` on `$EAD1`, filling
 precisely the 78 bytes between its entry point and the next one.
+
+### Which routine to write next, which is not what the census says
+
+The census ranks entry points by how many titles CALL them. That is the right
+order to measure in and the wrong order to implement in, because a title that
+calls five routines is stopped by whichever one it reaches FIRST, and the other
+four buy it nothing until that one exists.
+
+`scripts/fds-blockers.py` runs every corpus disk on OUR BIOS and asks the other
+question. Measured 2026-10-01, with ten routines written:
+
+| entry | titles that call it | titles STUCK on it |
+|---|---|---|
+| `$E149` | 17 | **15** |
+| `$E161` | 13 | **9** |
+| `$EA4C` | 17 | **8** |
+| `$E7BB` | 18 | **6** |
+| `$EAFD` | 11 | **5** |
+| `$E9B1` | 10 | **4** |
+| `$E1B2` | 18 | **4** |
+
+The two the census ranked joint first, `$E1B2` and `$E7BB`, block four and six
+titles. `$E149`, ranked below both, blocks fifteen. Popularity and blocking are
+different numbers and only one of them is a work queue.
+
+**50 of the 114 reach their own code and never ask for a routine we have not
+written**, in an unattended 1800-frame run with START mashed. One is stuck in a
+BIOS loop and 63 are stopped by a missing routine. Fifty is not "fifty titles
+play correctly": an unattended run of thirty seconds reaches what it reaches,
+and a game that needs a routine only when you open its menu will not have asked
+yet.
 
 ### How a routine gets worked out
 

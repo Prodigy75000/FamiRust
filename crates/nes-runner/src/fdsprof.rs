@@ -95,6 +95,42 @@ fn reg(name: &str, vals: impl Iterator<Item = u8>) -> String {
     }
 }
 
+/// One thing to override at the instant of the call: a register or a byte of
+/// RAM. This is how an argument's meaning gets pinned: force it to a value no
+/// caller passes and watch what changes.
+enum Force {
+    A(u8),
+    X(u8),
+    Y(u8),
+    P(u8),
+    Mem(u16, u8),
+}
+
+/// Parse `a=10,x=00,ff=1e,0100=80`: the keys `a x y p` are registers, anything
+/// else is a hex address. Values are hex.
+fn parse_forces(spec: &str) -> Result<Vec<Force>, String> {
+    spec.split(',')
+        .filter(|s| !s.is_empty())
+        .map(|kv| {
+            let (k, v) = kv
+                .split_once('=')
+                .ok_or_else(|| format!("--force wants k=v, got {kv:?}"))?;
+            let val = u8::from_str_radix(v, 16).map_err(|_| format!("bad hex value {v:?}"))?;
+            Ok(match k {
+                "a" => Force::A(val),
+                "x" => Force::X(val),
+                "y" => Force::Y(val),
+                "p" => Force::P(val),
+                addr => Force::Mem(
+                    u16::from_str_radix(addr.trim_start_matches('$'), 16)
+                        .map_err(|_| format!("bad hex address {addr:?}"))?,
+                    val,
+                ),
+            })
+        })
+        .collect()
+}
+
 /// Profile up to `want` calls to `target` made from outside the BIOS window.
 fn profile(
     disk: &[u8],
@@ -102,6 +138,7 @@ fn profile(
     target: u16,
     want: usize,
     max_frames: u64,
+    forces: &[Force],
 ) -> Result<Vec<Call>, String> {
     let mut nes = nes_core::Nes::from_fds(disk, bios).map_err(|e| format!("{e:?}"))?;
     let mut calls = Vec::new();
@@ -111,6 +148,17 @@ fn profile(
         // Entered at the routine, and from game code rather than from the BIOS
         // calling itself.
         if pc == target && prev < BIOS_BASE {
+            // Overrides go in first so the reported `in` row shows what the
+            // routine actually saw, forced or not.
+            for f in forces {
+                match *f {
+                    Force::A(v) => nes.cpu.a = v,
+                    Force::X(v) => nes.cpu.x = v,
+                    Force::Y(v) => nes.cpu.y = v,
+                    Force::P(v) => nes.cpu.p = v,
+                    Force::Mem(a, v) => nes.dbg_poke(a, v),
+                }
+            }
             let (a_in, x_in, y_in, p_in, sp_in) =
                 (nes.cpu.a, nes.cpu.x, nes.cpu.y, nes.cpu.p, nes.cpu.sp);
             let start = nes.dbg_cycles();
@@ -225,6 +273,9 @@ fn usage() -> ExitCode {
     eprintln!("  --calls N    how many calls to record (default 8)");
     eprintln!("  --trace      print the access log of the first call, in order");
     eprintln!("  --trace-max N  how much of it to print (default 80; a load is long)");
+    eprintln!("  --force k=v,..  override state at the instant of each call; keys");
+    eprintln!("               a x y p are registers, anything else a hex address");
+    eprintln!("               (e.g. --force a=00,ff=1e,0100=80). Values are hex.");
     eprintln!("  $FDS_BIOS    the real disksys.rom; this tool measures what it does");
     ExitCode::FAILURE
 }
@@ -238,6 +289,7 @@ fn main() -> ExitCode {
     let mut json_out: Option<String> = None;
     let mut trace = false;
     let mut trace_max = 80usize;
+    let mut forces: Vec<Force> = Vec::new();
     while let Some(a) = args.next() {
         match a.as_str() {
             "--routine" => {
@@ -258,6 +310,16 @@ fn main() -> ExitCode {
             },
             "--json" => match args.next() {
                 Some(v) => json_out = Some(v),
+                None => return usage(),
+            },
+            "--force" => match args.next() {
+                Some(v) => match parse_forces(&v) {
+                    Ok(f) => forces.extend(f),
+                    Err(e) => {
+                        eprintln!("fdsprof: {e}");
+                        return usage();
+                    }
+                },
                 None => return usage(),
             },
             "--trace" => trace = true,
@@ -301,7 +363,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let calls = match profile(&disk, &bios, target, calls_wanted, frames) {
+    let calls = match profile(&disk, &bios, target, calls_wanted, frames, &forces) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("{path}: {e}");
@@ -470,6 +532,19 @@ mod tests {
         assert_eq!(region(0xdff5), "prgram");
         assert_eq!(region(0x4025), "fds");
         assert_eq!(region(0x0100), "stack");
+    }
+
+    #[test]
+    fn forces_tell_registers_from_addresses() {
+        // `a` is the accumulator; `0a` and `ff` are addresses. Getting this
+        // wrong would silently poke $000A instead of loading A.
+        let f = parse_forces("a=10,0a=20,ff=1e,0100=80").unwrap();
+        assert!(matches!(f[0], Force::A(0x10)));
+        assert!(matches!(f[1], Force::Mem(0x000a, 0x20)));
+        assert!(matches!(f[2], Force::Mem(0x00ff, 0x1e)));
+        assert!(matches!(f[3], Force::Mem(0x0100, 0x80)));
+        assert!(parse_forces("a=zz").is_err());
+        assert!(parse_forces("nonsense").is_err());
     }
 
     #[test]
