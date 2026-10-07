@@ -425,13 +425,21 @@ pub extern "C" fn retro_deinit() {
     with_state(|s| *s = State::new());
 }
 
+#[cfg(test)]
+mod memory_map_tests;
+
 #[no_mangle]
 pub unsafe extern "C" fn retro_get_system_info(info: *mut retro_system_info) {
     if info.is_null() {
         return;
     }
     (*info).library_name = c"FamiRust".as_ptr();
-    (*info).library_version = c"0.2.2".as_ptr();
+    // From the package version rather than a literal. It used to be a literal,
+    // and went on saying 0.2.2 after the crates were bumped: the one place the
+    // version is visible to a front-end, to a bug report and to the Android
+    // deploy script's build notes, was the one place it did not change.
+    (*info).library_version =
+        concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr() as *const c_char;
     (*info).valid_extensions = c"nes|fds".as_ptr();
     (*info).need_fullpath = false;
     (*info).block_extract = false;

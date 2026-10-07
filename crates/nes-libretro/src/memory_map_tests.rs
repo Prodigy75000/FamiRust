@@ -17,6 +17,13 @@
 //! These are FFI tests: they drive the exported C entry points the way a
 //! front-end does, because the defect lived exactly in the gap between what the
 //! core believed it sent and what a front-end actually received.
+//!
+//! They live INSIDE the crate rather than in `tests/` on purpose. An
+//! integration test needs the crate to publish an `rlib`, and adding `rlib`
+//! beside `cdylib` turns LTO off for the shipped core: measured at 1,387,793
+//! bytes against 577,690 for the same code. An integration test would link
+//! that rlib rather than the DLL anyway, so it exercises exactly what these do
+//! and costs 800 KB of shipped core to do it. Do not move this back.
 
 use std::ffi::c_void;
 use std::sync::Mutex;
@@ -108,8 +115,8 @@ fn load(rom: &[u8]) {
     SEEN.lock().unwrap().clear();
     *TIMES.lock().unwrap() = 0;
     unsafe {
-        nescore_libretro::retro_set_environment(Some(front_end));
-        nescore_libretro::retro_init();
+        crate::retro_set_environment(Some(front_end));
+        crate::retro_init();
         let info = GameInfo {
             path: std::ptr::null(),
             data: rom.as_ptr() as *const c_void,
@@ -117,7 +124,7 @@ fn load(rom: &[u8]) {
             meta: std::ptr::null(),
         };
         assert!(
-            nescore_libretro::retro_load_game(&info as *const GameInfo as *const _),
+            crate::retro_load_game(&info as *const GameInfo as *const _),
             "the test cartridge should load"
         );
     }
@@ -180,7 +187,7 @@ fn the_map_is_published_again_after_a_reset() {
     let first = SEEN.lock().unwrap().clone();
     assert_eq!(*TIMES.lock().unwrap(), 1);
 
-    nescore_libretro::retro_reset();
+    crate::retro_reset();
 
     assert_eq!(
         *TIMES.lock().unwrap(),

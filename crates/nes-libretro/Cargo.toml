@@ -1,6 +1,6 @@
 [package]
 name = "nes-libretro"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "libretro C ABI front-end for the FamiRust clean-room NES / Famicom core."
@@ -14,7 +14,7 @@ name = "nescore_libretro"
 # between what the core believed it sent and what a front-end received, and
 # that gap is only testable by calling the exported functions the way a
 # front-end does. The extra artifact is not shipped.
-crate-type = ["cdylib", "rlib"]
+crate-type = ["cdylib"]
 
 [dependencies]
 nes-core = { path = "../nes-core" }
