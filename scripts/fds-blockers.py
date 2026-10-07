@@ -35,6 +35,13 @@ HLE = "firmware/fds-hle/fds-hle.bin"
 
 # `.org $XXXX` on one line and `jmp unimplemented` on the next is a stub: an
 # entry point we owe. Anything else at an .org is a routine we have written.
+#
+# This UNDERCOUNTS by one, knowingly. $E237 is also unwritten, but it sits two
+# bytes before $E239 and so has no room for a `jmp` of its own; it carries a
+# single `lda #0` and falls through into $E239's stub. A game reaching it still
+# gets NO ROUTINE and `fdstrace` still names it, but it will not appear in the
+# owed list below, and a title stopped there would be reported as having
+# reached no stub at all. No corpus title does, as of 2026-10-07.
 STUB = re.compile(r"^\.org \$([0-9A-Fa-f]{4})\s*$")
 
 
