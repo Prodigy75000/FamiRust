@@ -72,7 +72,15 @@
 ; the three that a cold boot and a running game cannot do without; the other 37
 ; entry points are step four.
 
-.raw base=$E000 size=8192
+; fill=$02 is a JAM opcode, deliberately. The gaps between routines are what a
+; game lands on when it calls one of the entry points we have not written and
+; the census never saw, so there is no stub there to say NO ROUTINE. The
+; default $FF is a three-byte illegal opcode: Kaettekita Mario Bros. jumped
+; into the gap at $E3xx, walked twelve instructions through it, and jammed at
+; $E3EA on a byte belonging to an unrelated stub's operand, which names nothing
+; useful. A JAM stops on the spot, so `fdstrace` reports the address the game
+; actually asked for.
+.raw base=$E000 size=8192 fill=$02
 
 ; ---------------------------------------------------------------------------
 ; Hardware
@@ -1083,8 +1091,65 @@ set_scroll:
   lda $FF
   sta PPUCTRL
   rts
+; --- $EAFD: jump through a table of addresses written after the call --------
+;
+; 11 of the 114 corpus titles call it, 5713 calls between them, and 7 titles
+; were stopped on it. A jump-table dispatcher, and the shape games use for a
+; state machine: `jsr $EAFD` with `a` holding the state, followed inline by a
+; list of 16-bit addresses.
+;
+;     lda state
+;     jsr $EAFD
+;     .word handler_0, handler_1, handler_2, ...
+;
+; `a` is the index. It doubles it, pulls its OWN return address off the stack,
+; and reads the selected entry from the table through that pointer, so the
+; byte at offset 2a+1 past the return address is the low byte of the target
+; and 2a+2 the high byte.
+;
+; **It consumes the call frame.** Two `pla`s and no push, so the stack comes
+; back two bytes shallower and the target runs as though it had been called by
+; whoever called the caller. A target's own `rts` returns past the `jsr $EAFD`
+; entirely. This is a tail call, not a call.
+;
+; There is no bounds check of any kind, which is measured rather than assumed:
+; forced `a=$80` doubles to `$00` and quietly dispatches entry 0 with carry
+; set, and forced `a=$FF` reads offset `$FF` and then wraps `y` to `$00` and
+; takes the high byte from offset 0 of the same page. A game that passes a
+; state number past the end of its own table jumps wherever the bytes there
+; happen to point, on the original exactly as here.
+;
+; Exit, as the target sees it: `a` = the high byte of the target address, `x`
+; = the low byte, `y` = 2a+2 from the entry value, and `$0000`/`$0001` hold the
+; target. N and Z come from that high byte. **Carry is bit 7 of the `a` that
+; came in**, which is the doubling leaking into the flags rather than anything
+; meaningful, and it has to be reproduced because it is what the original
+; leaves. V, D and I are preserved.
+;
+; 45 cycles, min=max across all callers and every forced index. Ours is the
+; same 45, which was not aimed at: the count fell out of the instruction
+; sequence the access trace forced, and matching it exactly is the evidence
+; that the sequence is right rather than merely equivalent.
 .org $EAFD
-  jmp unimplemented
+jump_table:
+  asl a                     ; 2   index -> byte offset; carry is bit 7 of a,
+                            ;     which the original leaks too
+  tay                       ; 2
+  iny                       ; 2   y = 2a+1, the low byte of the entry
+  pla                       ; 4   our own return address, consumed
+  sta $00                   ; 3
+  pla                       ; 4
+  sta $01                   ; 3
+  lda ($00),y               ; 5   low byte of the target
+  tax                       ; 2
+  iny                       ; 2
+  lda ($00),y               ; 5   high byte, and N and Z come from here
+  sta $01                   ; 3
+  stx $00                   ; 3
+  jmp ($0000)               ; 5
+; 2+2+2+4+3+4+3+5+2+2+5+3+3+5 = 45
+.assert (jump_table_end - jump_table) == 22
+jump_table_end:
 ; --- $EBAF: copy 16-byte units from RAM into video memory ------------------
 ;
 ; 29 of the 114 corpus titles call it. Measured with the profiler plus forced

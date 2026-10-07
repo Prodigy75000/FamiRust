@@ -310,13 +310,27 @@ fn cycles_of_call(disk: &[u8], bios: &[u8], addr: u16) -> u64 {
 fn cycles_of_call_after(disk: &[u8], bios: &[u8], addr: u16, setup: &[u8]) -> u64 {
     let mut p = Prog::default();
     p.raw(setup).jsr(addr).record_and_halt();
+    cycles_of_call_in(disk, bios, addr, &p.0)
+}
+
+/// Cycles spent inside one call to `addr`, from a caller the test builds whole.
+///
+/// Needed by anything whose call site is not simply `jsr addr`: a routine that
+/// reads inline arguments cannot be measured by a harness that appends its own
+/// bytes after the `jsr`, because those bytes become the arguments.
+fn cycles_of_call_in(disk: &[u8], bios: &[u8], addr: u16, prog: &[u8]) -> u64 {
+    let p = Prog(prog.to_vec());
     let mut nes = boot_to_handover(disk, bios);
     for (i, b) in p.0.iter().enumerate() {
         nes.dbg_poke(PROG + i as u16, *b);
     }
     nes.dbg_set_pc(PROG);
+    // Deadlined like the loop below: a program that never reaches the routine
+    // should fail this test rather than hang the whole suite.
+    let reach_by = nes.dbg_cycles() + 2 * 29_781;
     while nes.dbg_pc() != addr {
         nes.step();
+        assert!(nes.dbg_cycles() < reach_by, "the caller never reached ${addr:04x}");
     }
     let sp_in = nes.cpu.sp;
     let start = nes.dbg_cycles();
@@ -1691,4 +1705,197 @@ fn the_generator_handles_the_longest_register_a_real_caller_asks_for() {
     assert_eq!(r.a, 0x00, "the feedback for this seed is 0");
     assert_eq!(r.x, SEED as u8 + 13);
     assert_eq!(r.y, 0x00);
+}
+
+// --- $EAFD, the jump-table dispatcher ---------------------------------------
+
+/// A caller for `$EAFD`: `lda #index`, `jsr $EAFD`, then a table of `entries`
+/// addresses, then one landing byte per entry.
+///
+/// Entry `i` points at its own `nop`, and the pad runs straight into a
+/// `record_and_halt`, so whichever entry was taken falls through to the same
+/// recorder. That matters because the routine leaves the target address in
+/// `a` and `x`: the recorded registers name the entry that was dispatched,
+/// which is the thing under test, without the targets needing to differ.
+///
+/// Returns the program and the address of the first landing byte.
+fn dispatch_prog(index: u8, entries: usize) -> (Vec<u8>, u16) {
+    dispatch_prog_at(index, entries, PROG)
+}
+
+/// As [`dispatch_prog`], but for a caller that will sit at `base` rather than
+/// at [`PROG`]. The table holds absolute addresses, so a program with anything
+/// in front of it has to be built knowing where it will land.
+fn dispatch_prog_at(index: u8, entries: usize, base: u16) -> (Vec<u8>, u16) {
+    let mut p = Prog::default();
+    p.lda(index);
+    p.jsr(0xeafd);
+    let table_at = base + p.0.len() as u16;
+    let pad_at = table_at + 2 * entries as u16;
+    for i in 0..entries {
+        p.0.extend_from_slice(&(pad_at + i as u16).to_le_bytes());
+    }
+    p.0.extend(std::iter::repeat(0xea).take(entries)); // nop per entry
+    p.record_and_halt();
+    (p.0, pad_at)
+}
+
+#[test]
+fn the_dispatcher_at_eafd_jumps_to_the_entry_the_accumulator_picks() {
+    // `a` is the index into a table of 16-bit addresses written inline after
+    // the `jsr`. The routine doubles it, so entry `i` is at offset 2i+1 past
+    // the return address.
+    //
+    // Each entry lands somewhere one byte apart, so the target address the
+    // routine reports back in `a` and `x` says exactly which one it took. An
+    // off-by-one in the doubling, or reading the table from the wrong base,
+    // moves that address and fails here.
+    if a_disk().is_none() {
+        return skipped();
+    }
+    for i in 0..4u8 {
+        let (prog, pad_at) = dispatch_prog(i, 4);
+        let want = pad_at + u16::from(i);
+        let Some((r, _)) = both(&prog, 10) else { return skipped() };
+        assert!(r.reached, "entry {i} never arrived anywhere that records");
+        assert_eq!(r.x, want as u8, "entry {i}: low byte of the target");
+        assert_eq!(r.a, (want >> 8) as u8, "entry {i}: high byte of the target");
+        assert_eq!(r.y, 2 * i + 2, "y should come out as 2a+2");
+    }
+}
+
+#[test]
+fn the_dispatcher_consumes_the_call_frame_so_the_target_tail_returns() {
+    // Two `pla`s and no push: the stack comes back two bytes shallower and the
+    // target runs as though it had been called by whoever called the caller.
+    //
+    // So a target that executes `rts` returns past the `jsr $EAFD` entirely,
+    // to the instruction after the OUTER call. This is the test that says so:
+    // an implementation that left the frame alone would send that `rts` into
+    // the address table and off into the weeds.
+    if a_disk().is_none() {
+        return skipped();
+    }
+    let mut p = Prog::default();
+    // The outer call, with its target filled in afterwards: the inner routine
+    // sits past the recorder, and the recorder's length is the builder's
+    // business rather than a number to guess at here.
+    p.jsr(0x0000);
+    let operand = p.0.len() - 2;
+    p.record_and_halt(); // where a working tail call lands
+    let inner_at = PROG + p.0.len() as u16;
+    p.0[operand] = inner_at as u8;
+    p.0[operand + 1] = (inner_at >> 8) as u8;
+    // inner: lda #0 : jsr $EAFD : .word target ... target: rts
+    p.lda(0x00);
+    p.jsr(0xeafd);
+    let target = PROG + p.0.len() as u16 + 2;
+    p.0.extend_from_slice(&target.to_le_bytes());
+    p.0.push(0x60); // rts
+
+    let Some((r, _)) = both(&p.0, 10) else { return skipped() };
+    assert!(
+        r.reached,
+        "the target's rts did not come back to the outer caller, so the call \
+         frame was not consumed"
+    );
+    assert_eq!(r.a, (target >> 8) as u8, "a still names the dispatched target");
+    assert_eq!(r.x, target as u8);
+}
+
+#[test]
+fn the_dispatcher_leaves_the_target_address_in_zero_page() {
+    // $0000 and $0001 are the vector it jumps through, and it does not tidy
+    // them up afterwards. A game is entitled to find the target address there.
+    if a_disk().is_none() {
+        return skipped();
+    }
+    let (prog, pad_at) = dispatch_prog(2, 4);
+    let want = pad_at + 2;
+    let Some((r, mem)) = both_watching(&prog, 10, &[0x0000, 0x0001]) else {
+        return skipped();
+    };
+    assert!(r.reached);
+    assert_eq!(
+        mem,
+        vec![want as u8, (want >> 8) as u8],
+        "$0000/$0001 should hold the dispatched address, little-endian"
+    );
+}
+
+#[test]
+fn the_dispatcher_carries_bit_seven_of_the_index_and_preserves_the_rest() {
+    // Carry out is bit 7 of the index, which is the doubling leaking into the
+    // flags rather than a status of any kind. It is reproduced because it is
+    // what the original leaves, and a caller that happened to branch on carry
+    // afterwards would see the original's answer.
+    //
+    // N and Z come from the target's high byte. V, D and I pass through.
+    if a_disk().is_none() {
+        return skipped();
+    }
+    for (index, want_carry) in [(0x00u8, 0u8), (0x01, 0), (0x02, 0)] {
+        // Force the flags in, so "preserved" means something. These run before
+        // the dispatcher's own `lda #index`, and the table holds absolute
+        // addresses, so the dispatch half is built knowing it sits after them.
+        let mut p = Prog::default();
+        p.poke(0x00fd, 0x40);
+        p.0.extend_from_slice(&[0x24, 0xfd]); // bit $fd, bit 6 sets V
+        p.0.push(0xf8); // sed
+        p.0.push(0x78); // sei
+        p.0.push(0x38); // sec, so a cleared carry is visible
+        let (prog, _) = dispatch_prog_at(index, 4, PROG + p.0.len() as u16);
+        p.0.extend_from_slice(&prog);
+        let Some((r, _)) = both(&p.0, 10) else { return skipped() };
+        assert!(r.reached, "index {index} never arrived");
+        assert_eq!(r.p & 0x01, want_carry, "carry for index ${index:02x}");
+        assert_eq!(r.p & 0x40, 0x40, "V should be preserved");
+        assert_eq!(r.p & 0x08, 0x08, "D should be preserved");
+        assert_eq!(r.p & 0x04, 0x04, "I should be preserved");
+        assert_eq!(
+            r.p & 0x80 != 0,
+            r.a & 0x80 != 0,
+            "N should come from the target's high byte"
+        );
+    }
+}
+
+#[test]
+fn an_index_with_bit_seven_set_wraps_and_is_not_range_checked() {
+    // Measured on the original: forced $80 doubles to $00 and quietly
+    // dispatches entry 0 with carry set. There is no bounds check anywhere,
+    // and a reimplementation that added one would be kinder and wrong.
+    if a_disk().is_none() {
+        return skipped();
+    }
+    let (prog, pad_at) = dispatch_prog(0x80, 4);
+    let Some((r, _)) = both(&prog, 10) else { return skipped() };
+    assert!(r.reached, "$80 should dispatch entry 0 rather than fail");
+    assert_eq!(r.x, pad_at as u8, "it should land on entry 0");
+    assert_eq!(r.y, 0x02, "y = 2a+2 with the doubling wrapped");
+    assert_eq!(r.p & 0x01, 0x01, "and carry carries bit 7 out of the doubling");
+}
+
+#[test]
+fn the_dispatcher_takes_the_same_forty_five_cycles_as_the_real_bios() {
+    // 45, min=max across every caller and every forced index. Ours is the same
+    // 45, which was not aimed at: the count fell out of the instruction
+    // sequence the access trace forced. Matching exactly is evidence the
+    // sequence is right rather than merely equivalent.
+    let Some(disk) = a_disk() else { return skipped() };
+    for i in [0u8, 3] {
+        let (prog, _) = dispatch_prog(i, 4);
+        assert_eq!(
+            cycles_of_call_in(&disk, &[], 0xeafd, &prog),
+            45,
+            "our own cost at index {i}"
+        );
+        if let Some(real) = real_bios() {
+            assert_eq!(
+                cycles_of_call_in(&disk, &real, 0xeafd, &prog),
+                45,
+                "the real one should agree at index {i}"
+            );
+        }
+    }
 }

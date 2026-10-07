@@ -50,6 +50,10 @@ struct Asm {
     configured: bool,
     /// `.raw` was used, so the image is emitted bare with no iNES header.
     raw: bool,
+    /// What untouched bytes of the image hold. Set by `.raw fill=`, and kept
+    /// across passes on purpose: pass two wipes the image before any directive
+    /// has run, so a fill read out of the source would not be known yet.
+    fill: u8,
 
     section: Section,
     pc: u16,
@@ -80,6 +84,7 @@ pub fn assemble(entry: &std::path::Path, opts: &Options) -> Result<Output, Strin
         vertical_mirroring: false,
         configured: false,
         raw: false,
+        fill: 0xff,
         section: Section::Prg,
         pc: 0x8000,
         chr_pos: 0,
@@ -104,7 +109,8 @@ pub fn assemble(entry: &std::path::Path, opts: &Options) -> Result<Output, Strin
         a.pc = 0x8000;
         if pass == 2 {
             // Keep labels from pass one; wipe the images so pass two writes clean.
-            a.prg.iter_mut().for_each(|b| *b = 0xff);
+            let f = a.fill;
+            a.prg.iter_mut().for_each(|b| *b = f);
             a.chr.iter_mut().for_each(|b| *b = 0x00);
             a.prg_written.iter_mut().for_each(|b| *b = false);
         }
@@ -523,6 +529,13 @@ impl Asm {
     fn d_raw(&mut self, args: &str) -> Result<(), String> {
         let mut base: Option<i64> = None;
         let mut size: Option<i64> = None;
+        // What the gaps between routines hold. $FF by default, which is what a
+        // blank EPROM reads as, but a replacement firmware wants a byte that
+        // STOPS rather than one that runs: $FF is a three-byte illegal opcode,
+        // so a game jumping at a routine that is not there walks through the
+        // gap for a dozen instructions and jams somewhere unrelated to where
+        // it asked. See `fill=` in firmware/fds-hle/src/main.s.
+        let mut fill: i64 = i64::from(self.fill);
         for field in args.split_whitespace() {
             let (k, v) = field
                 .split_once('=')
@@ -531,6 +544,12 @@ impl Asm {
             match k {
                 "base" => base = Some(n),
                 "size" => size = Some(n),
+                "fill" => {
+                    if !(0..=0xff).contains(&n) {
+                        return Err(format!(".raw fill ${n:X} is not a byte"));
+                    }
+                    fill = n;
+                }
                 other => return Err(format!("unknown .raw field {other}")),
             }
         }
@@ -544,8 +563,9 @@ impl Asm {
                 ".raw size {size} does not fit at ${base:04X} (would run past $FFFF)"
             ));
         }
+        self.fill = fill as u8;
         if self.pass == 1 {
-            self.prg = vec![0xff; size as usize];
+            self.prg = vec![fill as u8; size as usize];
             self.chr = Vec::new();
             self.prg_written = vec![false; size as usize];
         }

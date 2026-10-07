@@ -70,3 +70,49 @@ PC mid-delay would see `$FB28+` where the real BIOS shows `$E149-$E152`. No
 corpus title is known to do that, but it is the one observable difference our
 trampoline layout creates, and it is the reason to prefer placing a body inline
 when it fits.
+
+---
+
+## Kaettekita Mario Bros. jams, and it is not `$EAFD`
+
+The one corpus title whose verdict is HALT rather than a clean NO ROUTINE, as
+of 2026-10-07. Worth writing down because the surface symptom points at the
+wrong place.
+
+It used to stop at `$EAFD` with NO ROUTINE. With the dispatcher written it
+gets further and then jams. The dispatcher is not at fault: profiled under both
+BIOSes its four calls agree exactly, same registers in and out, same 45 cycles.
+
+`fdstrace` now reports where a jam happened and the dozen addresses it came
+through. For this title:
+
+    jammed at $e3c3, reached via $e19f $e1a1 $e1a3 $e1a6 $e1a9 $e1aa $e1ab
+                                 $e1ac $e1ad $e1b0 $e1b1 $e3c2
+
+That trail is our own NMI handler's `@none` path at `$E19D`, the one that
+unwinds a parked `$E1B2` wait: four `pla`s, `sta $0100`, a fifth `pla`, and an
+`rts`. The `rts` at `$E1B1` returns to `$E3C2`, which is gap. So the handler
+took the "a `$E1B2` wait is parked" branch when no wait was parked, and
+unwound a stack frame that was not there.
+
+**The divergence is upstream of that.** Under the real BIOS this title takes no
+interrupts at all and the FDS timer IRQ is never enabled; under ours the timer
+IRQ is on and `$E1C7` is entered 36,937 times in 600 frames. The real run also
+calls **`$EC22` 1386 times** and ours never reaches it once, so the likeliest
+reading is that `$EC22` is what services or disables that timer, and without it
+the game is driven into a state the real BIOS never leaves it in.
+
+**A separate real defect, found while reading this.** Our `$E1C7` is:
+
+    bit $0101
+    bpl @none
+    jmp (VEC_IRQ)
+
+which hands the interrupt to the game for `$0101` of `$80` as well as `$C0`.
+Only `$C0` is the game's. `$80` is the real BIOS's own transfer path, measured
+at 164 cycles and reading `$4030`. Fixing it properly means implementing that
+path rather than just tightening the test, so it is written down here rather
+than half-done.
+
+Next step is to profile `$EC22`, which is also the last blocker Youkai Yashiki
+sits on.

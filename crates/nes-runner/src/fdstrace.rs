@@ -355,6 +355,12 @@ fn main() -> ExitCode {
 
     let tail_from = frames.saturating_sub(TAIL_FRAMES);
     let mut halted = false;
+    // Where it jammed, and the handful of addresses it came through to get
+    // there. A HALT says the machine ran off into bytes that are not code; the
+    // verdict alone cannot say whether that is a missing routine or a routine
+    // of ours sending a game astray, and the trail is what separates them.
+    let mut halt_pc = 0u16;
+    let mut recent: std::collections::VecDeque<u16> = std::collections::VecDeque::new();
 
     while nes.dbg_frame() < frames {
         let frame = nes.dbg_frame();
@@ -367,6 +373,12 @@ fn main() -> ExitCode {
         }
 
         let pc = nes.dbg_pc();
+        if recent.back() != Some(&pc) {
+            if recent.len() == 12 {
+                recent.pop_front();
+            }
+            recent.push_back(pc);
+        }
         let inside = pc >= BIOS_BASE;
         nes.dbg_census_ctx(inside);
         if inside {
@@ -432,6 +444,7 @@ fn main() -> ExitCode {
 
         if nes.dbg_halted() {
             halted = true;
+            halt_pc = nes.dbg_pc();
             break;
         }
     }
@@ -478,6 +491,10 @@ fn main() -> ExitCode {
         sides,
         v.as_str()
     );
+    if halted {
+        let trail: Vec<String> = recent.iter().map(|a| format!("${a:04x}")).collect();
+        println!("  jammed at ${halt_pc:04x}, reached via {}", trail.join(" "));
+    }
     println!(
         "  vectors: nmi ${:04x}  reset ${:04x}  irq ${:04x}",
         vectors.nmi, vectors.reset, vectors.irq
