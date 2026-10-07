@@ -264,13 +264,52 @@ fn both(prog: &[u8], frames: u64) -> Option<(Outcome, nes_core::Nes)> {
     Some((ours, nes))
 }
 
+/// Like [`both`], but also hands back the bytes at `watch` from each machine
+/// and requires those to agree too.
+///
+/// Registers alone are not enough for a routine whose product is in memory. A
+/// generator could return the right `A`, `X`, `Y` and flags while shifting the
+/// wrong bits into the caller's buffer.
+fn both_watching(prog: &[u8], frames: u64, watch: &[u16]) -> Option<(Outcome, Vec<u8>)> {
+    let disk = a_disk()?;
+    let (ours, mut nes) = run(&disk, &[], prog, frames);
+    let mine: Vec<u8> = watch.iter().map(|a| nes.peek(*a)).collect();
+    if let Some(real) = real_bios() {
+        let (theirs, mut their_nes) = run(&disk, &real, prog, frames);
+        assert!(
+            theirs.reached,
+            "the real BIOS never finished the test program, so this is measuring \
+             the harness rather than the routine"
+        );
+        assert_eq!(ours, theirs, "ours (left) disagrees with the real BIOS (right)");
+        let hers: Vec<u8> = watch.iter().map(|a| their_nes.peek(*a)).collect();
+        assert_eq!(
+            mine, hers,
+            "the registers agree but the memory at {watch:04x?} does not: ours \
+             (left) against the real BIOS (right)"
+        );
+    } else {
+        eprintln!("note: no dumps/fds/disksys.rom, so this is not held against the oracle");
+    }
+    Some((ours, mine))
+}
+
 /// Cycles spent inside one call to `addr`, made from a planted caller.
 ///
 /// Measured rather than asserted from the source, because a delay routine's
 /// whole product is its duration and a comment claiming 131 is not evidence.
 fn cycles_of_call(disk: &[u8], bios: &[u8], addr: u16) -> u64 {
+    cycles_of_call_after(disk, bios, addr, &[])
+}
+
+/// Cycles spent inside one call to `addr`, with `setup` run first.
+///
+/// For a routine whose cost depends on its arguments there is no such thing as
+/// "the" cycle count, so the setup is how a test picks which one it is asking
+/// about.
+fn cycles_of_call_after(disk: &[u8], bios: &[u8], addr: u16, setup: &[u8]) -> u64 {
     let mut p = Prog::default();
-    p.jsr(addr).record_and_halt();
+    p.raw(setup).jsr(addr).record_and_halt();
     let mut nes = boot_to_handover(disk, bios);
     for (i, b) in p.0.iter().enumerate() {
         nes.dbg_poke(PROG + i as u16, *b);
@@ -1321,4 +1360,335 @@ fn the_ppumask_family_takes_the_same_cycles_as_the_real_bios() {
             );
         }
     }
+}
+
+// --- $E9B1, the shift-register random number generator ----------------------
+
+/// Where an `$E9B1` test puts its seed. Far enough from `$00-$0E` that the
+/// routine's own scratch is not part of the register.
+const SEED: u16 = 0x0040;
+
+/// `ldx #seed_lo` then `ldy #len` then call, which is how every real caller
+/// enters: by `jmp`, with the register address in `x` and its length in `y`.
+fn shift_call(seed: u8, len: u8) -> Prog {
+    let mut p = Prog::default();
+    p.ldx(seed).ldy(len).jsr(0xe9b1);
+    p
+}
+
+#[test]
+fn random_shift_at_e9b1_shifts_the_whole_register_and_matches_the_real_bios() {
+    // A four-byte seed, worked out by hand so the test means something with no
+    // oracle present, and held against the oracle when there is one.
+    //
+    //   $A5 $5A $3C $C3, so bit1($A5)=0 and bit1($5A)=1 and the feedback is 1
+    //   $A5 ror with carry in  -> $D2, carry out 1
+    //   $5A ror with carry in  -> $AD, carry out 0
+    //   $3C ror                -> $1E, carry out 0
+    //   $C3 ror                -> $61, carry out 1
+    if a_disk().is_none() {
+        return skipped();
+    }
+    let mut p = Prog::default();
+    p.bytes_at(SEED, &[0xa5, 0x5a, 0x3c, 0xc3]);
+    // $0044 is one past a four-byte register and $0001 is read as the dummy
+    // half of `lda $01,x` but never written, so both must come back as planted.
+    //
+    // Planting them rather than leaving them out of the watch list is the
+    // point: an unplanted byte neither BIOS wrote holds each BIOS's own
+    // leftovers, so comparing it compares their boot scratch and fails for a
+    // reason that has nothing to do with the routine. That is how the first
+    // version of this test failed.
+    p.bytes_at(SEED + 4, &[SCRIBBLE]);
+    p.bytes_at(0x0001, &[SCRIBBLE]);
+    p.raw(&shift_call(SEED as u8, 4).0).record_and_halt();
+    let watch = [SEED, SEED + 1, SEED + 2, SEED + 3, SEED + 4, 0x0000, 0x0001];
+    let Some((r, mem)) = both_watching(&p.0, 10, &watch) else { return skipped() };
+    assert!(r.reached, "$E9B1 never returned");
+    assert_eq!(mem[4], SCRIBBLE, "a four-byte register must not touch the fifth byte");
+    assert_eq!(mem[6], SCRIBBLE, "$0001 is read but never written");
+    assert_eq!(
+        &mem[..4],
+        &[0xd2, 0xad, 0x1e, 0x61],
+        "the register should come back shifted right with the feedback in bit 7"
+    );
+    assert_eq!(r.a, 0x02, "a should be the feedback bit as $02");
+    assert_eq!(r.x, SEED as u8 + 4, "x should end past the register");
+    assert_eq!(r.y, 0x00, "y should count down to zero");
+    assert_eq!(r.p & 0x01, 0x01, "carry should be bit 0 of the last byte, which was set");
+    assert_eq!(mem[5], 0x00, "$0000 holds bit1 of the FIRST byte, which is clear");
+}
+
+#[test]
+fn the_feedback_bit_is_bit_one_of_the_first_two_bytes_xored() {
+    // Four combinations at the shortest useful length, so the only thing that
+    // can move bit 7 of the result is the feedback. A routine that took the
+    // feedback from carry, or from the wrong bit, or from the wrong byte,
+    // fails at least one row.
+    if a_disk().is_none() {
+        return skipped();
+    }
+    for (first, tap, want, feedback) in [
+        (0x00u8, 0x00u8, 0x00u8, 0x00u8),
+        (0x00, 0x02, 0x80, 0x02),
+        (0x02, 0x00, 0x81, 0x02),
+        (0x02, 0x02, 0x01, 0x00),
+    ] {
+        let mut p = Prog::default();
+        p.bytes_at(SEED, &[first, tap]);
+        // `sec` first, so "the feedback is computed" is distinguishable from
+        // "the feedback is whatever carry came in as".
+        p.raw(&[0x38]);
+        p.raw(&shift_call(SEED as u8, 1).0).record_and_halt();
+        let Some((r, mem)) = both_watching(&p.0, 10, &[SEED]) else { return skipped() };
+        assert!(r.reached);
+        assert_eq!(
+            mem[0], want,
+            "first=${first:02x} tap=${tap:02x} should shift to ${want:02x}"
+        );
+        assert_eq!(r.a, feedback, "a should be the feedback bit for ${first:02x}/${tap:02x}");
+    }
+}
+
+#[test]
+fn the_tap_is_read_from_outside_the_register_when_the_length_is_one() {
+    // At y=1 the register is one byte, and the tap at x+1 is past the end of
+    // it. The real routine reads it anyway and its bit 1 changes the answer,
+    // measured on two titles.
+    //
+    // This is the test that stops someone tidying the out-of-bounds read away.
+    // It looks like a bug and it is the published behaviour, so a game that
+    // seeded one byte and left junk next to it gets the sequence that junk
+    // produces, and we have to produce the same one.
+    if a_disk().is_none() {
+        return skipped();
+    }
+    let mut out = Vec::new();
+    for tap in [0x00u8, 0x02] {
+        let mut p = Prog::default();
+        p.bytes_at(SEED, &[0x00, tap]);
+        p.raw(&shift_call(SEED as u8, 1).0).record_and_halt();
+        let Some((r, mem)) = both_watching(&p.0, 10, &[SEED]) else { return skipped() };
+        assert!(r.reached);
+        out.push(mem[0]);
+    }
+    assert_eq!(
+        out,
+        vec![0x00, 0x80],
+        "the byte past a one-byte register must still feed the shift"
+    );
+}
+
+#[test]
+fn the_tap_wraps_inside_zero_page_and_collides_with_the_scratch_at_x_is_ff() {
+    // x=$FF puts the tap at ($FF + 1) & $FF = $0000, which the routine filled
+    // with bit1 of the first byte two instructions earlier. So the feedback is
+    // that bit xored with itself and is ALWAYS zero, whatever the seed.
+    //
+    // Two things fail this. An implementation using absolute indexing would
+    // read $0100, the bottom of the stack, instead of wrapping. One that kept
+    // its intermediate somewhere other than $0000 would not collide at all and
+    // would produce a feedback of 1 for an odd-bit-1 seed.
+    if a_disk().is_none() {
+        return skipped();
+    }
+    for seed in [0x02u8, 0xff, 0x06] {
+        let mut p = Prog::default();
+        p.bytes_at(0x00ff, &[seed]);
+        // $0100 gets the opposite bit 1, so reading it instead of wrapping
+        // would give a different feedback and a different result.
+        p.bytes_at(0x0100, &[!seed]);
+        p.raw(&shift_call(0xff, 1).0).record_and_halt();
+        let Some((r, mem)) = both_watching(&p.0, 10, &[0x00ff]) else { return skipped() };
+        assert!(r.reached);
+        assert_eq!(
+            r.a, 0x00,
+            "at x=$FF the tap collides with the scratch, so the feedback is always 0"
+        );
+        assert_eq!(
+            mem[0],
+            seed >> 1,
+            "and the byte is a plain shift right with a zero coming in"
+        );
+    }
+}
+
+#[test]
+fn a_length_of_zero_means_two_hundred_and_fifty_six_bytes() {
+    // The loop is a do-while, so y=0 walks the whole of zero page and comes
+    // back with x where it started. The real routine does exactly that and
+    // returns normally rather than hanging or stopping early.
+    //
+    // Three planted bytes make the middle of the walk checkable. $007F fixes
+    // the carry going into $0080, so $0080 and $0081 are then determined:
+    //   $7F=$01, so carry into $80 is 1
+    //   $80=$AA ror with carry in -> $D5, carry out 0
+    //   $81=$55 ror              -> $2A
+    if a_disk().is_none() {
+        return skipped();
+    }
+    //
+    // The feedback and the carry out have to be planted too, or they come from
+    // whatever each BIOS happened to leave in zero page and the two runs
+    // disagree for a reason that is not about the routine. The feedback reads
+    // $0040 and $0041; the carry out is bit 0 of the LAST byte the walk
+    // reaches, which starting from $0040 is $003F.
+    let mut p = Prog::default();
+    p.bytes_at(0x003f, &[0x01]);
+    p.bytes_at(SEED, &[0x00, 0x00]);
+    p.bytes_at(0x007f, &[0x01, 0xaa, 0x55]);
+    p.raw(&shift_call(SEED as u8, 0).0).record_and_halt();
+    let Some((r, mem)) = both_watching(&p.0, 20, &[0x0080, 0x0081]) else {
+        return skipped();
+    };
+    assert!(r.reached, "y=0 never came back, so it is not a counted 256");
+    assert_eq!(
+        mem,
+        vec![0xd5, 0x2a],
+        "the walk should reach $0080 and $0081, a long way past the four bytes \
+         a caller would normally ask for"
+    );
+    assert_eq!(r.x, SEED as u8, "x should wrap all the way round to where it began");
+    assert_eq!(r.y, 0x00);
+    assert_eq!(r.a, 0x00, "the feedback from the two planted zero bytes");
+    assert_eq!(r.p & 0x01, 0x01, "carry is bit 0 of $003F, the last byte of the walk");
+}
+
+#[test]
+fn the_generator_produces_the_same_sequence_as_the_real_bios() {
+    // The product of a generator is its SEQUENCE, so one call proving correct
+    // proves less than it looks. Eight in a row from a fixed seed is the thing
+    // a game actually depends on, and the only way an off-by-one in the
+    // feedback survives the earlier tests is by being right for one step.
+    if a_disk().is_none() {
+        return skipped();
+    }
+    //
+    // The seed is picked so the feedback bit comes out 0, 0, 1, 0, 1, 1, 1, 1
+    // over the eight steps. A seed that fed back the same bit every time would
+    // pass against an implementation that ignored one of the two taps.
+    let mut p = Prog::default();
+    p.bytes_at(SEED, &[0xa5, 0x4d, 0xca, 0x18]);
+    for _ in 0..8 {
+        p.raw(&shift_call(SEED as u8, 4).0);
+    }
+    p.record_and_halt();
+    let watch = [SEED, SEED + 1, SEED + 2, SEED + 3];
+    let Some((r, mem)) = both_watching(&p.0, 20, &watch) else { return skipped() };
+    assert!(r.reached, "eight calls did not finish");
+    assert_eq!(
+        mem,
+        vec![0xf4, 0xa5, 0x4d, 0xca],
+        "eight steps from $A5 $4D $CA $18"
+    );
+}
+
+#[test]
+fn the_generator_is_not_slower_than_the_real_bios() {
+    // Ours is 25 + 13*y against the original's 28 + 13*y + feedback, so three
+    // or four cycles quick. Safe here: the product is the bit sequence and not
+    // the duration, unlike $E149 where the duration is the whole point.
+    let Some(disk) = a_disk() else { return skipped() };
+    for len in [1u8, 2, 4] {
+        let setup = shift_call(SEED as u8, len);
+        // Drop the `jsr`, which cycles_of_call_after adds itself.
+        let setup = &setup.0[..setup.0.len() - 3];
+        let ours = cycles_of_call_after(&disk, &[], 0xe9b1, setup);
+        assert_eq!(
+            ours,
+            25 + 13 * u64::from(len),
+            "our own cost model at y={len}"
+        );
+        if let Some(real) = real_bios() {
+            let theirs = cycles_of_call_after(&disk, &real, 0xe9b1, setup);
+            assert!(
+                ours <= theirs,
+                "at y={len} ours took {ours} against the real {theirs}, and slower is not safe"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_generator_preserves_v_d_and_i_and_ignores_carry_and_a_coming_in() {
+    // Measured on the real routine: N is always 0 and Z always 1, both from
+    // the loop counter reaching zero rather than from anything about the
+    // result, so Z=1 even when a comes back $02. V, D and I pass through.
+    //
+    // Carry IN is ignored, which is the one that needs forcing to mean
+    // anything: the feedback is computed from the two taps, so an
+    // implementation that seeded the rotate from the caller's carry instead
+    // would agree with this test on every call that happened to arrive with
+    // carry already matching. Entering with carry set and a zero feedback is
+    // what separates them.
+    if a_disk().is_none() {
+        return skipped();
+    }
+    for (c_in, a_in) in [(false, 0x00u8), (true, 0x00), (true, 0xff), (false, 0x5a)] {
+        let mut p = Prog::default();
+        // Both taps clear, so the feedback is 0 and a carry that leaked in
+        // from the caller would show up as bit 7 of the first byte.
+        p.bytes_at(SEED, &[0x00, 0x00]);
+        p.ldx(SEED as u8).ldy(0x02);
+        p.lda(a_in);
+        p.raw(&[0xf8]); // sed, so D=1 on the way in
+        p.raw(&[0x24, 0xfd]); // bit $fd: bit 6 of a planted $40 sets V
+        p.raw(&[if c_in { 0x38 } else { 0x18 }]); // sec or clc
+        p.raw(&[0x78]); // sei
+        p.jsr(0xe9b1).record_and_halt();
+        let mut full = Prog::default();
+        full.bytes_at(0x00fd, &[0x40]);
+        let mut bytes = full.0;
+        bytes.extend_from_slice(&p.0);
+        let Some((r, mem)) = both_watching(&bytes, 10, &[SEED, SEED + 1]) else {
+            return skipped();
+        };
+        assert!(r.reached, "never returned with c_in={c_in} a_in=${a_in:02x}");
+        assert_eq!(
+            mem,
+            vec![0x00, 0x00],
+            "carry in (={c_in}) must not become the feedback bit"
+        );
+        assert_eq!(r.a, 0x00, "a out is the feedback, not a in (${a_in:02x})");
+        assert_eq!(r.p & 0x80, 0x00, "N should be clear from the loop counter");
+        assert_eq!(r.p & 0x02, 0x02, "Z should be set from the loop counter");
+        assert_eq!(r.p & 0x40, 0x40, "V should be preserved");
+        assert_eq!(r.p & 0x08, 0x08, "D should be preserved");
+        assert_eq!(r.p & 0x04, 0x04, "I should be preserved");
+        assert_eq!(r.p & 0x01, 0x00, "carry out is bit 0 of the last byte, which was clear");
+    }
+}
+
+#[test]
+fn the_generator_handles_the_longest_register_a_real_caller_asks_for() {
+    // Zelda asks for thirteen bytes and Nazo no Murasame-jou for eight, so the
+    // short registers the other tests use are not the whole range. Thirteen
+    // also crosses the point where a byte-count bug would show up as a short
+    // or long walk rather than as wrong arithmetic.
+    if a_disk().is_none() {
+        return skipped();
+    }
+    let seed: [u8; 13] = [
+        0xa5, 0x4d, 0xca, 0x18, 0x01, 0x80, 0xff, 0x00, 0x7e, 0x33, 0x99, 0x42, 0x0f,
+    ];
+    let mut p = Prog::default();
+    p.bytes_at(SEED, &seed);
+    // The fourteenth byte must come back untouched.
+    p.bytes_at(SEED + 13, &[SCRIBBLE]);
+    p.raw(&shift_call(SEED as u8, 13).0).record_and_halt();
+    let watch: Vec<u16> = (0..14).map(|i| SEED + i).collect();
+    let Some((r, mem)) = both_watching(&p.0, 10, &watch) else { return skipped() };
+    assert!(r.reached);
+    // feedback = bit1($A5) xor bit1($4D) = 0 xor 0 = 0, then a plain ripple.
+    let mut want = Vec::new();
+    let mut carry = 0u8;
+    for v in seed {
+        want.push((v >> 1) | (carry << 7));
+        carry = v & 1;
+    }
+    want.push(SCRIBBLE);
+    assert_eq!(mem, want, "thirteen bytes should ripple right once");
+    assert_eq!(r.a, 0x00, "the feedback for this seed is 0");
+    assert_eq!(r.x, SEED as u8 + 13);
+    assert_eq!(r.y, 0x00);
 }

@@ -29,6 +29,16 @@ that reached their own code, which is the stronger observation.
 cost of the routine: the BIOS can hand control to a game hook through the
 `$DFF6-$DFFF` RAM vectors, and that closes the accounting early.
 
+**`kind` is one sample, not a summary, and it has misled once.** It records how
+control arrived the FIRST time the census saw the entry point, so for an
+address some games `jsr` and others tail-call it reports whichever happened
+first and gives no hint that the other exists. `$E9B1` is logged `jmp`; when it
+came to be implemented, measuring the caller site against the pulled return
+address across nine titles showed that seven enter by a plain `jsr` and only
+two tail-call it. Nothing downstream depended on the wrong reading, but treat
+the column as a lead rather than a fact, and settle entry style per caller when
+it matters.
+
 | entry | kind | originals | translations | hacks | booted | calls | cyc/call |
 |---|---|---|---|---|---|---|---|
 | `$E18B` | nmi | 68/72 | 37 | 2 | 93 | 88207 | 13 |

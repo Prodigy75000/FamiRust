@@ -671,8 +671,83 @@ vram_struct:
   jmp unimplemented
 .org $E997
   jmp unimplemented
+; --- $E9B1: shift a multi-byte register right one bit, with feedback --------
+;
+; 10 of the 114 corpus titles call it, 7021 calls between them, and 7 titles
+; were stopped on it. A random number generator: the caller keeps a seed of Y
+; bytes in zero page and this advances it one bit per call.
+;
+; The census records the entry kind as `jmp`, and that is true of only two of
+; the nine callers that reach it: Akuu Senki Raijin and Exciting Baseball
+; tail-call it, so their `rts` returns to a `jsr` further back in the game. The
+; other seven, Bubble Bobble and Zelda among them, enter by a plain
+; `jsr $E9B1`. Either way it must leave the stack alone and end in `rts`, which
+; it does; there are no pushes anywhere in it.
+;
+; `x` = the zero page address of the register, `y` = how many bytes. Real
+; callers pass `y` from 1 to 13: Akuu asks for one byte, Nazo no Murasame-jou
+; for eight, Zelda for thirteen. It shifts
+; the whole thing RIGHT one bit. `byte[x]` is the most significant end: the
+; feedback bit enters bit 7 of `byte[x]`, each byte's bit 0 falls into the next
+; byte's bit 7, and the bit off the far end lands in carry.
+;
+;   feedback = bit1(byte[x]) XOR bit1(byte[(x+1) & $FF])
+;
+; **The second tap is at x+1 absolutely, not at the end of the register.** That
+; took a probe matrix at y=4 to settle, forcing all five of `$AC-$B0` one at a
+; time on Gun.Smoke: only `$AC` and `$AD` moved the result, which rules out
+; x+y, x+y-1 and x+2. Nothing but bit 1 of either byte matters; a tap byte of
+; `$FD` behaves as `$00` and `$FF` as `$02`.
+;
+; **At y=1 the tap reads a byte OUTSIDE the register**, and its bit 1 really
+; does change both the result and the cycle count, measured on two titles. So
+; the read has to stay even though it looks like a bug. Akuu Senki Raijin is
+; the one natural y=1 caller.
+;
+; Our shape happens to reproduce the original's access trace byte for byte,
+; which was not aimed at. Zero-page,X addressing makes the 6502 read the
+; UN-INDEXED base address as a dummy cycle, so `lda $00,x` reads `$0000` then
+; `byte[x]`, and `lda $01,x` reads `$0001` then `byte[x+1]`. Those dummy reads
+; are exactly the otherwise inexplicable `$0000` and `$0001` reads in the real
+; routine's log, and `$0001`'s value provably never matters.
+;
+; The `x=$ff` collision comes out of that for free. There the tap wraps to
+; `$0000`, which `sta $00` filled two instructions earlier, so the feedback is
+; bit1(byte[x]) XOR itself and is **always 0**. Measured on the real routine,
+; and ours cannot do otherwise.
+;
+; `y=0` means 256, because the loop is a do-while. The real one scrambles the
+; whole of zero page and returns normally, 3356 cycles, writing no stack byte.
+; Ours does the same thing for the same reason rather than by a special case.
+;
+; Exit: `a` = the feedback bit as `$00` or `$02`, `x` = x+y, `y` = `$00`,
+; carry = the bit shifted off the end, `N=0` and `Z=1` from the final `dey`,
+; and `V`, `D` and `I` preserved. `$0000` is the only scratch and holds
+; bit1(byte[x]), an intermediate rather than the feedback; `$0001` is read but
+; never written.
+;
+; Cost 28 + 13*y + feedback against our 25 + 13*y, so we are three or four
+; cycles quick. Safe: this is a generator, not a delay, and its product is the
+; bit sequence rather than the time. Decimal-proof either way, confirmed on the
+; original with D=1 at two register lengths.
 .org $E9B1
-  jmp unimplemented
+random_shift:
+  lda $00,x                 ; 4   byte[x]; the dummy read of $0000 is the real
+                            ;     routine's first access too
+  and #$02                  ; 2
+  sta $00                   ; 3   the first tap, parked in bit 1
+  lda $01,x                 ; 4   byte[x+1], wrapping inside zero page
+  and #$02                  ; 2
+  eor $00                   ; 3   a = the feedback bit, $00 or $02
+  cmp #$02                  ; 2   carry = it, and a survives to be returned
+@shift:
+  ror $00,x                 ; 6   read, write old, write new: the same
+  inx                       ; 2   read-modify-write signature the original
+  dey                       ; 2   leaves, 13 cycles a byte
+  bne @shift                ; 3, and 2 on the last pass
+  rts                       ; 6
+.assert (random_shift_end - random_shift) == 21
+random_shift_end:
 ; --- $E9C8: copy the sprite page to OAM ------------------------------------
 ;
 ; 27 of the 114 corpus titles call it, and it is the one routine the profiler
