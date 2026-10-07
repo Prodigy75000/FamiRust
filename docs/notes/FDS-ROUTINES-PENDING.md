@@ -12,53 +12,17 @@ it says so.
 
 ---
 
-## The PPUMASK family: `$E161`, `$E16B`, `$E171`, `$E17E`, `$E185`
+## The PPUMASK family: WRITTEN 2026-10-07
 
-Five entry points that are one routine with five masks. **`$E161` alone blocks
-10 titles** and is top of the queue; the rest come nearly free once it is in.
+`$E161`, `$E16B`, `$E171`, `$E17E` and `$E185` are implemented and held against
+the real BIOS in `crates/nes-core/tests/fds_hle_routines.rs`. The measurement
+that built them now lives beside the code in `firmware/fds-hle/src/main.s`,
+which is where it belongs once there is code for it to describe.
 
-All five have the identical shape. They read the PPUMASK shadow at `$FE`,
-transform it, and write the result to `$FE` **and then** `$2001`, shadow first.
-They read `$2002` never, so they are callable mid-frame and what a mid-frame
-`$2001` write does to the picture is the caller's problem.
-
-| entry | `$FE`=`$00` gives | `$FF` gives | transform | what it is | cycles |
-|---|---|---|---|---|---|
-| `$E161` | `$00` | `$E7` | `and #%11100111` | screen off | **18** |
-| `$E16B` | `$18` | `$FF` | `ora #%00011000` | screen on | **21** |
-| `$E171` | `$00` | `$EF` | `and #%11101111` | sprites off | **21** |
-| `$E17E` | `$00` | `$F7` | `and #%11110111` | background off | **21** |
-| `$E185` | `$08` | `$FF` | `ora #%00001000` | background on | **21** |
-
-Emphasis bits (5-7) and left-column bits (0-2) pass through untouched. Bubble
-Bobble's natural `$26` comes back `$26`, which is what first proved these are
-masks rather than constants.
-
-**Interface, identical across all five.** No register arguments: forced
-`a=$FF x=$AA y=$55` changed nothing, and the 13 callers of `$E161` enter with
-freely varying registers. No inline arguments; `rts` to `jsr+3`. `A` = the
-masked result, always clobbered. `X` and `Y` preserved. `N` and `Z` from the
-result; **`C`, `V`, `D` and `I` all preserved** (`p=$61` in came back `$61`;
-`p=$E9` with a zero result came back `$6B`).
-
-**No stack writes at all.** Unlike `$E149` these do not even `pha`, so the
-bytes below the returned stack pointer come back exactly as the caller left
-them. The complete bus activity of one call is: read `$FE`, write `$FE`, write
-`$2001`, then the `rts` reads.
-
-Cycles are min=max across every caller and every forced state including `D=1`.
-
-**Layout.** `$E161`'s body is ten bytes and `$E16B` is ten bytes away, so it
-fits flush with no trampoline. The 21-cycle shape is `2 + 3 + 16`, i.e.
-`lda #mask` then `jmp` to a shared tail, which also fits the byte budget:
-`$E16B` has only six bytes before `$E171`, and `$E185` only six before the NMI
-handler at `$E18B`. Two shared tails are needed, one `ora $FE` and one
-`and $FE`, each `sta $FE` / `sta PPUMASK` / `rts` and each 16 cycles.
-
-**Not determined.** The set is conspicuously missing a "sprites on"
-(`ora #%00010000`). If it exists it is in the 13-byte `$E171-$E17D` gap, but no
-corpus title enters anything there, so it cannot be located black-box and the
-stub can stay.
+One thing from the measuring is worth keeping here because it is still open:
+the set is conspicuously missing a "sprites on" (`ora #%00010000`). If it
+exists it is in the 13-byte `$E171-$E17D` gap, but no corpus title enters
+anything there, so black-box observation cannot locate it and the stub stays.
 
 ---
 

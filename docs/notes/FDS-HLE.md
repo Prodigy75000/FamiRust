@@ -243,7 +243,7 @@ work as taking transfer interrupts in the loader.
 
 ### The routines
 
-Fourteen of the forty entry points are implemented. The other 26 are stubs that put
+Nineteen of the forty entry points are implemented. The other 21 are stubs that put
 **NO ROUTINE** on the screen and stop, which is worth its 111 bytes: Zelda hands
 over correctly, runs its own code, jumps to `$EA84` and would otherwise
 disappear into the fill, looking like a hundred different bugs instead of one
@@ -265,6 +265,11 @@ missing routine. `fdstrace` names the address.
 | `$E7BB` | 18 | walk a VRAM write structure the caller points at | a little language, measured field by field |
 | `$E149` | 17 | delay exactly 131 cycles | cycle-exact, and the one place faster is WRONG |
 | `$EA4C` | 17 | read both pads twice and believe a repeated answer | shares its read pass with `$EA1F` |
+| `$E161` | 13 | PPUMASK: screen off | cycle-exact, 18 |
+| `$E185` | 13 | PPUMASK: background on | cycle-exact, 21 |
+| `$E16B` | 8 | PPUMASK: screen on | cycle-exact, 21 |
+| `$E171` | 6 | PPUMASK: sprites off | cycle-exact, 21 |
+| `$E17E` | 2 | PPUMASK: background off | cycle-exact, 21 |
 
 **Where the cycle counts do not match, ours is faster, never slower.** That is
 deliberate. A game that runs one of these inside vblank has more room than it
@@ -308,11 +313,25 @@ updates:
 |---|---|
 | `$E161` | **10** |
 
-**76 of the 114 now reach their own code without asking for a routine we have
+Then `$E161` was written, and with it the four other PPUMASK masks that share
+its shape, which cost almost nothing once the first was in. Re-measured again:
+
+| entry | titles stuck on it now |
+|---|---|
+| `$E9B1` | **7** |
+| `$EAFD` | **5** |
+| `$E86A` | **5** |
+| `$E8D2` | **3** |
+| `$E153` | **3** |
+| `$E9D3` | **2** |
+
+**83 of the 114 now reach their own code without asking for a routine we have
 not written**, up from 50 when the queue was first measured, in an unattended
-1800-frame run with START mashed. 38 are still stopped by a missing routine. Sixty-five is NOT "sixty-five titles
-play correctly": thirty seconds of unattended running reaches what it reaches,
-and a game that needs a routine only when you open its menu has not asked yet.
+1800-frame run with START mashed. 31 are still stopped by a missing routine.
+
+Eighty-three is NOT "eighty-three titles play correctly": thirty seconds of
+unattended running reaches what it reaches, and a game that needs a routine
+only when you open its menu has not asked yet.
 
 ### How a routine gets worked out
 
@@ -333,9 +352,8 @@ what comes back. That is the oracle at the level the work happens at.
 2. ~~Baseline smoke on the real BIOS, one ledger row per title.~~ The census
    rows and `fds-hle-check.py` are this.
 3. ~~HLE boot with our own graphics and no BIOS file present.~~ Done 2026-09-29.
-4. Routine by routine, each held against the real BIOS. Fourteen of forty done.
-   The queue by BLOCKING is `$E161` (10 titles), and it is one of a family of
-   five PPUMASK entries that come nearly free together. That family and
-   `$E153` are measured and ready to write: see
+4. Routine by routine, each held against the real BIOS. Nineteen of forty done.
+   The queue by BLOCKING is now `$E9B1` (7 titles), then `$EAFD` and `$E86A` at
+   five each. `$E153` is measured and ready to write, three titles deep: see
    [`FDS-ROUTINES-PENDING.md`](FDS-ROUTINES-PENDING.md).
 5. Cycle accounting per routine, starting from the `cyc/call` column.

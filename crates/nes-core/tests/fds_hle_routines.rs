@@ -166,11 +166,16 @@ struct Outcome {
     p: u8,
 }
 
-/// Boot `disk` under `bios` to handover, then run `prog` instead of the game.
-fn run(disk: &[u8], bios: &[u8], prog: &[u8], frames: u64) -> (Outcome, nes_core::Nes) {
+/// Boot `disk` under `bios` and stop the instant the BIOS hands the machine
+/// over, with the machine left exactly there.
+///
+/// Handover is the BIOS dispatching through the `$DFFC` pseudo-vector, not
+/// merely the first exit from the `$E000-$FFFF` window. The real BIOS leaves
+/// NMI enabled while it loads, so its first exit is an interrupt dispatched
+/// mid-load; taking that for handover made six Namco titles look broken. See
+/// fds_hle_boot.rs.
+fn boot_to_handover(disk: &[u8], bios: &[u8]) -> nes_core::Nes {
     let mut nes = nes_core::Nes::from_fds(disk, bios).expect("disk should parse");
-    // Handover: the BIOS dispatching through $DFFC, not merely the first exit
-    // from the window. See fds_hle_boot.rs for why the difference matters.
     let deadline = nes.dbg_frame() + 1500;
     while nes.dbg_frame() < deadline {
         let pc = nes.dbg_pc();
@@ -183,6 +188,12 @@ fn run(disk: &[u8], bios: &[u8], prog: &[u8], frames: u64) -> (Outcome, nes_core
         nes.step();
     }
     assert!(nes.dbg_pc() < BIOS_BASE, "never reached handover");
+    nes
+}
+
+/// Boot `disk` under `bios` to handover, then run `prog` instead of the game.
+fn run(disk: &[u8], bios: &[u8], prog: &[u8], frames: u64) -> (Outcome, nes_core::Nes) {
+    let mut nes = boot_to_handover(disk, bios);
 
     for (i, b) in prog.iter().enumerate() {
         nes.dbg_poke(PROG + i as u16, *b);
@@ -213,19 +224,7 @@ fn run(disk: &[u8], bios: &[u8], prog: &[u8], frames: u64) -> (Outcome, nes_core
 fn run_holding(disk: &[u8], bios: &[u8], prog: &[u8], frames: u64, buttons: u8)
     -> (Outcome, nes_core::Nes)
 {
-    let mut nes = nes_core::Nes::from_fds(disk, bios).expect("disk should parse");
-    let deadline = nes.dbg_frame() + 1500;
-    while nes.dbg_frame() < deadline {
-        let pc = nes.dbg_pc();
-        if pc < BIOS_BASE {
-            let v = u16::from(nes.peek(VEC_RESET)) | (u16::from(nes.peek(VEC_RESET + 1)) << 8);
-            if pc == v {
-                break;
-            }
-        }
-        nes.step();
-    }
-    assert!(nes.dbg_pc() < BIOS_BASE, "never reached handover");
+    let mut nes = boot_to_handover(disk, bios);
     nes.set_buttons(0, buttons);
     for (i, b) in prog.iter().enumerate() {
         nes.dbg_poke(PROG + i as u16, *b);
@@ -272,18 +271,7 @@ fn both(prog: &[u8], frames: u64) -> Option<(Outcome, nes_core::Nes)> {
 fn cycles_of_call(disk: &[u8], bios: &[u8], addr: u16) -> u64 {
     let mut p = Prog::default();
     p.jsr(addr).record_and_halt();
-    let mut nes = nes_core::Nes::from_fds(disk, bios).expect("disk should parse");
-    let deadline = nes.dbg_frame() + 1500;
-    while nes.dbg_frame() < deadline {
-        let pc = nes.dbg_pc();
-        if pc < BIOS_BASE {
-            let v = u16::from(nes.peek(VEC_RESET)) | (u16::from(nes.peek(VEC_RESET + 1)) << 8);
-            if pc == v {
-                break;
-            }
-        }
-        nes.step();
-    }
+    let mut nes = boot_to_handover(disk, bios);
     for (i, b) in p.0.iter().enumerate() {
         nes.dbg_poke(PROG + i as u16, *b);
     }
@@ -308,6 +296,45 @@ fn cycles_of_call(disk: &[u8], bios: &[u8], addr: u16) -> u64 {
         );
     }
     nes.dbg_cycles() - start
+}
+
+/// Every CPU-space write one call to `addr` makes, in order.
+///
+/// Logging starts at the routine's first instruction rather than at the
+/// caller, so the `jsr`'s own two stack pushes are not in the result and an
+/// empty stack range really means the routine pushed nothing.
+fn writes_inside_call(disk: &[u8], bios: &[u8], prog: &[u8], addr: u16) -> Vec<(u16, u8)> {
+    let mut nes = boot_to_handover(disk, bios);
+    for (i, b) in prog.iter().enumerate() {
+        nes.dbg_poke(PROG + i as u16, *b);
+    }
+    nes.dbg_poke(OUT_SENTINEL, 0);
+    nes.dbg_set_pc(PROG);
+    let deadline = nes.dbg_cycles() + 2 * 29_781;
+    while nes.dbg_pc() != addr {
+        nes.step();
+        assert!(nes.dbg_cycles() < deadline, "never reached ${addr:04x}");
+    }
+    let sp_in = nes.cpu.sp;
+    // Below $E000: RAM, the stack page and the hardware registers, but not the
+    // routine fetching its own instructions, which would fill the buffer.
+    nes.dbg_log_start(4096, BIOS_BASE);
+    loop {
+        nes.step();
+        if nes.dbg_pc() < BIOS_BASE && nes.cpu.sp >= sp_in {
+            break;
+        }
+        assert!(
+            nes.dbg_cycles() < deadline,
+            "${addr:04x} did not return within two frames"
+        );
+    }
+    assert!(!nes.dbg_log_full(), "the access log filled, so this is a truncated set");
+    nes.dbg_log_take()
+        .into_iter()
+        .filter(|(_, _, w)| *w)
+        .map(|(a, v, _)| (a, v))
+        .collect()
 }
 
 fn skipped() {
@@ -1119,4 +1146,179 @@ fn the_plain_pad_read_still_works_after_sharing_its_read_pass() {
     assert_eq!(nes.peek(0x00f7), 0xa0, "held, with A at bit 7");
     assert_eq!(nes.peek(0x00f5), 0xa0, "all of it newly pressed");
     assert_eq!(ours.x, 0xff);
+}
+
+// --- $E161 and the rest of the PPUMASK family -------------------------------
+
+/// The five entry points, with the result measured for a forced shadow of
+/// `$00` and of `$FF`.
+///
+/// Those two columns are the whole reason this is a table of numbers rather
+/// than a loop over a transform. Any one of the five is indistinguishable
+/// from a routine that stores a constant until you run it twice from two
+/// different shadows, and the real BIOS was run twice from both.
+const MASK_FAMILY: [(u16, u8, u8, &str); 5] = [
+    (0xe161, 0x00, 0xe7, "screen off"),
+    (0xe16b, 0x18, 0xff, "screen on"),
+    (0xe171, 0x00, 0xef, "sprites off"),
+    (0xe17e, 0x00, 0xf7, "background off"),
+    (0xe185, 0x08, 0xff, "background on"),
+];
+
+/// `ldx $FE`, so a program can report the shadow without disturbing `A`.
+const LDX_SHADOW: [u8; 2] = [0xa6, 0xfe];
+
+#[test]
+fn the_ppumask_family_transforms_the_shadow_and_matches_the_real_bios() {
+    if a_disk().is_none() {
+        return skipped();
+    }
+    for (entry, from_zero, from_ones, what) in MASK_FAMILY {
+        for (shadow, want) in [(0x00u8, from_zero), (0xffu8, from_ones)] {
+            let mut p = Prog::default();
+            p.poke(0x00fe, shadow).jsr(entry);
+            // The result is in a; the shadow goes through x, so one call
+            // reports both and both are held against the oracle.
+            p.raw(&LDX_SHADOW).record_and_halt();
+            let Some((r, _)) = both(&p.0, 10) else { return skipped() };
+            assert!(r.reached, "${entry:04x} ({what}) never returned");
+            assert_eq!(
+                r.a, want,
+                "${entry:04x} ({what}) from a shadow of ${shadow:02x} should give ${want:02x}"
+            );
+            assert_eq!(
+                r.x, want,
+                "${entry:04x} ({what}) should leave the same value in the $FE shadow"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_ppumask_family_masks_rather_than_replaces() {
+    // Emphasis bits 5-7 and the left-column bits 0-2 pass straight through.
+    // Bubble Bobble's natural $26 comes back $26 from $E161, which is what
+    // first proved these are masks and not constants.
+    //
+    // The per-entry results are not written down here: `both` holds every one
+    // of them against the real BIOS, which is the only authority on a value
+    // no measurement note recorded.
+    if real_bios().is_none() {
+        eprintln!("note: no oracle, so this test has nothing to compare against");
+        return skipped();
+    }
+    for (entry, _, _, what) in MASK_FAMILY {
+        let mut p = Prog::default();
+        p.poke(0x00fe, 0x26).jsr(entry).raw(&LDX_SHADOW).record_and_halt();
+        let Some((r, _)) = both(&p.0, 10) else { return skipped() };
+        assert!(r.reached, "${entry:04x} ({what}) never returned");
+        assert_eq!(r.a & 0xe0, 0x20, "${entry:04x} ({what}) dropped an emphasis bit");
+        assert_eq!(r.a & 0x07, 0x06, "${entry:04x} ({what}) dropped a left-column bit");
+    }
+}
+
+#[test]
+fn the_ppumask_family_writes_the_shadow_then_the_register_and_nothing_else() {
+    // The complete bus activity of one real call is: read $FE, write $FE,
+    // write $2001, then the rts reads. Two writes, shadow first.
+    //
+    // Shadow-first is not cosmetic. A handler that interrupts between the two
+    // writes sees a shadow that already agrees with where the hardware is
+    // going, and that order is observable to anything that reads $FE.
+    //
+    // The emptiness of the stack range is the other half: unlike $E149 these
+    // do not even `pha`, so the bytes below the returned stack pointer come
+    // back exactly as the caller left them.
+    let Some(disk) = a_disk() else { return skipped() };
+    for (entry, _, from_ones, what) in MASK_FAMILY {
+        let mut p = Prog::default();
+        p.poke(0x00fe, 0xff).jsr(entry).record_and_halt();
+        let ours = writes_inside_call(&disk, &[], &p.0, entry);
+        assert_eq!(
+            ours,
+            vec![(0x00fe, from_ones), (0x2001, from_ones)],
+            "${entry:04x} ({what}) should write the shadow then $2001 and nothing else"
+        );
+        if let Some(real) = real_bios() {
+            assert_eq!(
+                writes_inside_call(&disk, &real, &p.0, entry),
+                ours,
+                "${entry:04x} ({what}) disagrees with the real BIOS on what it writes"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_ppumask_family_preserves_the_registers_and_every_flag_but_n_and_z() {
+    // No arguments in any register, x and y preserved, and C, V, D and I all
+    // survive. Only N and Z move, and they follow the result.
+    //
+    // Forcing the flags in is what makes this bite: the real routine returned
+    // p=$61 for an entry of $61, so a version that cleared carry on the way
+    // out would look identical against a caller that entered with carry
+    // already clear.
+    if a_disk().is_none() {
+        return skipped();
+    }
+    for (entry, from_zero, _, what) in MASK_FAMILY {
+        let mut p = Prog::default();
+        // $FD is a scroll shadow, borrowed here as somewhere to put a value
+        // whose bit 6 the `bit` below can lift into V.
+        p.poke(0x00fd, 0x40);
+        p.poke(0x00fe, 0x00);
+        p.ldx(0xaa).ldy(0x55);
+        p.lda(0xff); // a is an argument to nothing; it comes back as the result
+        p.raw(&[0x38]); // sec
+        p.raw(&[0x78]); // sei
+        p.raw(&[0xf8]); // sed
+        p.raw(&[0x24, 0xfd]); // bit $fd, whose bit 6 sets V
+        p.jsr(entry).record_and_halt();
+        let Some((r, _)) = both(&p.0, 10) else { return skipped() };
+        assert!(r.reached, "${entry:04x} ({what}) never returned");
+        assert_eq!(r.a, from_zero, "${entry:04x} ({what}) should return the result in a");
+        assert_eq!(r.x, 0xaa, "${entry:04x} ({what}) clobbered x");
+        assert_eq!(r.y, 0x55, "${entry:04x} ({what}) clobbered y");
+        assert_eq!(r.p & 0x01, 0x01, "${entry:04x} ({what}) lost carry");
+        assert_eq!(r.p & 0x40, 0x40, "${entry:04x} ({what}) lost overflow");
+        assert_eq!(r.p & 0x04, 0x04, "${entry:04x} ({what}) lost the interrupt disable");
+        assert_eq!(r.p & 0x08, 0x08, "${entry:04x} ({what}) lost decimal mode");
+        // N and Z from the result. Three of the five return $00 from a zero
+        // shadow and two do not, so this separates "from the result" from
+        // "from the shadow it read".
+        assert_eq!(
+            r.p & 0x02 != 0,
+            r.a == 0,
+            "${entry:04x} ({what}) set Z from something other than the result"
+        );
+        assert_eq!(
+            r.p & 0x80 != 0,
+            r.a & 0x80 != 0,
+            "${entry:04x} ({what}) set N from something other than the result"
+        );
+    }
+}
+
+#[test]
+fn the_ppumask_family_takes_the_same_cycles_as_the_real_bios() {
+    // Eighteen for $E161 and twenty-one for the other four, min=max across
+    // every caller and every forced state including D=1.
+    //
+    // Being faster is safe nearly everywhere in this BIOS, but not here. These
+    // write $2001 and never read $2002, so games call them mid-frame, and a
+    // version that arrived early would move a raster split by however many
+    // cycles it saved. That puts the duration in the interface, the same way
+    // it is for $E149 and for interrupt dispatch.
+    let Some(disk) = a_disk() else { return skipped() };
+    for (entry, _, _, what) in MASK_FAMILY {
+        let want = if entry == 0xe161 { 18 } else { 21 };
+        assert_eq!(cycles_of_call(&disk, &[], entry), want, "${entry:04x} ({what})");
+        if let Some(real) = real_bios() {
+            assert_eq!(
+                cycles_of_call(&disk, &real, entry),
+                want,
+                "the real ${entry:04x} ({what}) should agree, or {want} is the wrong number"
+            );
+        }
+    }
 }

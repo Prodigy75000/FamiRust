@@ -339,16 +339,90 @@ delay_131:
 delay_131_end:
 .org $E153
   jmp unimplemented
+; --- $E161 $E16B $E171 $E17E $E185: the PPUMASK family ----------------------
+;
+; Five entry points that are one routine with five masks. $E161 alone stops 10
+; titles and was top of the queue; the other four came nearly free with it.
+;
+; Each reads the PPUMASK shadow at $FE, transforms it, and writes the result to
+; the shadow FIRST and then to $2001. They never read $2002, so they are
+; callable mid-frame and what a mid-frame $2001 write does to the picture is
+; the caller's problem, not ours.
+;
+; They are masks, not constants: emphasis bits 5-7 and the left-column bits
+; 0-2 pass straight through. Bubble Bobble's natural $26 comes back $26, which
+; is what proved it. Forcing the caller's shadow to $00 and to $FF separated
+; the five transforms:
+;
+;   entry   $00 gives   $FF gives   transform           cycles
+;   $E161   $00         $E7         and #%11100111      18   screen off
+;   $E16B   $18         $FF         ora #%00011000      21   screen on
+;   $E171   $00         $EF         and #%11101111      21   sprites off
+;   $E17E   $00         $F7         and #%11110111      21   background off
+;   $E185   $08         $FF         ora #%00001000      21   background on
+;
+; No arguments in any register: forced a=$FF x=$AA y=$55 changed nothing, and
+; the 13 callers of $E161 enter with freely varying registers. No inline
+; arguments either, so the `rts` goes to jsr+3. Exit: a is the masked result
+; and always clobbered, x and y are preserved, N and Z come from the result,
+; and C, V, D and I are ALL preserved (p=$61 in came back $61; p=$E9 with a
+; zero result came back $6B).
+;
+; They make no stack writes at all, not even a `pha`, so the bytes below the
+; returned stack pointer come back exactly as the caller left them. The whole
+; bus activity of one call is: read $FE, write $FE, write $2001, then the `rts`
+; reads. Ours matches that byte for byte.
+;
+; Cycles were min=max across every caller and every forced state including
+; D=1, so there is nothing conditional inside. $E161's body is ten bytes and
+; $E16B is ten bytes away, so it goes inline with no trampoline. The other
+; four have six, thirteen, seven and six bytes of room, which buys `lda #mask`
+; plus a `jmp` to one of two shared 16-cycle tails: 2 + 3 + 16 = 21, exactly.
+;
+; The set is conspicuously missing a "sprites on" (ora #%00010000). If it
+; exists it is in the 13-byte $E171-$E17D gap, but no corpus title enters
+; anything there, so black-box observation cannot locate it and we owe nothing.
 .org $E161
-  jmp unimplemented
+mask_off:
+  lda $FE                   ; 3
+  and #%11100111            ; 2   clears background and sprite enable, keeps
+  sta $FE                   ; 3   emphasis and the left-column bits
+  sta PPUMASK               ; 4
+  rts                       ; 6
+; 3 + 2 + 3 + 4 + 6 = 18
+.assert (mask_off_end - mask_off) == 10
+mask_off_end:
+.assert mask_off_end == $E16B
 .org $E16B
-  jmp unimplemented
+  lda #%00011000            ; 2   screen on
+  jmp mask_or               ; 3
 .org $E171
-  jmp unimplemented
+  lda #%11101111            ; sprites off
+  jmp mask_and
 .org $E17E
-  jmp unimplemented
+  lda #%11110111            ; background off
+  jmp mask_and
 .org $E185
-  jmp unimplemented
+  lda #%00001000            ; background on
+  jmp mask_or
+
+; The two tails, sixteen cycles each. They cannot share a store: folding them
+; into one `sta` run would cost the `or` side or the `and` side an extra jmp
+; and break the 21.
+.org $FB55
+mask_or:
+  ora $FE                   ; 3
+  sta $FE                   ; 3
+  sta PPUMASK               ; 4
+  rts                       ; 6
+mask_and:
+  and $FE                   ; 3
+  sta $FE                   ; 3
+  sta PPUMASK               ; 4
+  rts                       ; 6
+.assert (mask_and - mask_or) == 8
+.assert (mask_tails_end - mask_or) == 16
+mask_tails_end:
 ; --- $E1B2: wait for the next vblank NMI -----------------------------------
 ;
 ; 18 of the 114 corpus titles call it, it is the first thing Adian no Tsue asks
