@@ -93,6 +93,10 @@ OAMDMA    = $4014
 PPUSCROLL = $2005
 PPUADDR   = $2006
 PPUDATA   = $2007
+
+; The queued VRAM transfer buffer $E86A empties. $0301 is the game's own write
+; index into it, which the BIOS only ever resets.
+BUF       = $0302
 JOY1      = $4016
 JOY2      = $4017
 APUSTATUS = $4015
@@ -671,8 +675,110 @@ vram_struct:
 
 .org $E844
   jmp unimplemented
+; --- $E86A: flush the queued VRAM transfer buffer at $0302 -----------------
+;
+; 10 of the 114 corpus titles call it, 6305 calls between them, and 6 titles
+; were stopped on it. The companion to $E7BB: the same shape of data, but on a
+; buffer at a FIXED address that a game fills during the frame and this empties
+; during vblank.
+;
+; Takes nothing and returns nothing. The whole interface is the buffer.
+;
+;   $0302   the structure, walked until a byte with bit 7 set ends it
+;   $0301   the game's own write index. **Never read here**, only reset to $00
+;           on the way out, so the game finds an empty queue.
+;
+; Each entry is address high, address low, a count, then that many bytes. An
+; empty queue is a single $FF at $0302.
+;
+; **The count is the WHOLE byte, and zero means 256.** That is worth stating
+; loudly because $E7BB's count looks the same and is not: there the low six
+; bits are the count, bit 6 means repeat-one-byte, bit 7 picks the VRAM
+; increment, and zero means 64. None of that is true here. Measured by forcing
+; lengths $05, $45, $85, $C5 into a buffer and counting the writes to $2007:
+; 5, 69, 133, 197, which only the whole-byte reading explains. A forced $00
+; wrote 256. Two routines, two languages, and implementing this one by calling
+; the other would quietly corrupt any entry of 64 bytes or more.
+;
+; The preamble masks the PPUCTRL shadow with `and #$FB`, forcing the VRAM
+; increment to +1, and keeps the masked value in the shadow where the game can
+; see it. Every other bit survives, NMI enable included. This was nearly missed:
+; with the shadow at $30 the mask changes nothing, and $30 is what the first
+; title measured happened to hold. Forced $34 came back $30 and $FB came back
+; $FB, which is what pins it.
+;
+; `$2002` is read ONCE, in the preamble, not once per entry as in $E7BB.
+;
+; Bytes beginning $4C or $60 are ordinary VRAM address high bytes here, NOT the
+; call and return of $E7BB's little language. Measured rather than assumed: a
+; forced entry starting $4C wrote $2006 twice and streamed its data, with no
+; stack traffic beyond the one push every entry gets. It could hardly be
+; otherwise, since this walks a fixed base with an 8-bit index and has no
+; pointer for a call to redirect.
+;
+; After each entry it pulls the saved address high byte back and, if it is
+; EXACTLY $3F, writes $2006 with $3F, $00, $00, $00: the palette-safe reset,
+; pointing at $3F00 and then at $0000 so the PPU is not left showing a palette
+; entry instead of the backdrop. $3E, $2F and $7F were each measured NOT to
+; trigger it, so the compare is the full byte. Per entry, not once per call.
+;
+; On the way out it stores the terminator byte it READ back to $0302, rather
+; than a constant: a buffer ended with $80 comes back with $80 there. Then
+; $0301 = $00, which is also where the `a` of $00 on exit comes from.
 .org $E86A
-  jmp unimplemented
+vram_flush:
+  lda $FF                   ; 3
+  and #$FB                  ; 2   force the VRAM increment to +1
+  sta PPUCTRL               ; 4   the shadow goes out before it goes back
+  sta $FF                   ; 3
+  ldx PPUSTATUS             ; 4   reset the address latch, once for the call
+  ldy #$00                  ; 2
+  jmp @check                ; 3
+;
+; The loop is laid out with its test at the BOTTOM, which costs this one `jmp`
+; and is what makes the palette tail come out right. The palette block FALLS
+; THROUGH into the test, and the common path branches over it to the same
+; place, so the palette entry costs exactly four stores more than a plain one
+; rather than four stores plus a branch back. That is the difference between
+; +15 and +18 cycles, and +18 would make us slower than the original on any
+; entry that touches the palette.
+@body:
+  pha                       ; 3   kept for the $3F test after the data
+  sta PPUADDR               ; 4
+  iny                       ; 2
+  lda BUF,y                 ; 4
+  sta PPUADDR               ; 4
+  iny                       ; 2
+  ldx BUF,y                 ; 4   the count straight into x: all eight bits,
+  iny                       ; 2   and 0 means 256, which `dex`/`bne` gives
+@byte:
+  lda BUF,y                 ; 4
+  sta PPUDATA               ; 4
+  iny                       ; 2
+  dex                       ; 2
+  bne @byte                 ; 3
+  pla                       ; 4   the address high from the top of the entry
+  cmp #$3F                  ; 2   and this is also where carry comes from
+  bne @check                ; 3 taken on the common path
+  ; The palette-safe reset: point at $3F00, then at $0000, so the PPU is not
+  ; left showing a palette entry in place of the backdrop. `a` is still $3F
+  ; from the `pla` and `x` is $00 from the byte loop, so neither needs loading.
+  sta PPUADDR               ; 4
+  stx PPUADDR               ; 4
+  stx PPUADDR               ; 4
+  stx PPUADDR               ; 4
+@check:
+  lda BUF,y                 ; 4   the next entry's address high, or the end
+  bpl @body                 ; 3 taken
+  sta BUF                   ; 4   the terminator it found, echoed back
+  lda #$00                  ; 2
+  sta BUF-1                 ; 4   the game's write index
+  rts                       ; 6
+; 43 + 40 per entry + 15 per data byte + 15 per palette entry, exactly the
+; original's, and +1 for any read whose address crosses $03FF, which absolute
+; indexing gives for free.
+.assert (vram_flush_end - vram_flush) == 74
+vram_flush_end:
 .org $E8D2
   jmp unimplemented
 .org $E8E1

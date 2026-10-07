@@ -1899,3 +1899,312 @@ fn the_dispatcher_takes_the_same_forty_five_cycles_as_the_real_bios() {
         }
     }
 }
+
+// --- $E86A, the queued VRAM flush -------------------------------------------
+
+/// The queue $E86A empties, and the game's write index just below it.
+const QUEUE: u16 = 0x0302;
+const QUEUE_INDEX: u16 = 0x0301;
+
+/// Emit `ldx #len : lda #val : sta addr-1,x : dex : bne`, filling `len` bytes
+/// from `addr` without costing five program bytes per byte planted.
+///
+/// `bytes_at` is fine for a header but not for a body: a 69-byte entry would
+/// be 345 bytes of `lda`/`sta` pairs, and the program starts at $0600 with the
+/// results area at $0700.
+fn fill_run(p: &mut Prog, addr: u16, len: u8, val: u8) {
+    let base = addr - 1;
+    p.ldx(len);
+    p.lda(val);
+    p.0.extend_from_slice(&[0x9d, base as u8, (base >> 8) as u8]); // sta base,x
+    p.0.extend_from_slice(&[0xca, 0xd0, 0xfa]); // dex : bne
+}
+
+/// A caller for `$E86A`: a known PPUCTRL shadow, a cleared nametable, the
+/// queue planted, and a sentinel in the write index.
+///
+/// Bit 7 of the shadow is deliberately CLEAR. Bit 7 of PPUCTRL is the NMI
+/// enable and this routine writes the shadow straight at $2000, so a shadow
+/// with it set hands the next NMI to the game's handler and the test program
+/// is never seen again. Bit 2 is set instead, because bit 2 is the one the
+/// routine masks off.
+fn flush_prog(queue: &[u8]) -> Prog {
+    let mut p = Prog::default();
+    p.poke(0x00ff, 0x34);
+    p.clear_vram();
+    p.bytes_at(QUEUE, queue);
+    p.poke(QUEUE_INDEX, SCRIBBLE);
+    p
+}
+
+#[test]
+fn vram_flush_at_e86a_walks_the_queue_and_matches_the_real_bios() {
+    // Two entries into the nametable, then the terminator. The queue is the
+    // whole interface: nothing is passed in a register.
+    if a_disk().is_none() {
+        return skipped();
+    }
+    let mut p = flush_prog(&[
+        0x20, 0x00, 0x02, 0xaa, 0xbb, // $2000: two bytes
+        0x20, 0x10, 0x03, 0x11, 0x22, 0x33, // $2010: three bytes
+        0xff, // end
+    ]);
+    p.jsr(0xe86a).record_and_halt();
+    let Some((r, mem)) = both_watching(&p.0, 30, &[QUEUE_INDEX, QUEUE, 0x00ff]) else {
+        return skipped();
+    };
+    assert!(r.reached, "$E86A never returned");
+    assert_eq!(mem[0], 0x00, "the game's write index should be reset");
+    assert_eq!(mem[1], 0xff, "the terminator it found is echoed back");
+    assert_eq!(mem[2], 0x30, "the shadow keeps the masked value");
+    assert_eq!(r.a, 0x00, "a is the $00 it stored into the write index");
+    assert_eq!(r.x, 0x00, "x ends as the exhausted byte counter");
+    assert_eq!(r.y, 11, "y ends at the terminator's offset from $0302");
+
+    let Some((_, nes)) = both(&p.0, 30) else { return skipped() };
+    let mut nes = nes;
+    let nt = nes.dbg_ciram();
+    assert_eq!(&nt[0..2], &[0xaa, 0xbb], "the first entry's bytes");
+    assert_eq!(&nt[0x10..0x13], &[0x11, 0x22, 0x33], "the second entry's bytes");
+    assert_eq!(nt[2], 0x00, "and nothing between them");
+}
+
+#[test]
+fn the_flush_count_is_the_whole_byte_and_not_six_bits_like_e7bb() {
+    // This is the one that matters most. $E7BB walks the same SHAPE of data
+    // with a different length byte: there the low six bits are the count, bit
+    // 6 means repeat-one-byte and bit 7 picks the VRAM increment. Here the
+    // count is all eight bits.
+    //
+    // $45 is the discriminator. Read as $E7BB would, it is a repeat of five.
+    // Read as $E86A does, it is a straight run of 69. Implementing this
+    // routine by calling the other would quietly corrupt every entry of 64
+    // bytes or more, and would pass any test that only used short entries.
+    if a_disk().is_none() {
+        return skipped();
+    }
+    let mut p = flush_prog(&[0x20, 0x00, 0x45]);
+    fill_run(&mut p, QUEUE + 3, 69, 0x5a);
+    p.bytes_at(QUEUE + 3 + 69, &[0xff]);
+    p.jsr(0xe86a).record_and_halt();
+    let Some((r, _)) = both(&p.0, 60) else { return skipped() };
+    assert!(r.reached);
+    assert_eq!(
+        r.y,
+        3 + 69,
+        "y should end past 69 data bytes, not past 5 or 1"
+    );
+    let Some((_, mut nes)) = both(&p.0, 60) else { return skipped() };
+    let nt = nes.dbg_ciram();
+    assert!(nt[..69].iter().all(|&b| b == 0x5a), "69 bytes should land");
+    assert_eq!(nt[69], 0x00, "and the seventieth should not");
+}
+
+#[test]
+fn a_flush_count_of_zero_means_two_hundred_and_fifty_six() {
+    // Not 64, which is what a zero count means in $E7BB, and not nothing. It
+    // falls out of an eight-bit countdown rather than being a special case,
+    // and it is how the original behaves.
+    if a_disk().is_none() {
+        return skipped();
+    }
+    // The index is eight bits against a sixteen-bit base, so 256 data bytes
+    // consume offsets 3 through 258, which wraps: the last three come from
+    // $0302-$0304, the entry's own header, and the next header is then read
+    // back at offset 3. So the terminator for a 256-byte entry has to live
+    // INSIDE the data, at $0305, and there is nowhere else it could go. A
+    // buffer whose terminator would sit at offset $100 or beyond hangs the
+    // real BIOS, which is why the obvious layout cannot be the test.
+    let mut p = flush_prog(&[0x20, 0x00, 0x00]);
+    fill_run(&mut p, QUEUE + 3, 251, 0x77); // $0305 through $03FF
+    p.bytes_at(0x0400, &[0x77, 0x77]); // the two that carry into page 4
+    p.bytes_at(QUEUE + 3, &[0xff]); // $0305: data byte 0, and the terminator
+    p.jsr(0xe86a).record_and_halt();
+    let Some((r, _)) = both(&p.0, 60) else { return skipped() };
+    assert!(r.reached, "a zero count should terminate, not hang");
+    assert_eq!(r.y, 3, "the index wraps back to the offset it started the data at");
+    let Some((_, mut nes)) = both(&p.0, 60) else { return skipped() };
+    let nt = nes.dbg_ciram().to_vec();
+    assert_eq!(nt[0], 0xff, "the first data byte is the byte at $0305");
+    assert_eq!(
+        nt[100], 0x77,
+        "byte 100 should have been written, so the count is 256 and not 64"
+    );
+    assert_eq!(
+        &nt[253..256],
+        &[0x20, 0x00, 0x00],
+        "the last three bytes wrap round to the entry's own header"
+    );
+}
+
+#[test]
+fn the_flush_resets_the_address_for_a_palette_entry_and_only_for_exactly_3f() {
+    // After a palette entry the routine points $2006 at $3F00 and then at
+    // $0000, so the PPU is not left showing a palette entry instead of the
+    // backdrop. The trigger is the address high byte being EXACTLY $3F: $3E
+    // and $7F were both measured not to fire it, which is what makes it a
+    // full-byte compare rather than a range or a mask.
+    let Some(disk) = a_disk() else { return skipped() };
+    for (hi, extra) in [(0x3fu8, 15u64), (0x3e, 0), (0x7f, 0), (0x20, 0)] {
+        let mut p = flush_prog(&[hi, 0x00, 0x01, 0xaa, 0xff]);
+        p.jsr(0xe86a).record_and_halt();
+        let ours = cycles_of_call_in(&disk, &[], 0xe86a, &p.0);
+        assert_eq!(
+            ours,
+            98 + extra,
+            "high byte ${hi:02x} should cost the palette reset only when it is $3F"
+        );
+        if let Some(real) = real_bios() {
+            assert_eq!(
+                cycles_of_call_in(&disk, &real, 0xe86a, &p.0),
+                ours,
+                "and the real BIOS should agree for ${hi:02x}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_flush_entry_beginning_4c_is_an_address_and_not_a_call() {
+    // $E7BB's little language reads $4C as "call" and $60 as "return". $E86A
+    // has neither: it walks a fixed base with an eight-bit index and has no
+    // pointer for a call to redirect, so $4C and $60 are ordinary VRAM
+    // address high bytes.
+    //
+    // Measured, not inferred from silence: an entry starting $4C writes $4C to
+    // $2006 and streams its data, with no stack traffic beyond the one push
+    // every entry makes.
+    let Some(disk) = a_disk() else { return skipped() };
+    for hi in [0x4cu8, 0x60] {
+        let mut p = flush_prog(&[hi, 0x40, 0x01, 0xaa, 0xff]);
+        p.jsr(0xe86a).record_and_halt();
+        let ours = cycles_of_call_in(&disk, &[], 0xe86a, &p.0);
+        assert_eq!(ours, 98, "${hi:02x} should cost one ordinary one-byte entry");
+        let writes = writes_inside_call(&disk, &[], &p.0, 0xe86a);
+        let addr: Vec<u8> = writes
+            .iter()
+            .filter(|(a, _)| *a == 0x2006)
+            .map(|(_, v)| *v)
+            .collect();
+        assert_eq!(addr, vec![hi, 0x40], "$2006 should take the address as written");
+        let pushes = writes
+            .iter()
+            .filter(|(a, _)| (0x0100..0x0200).contains(a))
+            .count();
+        assert_eq!(
+            pushes, 1,
+            "exactly the one push every entry makes; a call would push a position too"
+        );
+    }
+}
+
+#[test]
+fn the_flush_preamble_masks_bit_two_of_the_ppuctrl_shadow() {
+    // It forces the VRAM increment to +1 and keeps the masked value where the
+    // game can see it, leaving every other bit alone. Nearly missed: with the
+    // shadow at $30 the mask changes nothing, and $30 is what the first title
+    // profiled happened to hold.
+    if a_disk().is_none() {
+        return skipped();
+    }
+    for (shadow, want) in [(0x34u8, 0x30u8), (0x04, 0x00), (0x7b, 0x7b), (0x7f, 0x7b)] {
+        let mut p = Prog::default();
+        p.poke(0x00ff, shadow);
+        p.bytes_at(QUEUE, &[0xff]);
+        p.jsr(0xe86a).record_and_halt();
+        let Some((r, mem)) = both_watching(&p.0, 20, &[0x00ff]) else {
+            return skipped();
+        };
+        assert!(r.reached);
+        assert_eq!(
+            mem[0], want,
+            "a shadow of ${shadow:02x} should come back ${want:02x}"
+        );
+    }
+}
+
+#[test]
+fn the_flush_echoes_back_whichever_terminator_it_found() {
+    // Not a constant $FF: a queue ended with $80 comes back with $80 at $0302.
+    // Any byte with bit 7 set ends the walk.
+    if a_disk().is_none() {
+        return skipped();
+    }
+    for end in [0xffu8, 0x80, 0xa0] {
+        let mut p = flush_prog(&[end]);
+        p.jsr(0xe86a).record_and_halt();
+        let Some((r, mem)) = both_watching(&p.0, 20, &[QUEUE, QUEUE_INDEX]) else {
+            return skipped();
+        };
+        assert!(r.reached, "${end:02x} should end the walk");
+        assert_eq!(mem[0], end, "the terminator it read is what it writes back");
+        assert_eq!(mem[1], 0x00, "and the write index is always cleared");
+        assert_eq!(r.y, 0, "nothing was walked");
+    }
+}
+
+#[test]
+fn the_flush_preserves_v_d_and_i_and_takes_carry_from_the_last_entry() {
+    // N and Z come from the $00 it stores into the write index, so they are
+    // always 0 and 1. Carry is left over from the `cmp #$3F` that decides the
+    // palette reset, which makes it (last entry's high byte >= $3F): not a
+    // status, but it is what the original leaves. V, D and I pass through.
+    if a_disk().is_none() {
+        return skipped();
+    }
+    for (hi, want_carry) in [(0x20u8, 0x00u8), (0x3f, 0x01), (0x40, 0x01), (0x3e, 0x00)] {
+        let mut p = flush_prog(&[hi, 0x00, 0x01, 0xaa, 0xff]);
+        p.0.extend_from_slice(&[0x24, 0xfd]); // bit $fd, whose bit 6 sets V
+        p.0.push(0xf8); // sed
+        p.0.push(0x78); // sei
+        p.jsr(0xe86a).record_and_halt();
+        let mut full = Prog::default();
+        full.bytes_at(0x00fd, &[0x40]);
+        let mut bytes = full.0;
+        bytes.extend_from_slice(&p.0);
+        let Some((r, _)) = both(&bytes, 30) else { return skipped() };
+        assert!(r.reached);
+        assert_eq!(r.p & 0x01, want_carry, "carry after a ${hi:02x} entry");
+        assert_eq!(r.p & 0x80, 0x00, "N comes from the final $00");
+        assert_eq!(r.p & 0x02, 0x02, "Z comes from the final $00");
+        assert_eq!(r.p & 0x40, 0x40, "V should be preserved");
+        assert_eq!(r.p & 0x08, 0x08, "D should be preserved");
+        assert_eq!(r.p & 0x04, 0x04, "I should be preserved");
+    }
+}
+
+#[test]
+fn the_flush_costs_exactly_what_the_real_bios_costs() {
+    // 43 + 40 per entry + 15 per data byte + 15 per palette entry, and ours is
+    // the same. Matching matters here rather than merely being quick: this
+    // runs inside vblank, where a routine that takes LONGER than the original
+    // overruns the window a game budgeted for and corrupts the picture.
+    //
+    // Getting there needed the loop's test at the bottom so the palette block
+    // falls through into it. Branching back instead costs three cycles more on
+    // every palette entry, which is the wrong side of the line.
+    let Some(disk) = a_disk() else { return skipped() };
+    let cases: [(&[u8], u64); 5] = [
+        (&[0xff], 43),
+        (&[0x20, 0x00, 0x01, 0xaa, 0xff], 98),
+        (&[0x20, 0x00, 0x03, 0xaa, 0xbb, 0xcc, 0xff], 128),
+        (&[0x3f, 0x00, 0x01, 0xaa, 0xff], 113),
+        (&[0x20, 0x00, 0x01, 0xaa, 0x24, 0x40, 0x01, 0xbb, 0xff], 153),
+    ];
+    for (queue, want) in cases {
+        let mut p = flush_prog(queue);
+        p.jsr(0xe86a).record_and_halt();
+        assert_eq!(
+            cycles_of_call_in(&disk, &[], 0xe86a, &p.0),
+            want,
+            "our own cost for {queue:02x?}"
+        );
+        if let Some(real) = real_bios() {
+            assert_eq!(
+                cycles_of_call_in(&disk, &real, 0xe86a, &p.0),
+                want,
+                "the real BIOS should agree for {queue:02x?}"
+            );
+        }
+    }
+}
