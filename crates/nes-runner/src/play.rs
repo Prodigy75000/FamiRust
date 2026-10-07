@@ -76,7 +76,7 @@ use std::process::ExitCode;
 const PORTS: usize = 2;
 
 const USAGE: &str = "usage: play <rom.nes> \"30=start;60=right/left;200?p2_alive=1;240\" \
-                     [outdir] [--delay N] [--sym file.sym]";
+                     [outdir] [--delay N] [--sym file.sym] [--dump-ram f.bin]";
 
 fn parse_buttons(spec: &str) -> Result<u8, String> {
     let mut mask = 0u8;
@@ -236,6 +236,7 @@ fn run() -> Result<ExitCode, String> {
     let mut positional: Vec<String> = Vec::new();
     let mut delay: u32 = 0;
     let mut sym_arg: Option<String> = None;
+    let mut dump_ram: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -246,6 +247,7 @@ fn run() -> Result<ExitCode, String> {
                     .map_err(|_| format!("--delay {v:?} is not a frame count"))?;
             }
             "--sym" => sym_arg = Some(args.next().ok_or("--sym wants a path")?),
+            "--dump-ram" => dump_ram = Some(args.next().ok_or("--dump-ram wants a path")?),
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return Ok(ExitCode::SUCCESS);
@@ -361,6 +363,16 @@ fn run() -> Result<ExitCode, String> {
                 failures += 1;
             }
             ci += 1;
+        }
+    }
+
+    // The 2 KiB of internal RAM as it stands at the end of the run, for
+    // diffing against another emulator's. A mapper that banks wrongly diverges
+    // in RAM long before it diverges anywhere a screenshot would show.
+    if let Some(path) = dump_ram {
+        match std::fs::write(&path, nes.system_ram()) {
+            Ok(()) => println!("wrote {} ({} bytes of work RAM)", path, nes.system_ram().len()),
+            Err(e) => eprintln!("cannot write {path}: {e}"),
         }
     }
 

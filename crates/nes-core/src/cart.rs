@@ -1480,6 +1480,156 @@ impl SaveState for Bf9096 {
     }
 }
 
+/// Mapper 228: Active Enterprises, used by Action 52 and Cheetahmen II.
+///
+/// The whole register is the write ADDRESS; the data byte contributes only the
+/// bottom two CHR bits. Published layout:
+///
+/// ```text
+/// Address           Data
+/// FEDCBA98 76543210 76543210
+/// 1.MHHPPP PPS.CCCC ......CC
+/// ```
+///
+/// `M` = mirroring (0 vertical, 1 horizontal), `HH` = which 512 KiB PRG chip,
+/// `PPPPP` = 16 KiB PRG bank, `S` = bank size, `CCCC` + the data's two bits =
+/// a 6-bit 8 KiB CHR bank, which is 64 banks and exactly the 512 KiB Action 52
+/// carries.
+///
+/// **The board has four chip selects and three chips.** Action 52 uses 0, 1
+/// and 3; chip 2 is unpopulated. That is why the ROM is a non-power-of-two
+/// 1536 KiB with a logical hole: the file holds only the chips that exist, in
+/// order, so chip select 3 addresses the THIRD 512 KiB block of the file and
+/// chip select 2 addresses nothing at all. Getting this wrong aliases a third
+/// of the cart onto the wrong games.
+///
+/// Reading an absent chip is open bus on hardware. A mapper cannot express
+/// that through [`Mapper::cpu_read`], which has no way to say "leave the bus
+/// alone", so this returns 0 and leans on the documented fact that no game
+/// selects chip 2. If one ever does, the symptom will be `BRK` rather than
+/// silently running another game's code, which is the better of the two
+/// failures.
+pub struct Action52 {
+    prg: Vec<u8>,
+    chr: Vec<u8>,
+    prg_banks16: usize,
+    chr_banks8: usize,
+    /// `HH`, the raw 2-bit chip select, kept unmapped so the savestate holds
+    /// what the game wrote rather than our interpretation of it.
+    chip: u8,
+    /// `PPPPP`, the 16 KiB bank within the chip.
+    prg_bank: u8,
+    /// `S` inverted: true when one 16 KiB bank is mirrored into both halves.
+    prg_16k: bool,
+    chr_bank: u8,
+    mirroring: Mirroring,
+}
+impl Action52 {
+    pub fn new(cart: Cartridge) -> Self {
+        Action52 {
+            prg_banks16: (cart.prg_rom.len() / PRG_BANK).max(1),
+            chr_banks8: (cart.chr_rom.len() / CHR_BANK).max(1),
+            prg: cart.prg_rom,
+            chr: cart.chr_rom,
+            // Games expect $00 to have been written to $8000 at power on, so
+            // that is the reset state rather than anything from the header.
+            // The header's mirroring bit is not used by this board at all.
+            chip: 0,
+            prg_bank: 0,
+            prg_16k: false,
+            chr_bank: 0,
+            mirroring: Mirroring::Vertical,
+        }
+    }
+
+    /// Which 512 KiB block of the FILE a chip select refers to, or `None` for
+    /// silicon that is not there.
+    #[inline]
+    fn chip_slot(&self) -> Option<usize> {
+        match self.chip {
+            0 => Some(0),
+            1 => Some(1),
+            2 => None, // unpopulated on both cartridges
+            _ => Some(2),
+        }
+    }
+
+    /// Absolute 16 KiB bank for one half of the window, or `None` for open bus.
+    #[inline]
+    fn bank16(&self, low: bool) -> Option<usize> {
+        let local = if self.prg_16k {
+            // One bank in both halves.
+            self.prg_bank as usize
+        } else {
+            // A 32 KiB pair: bit 0 clear at $8000, set at $C000.
+            (self.prg_bank as usize & !1) | usize::from(!low)
+        };
+        let abs = self.chip_slot()? * 32 + local;
+        // Past the end of the file is absent silicon too, which is how a cart
+        // with fewer than three chips behaves.
+        (abs < self.prg_banks16).then_some(abs)
+    }
+}
+impl Mapper for Action52 {
+    fn cpu_read(&mut self, addr: u16) -> u8 {
+        let (bank, off) = match addr {
+            0x8000..=0xbfff => (self.bank16(true), addr as usize - 0x8000),
+            0xc000..=0xffff => (self.bank16(false), addr as usize - 0xc000),
+            _ => return 0,
+        };
+        match bank {
+            Some(b) => self.prg[b * PRG_BANK + off],
+            None => 0,
+        }
+    }
+    fn cpu_write(&mut self, addr: u16, val: u8) {
+        if addr < 0x8000 {
+            return;
+        }
+        self.mirroring = if addr & 0x2000 != 0 {
+            Mirroring::Horizontal
+        } else {
+            Mirroring::Vertical
+        };
+        self.chip = ((addr >> 11) & 3) as u8;
+        self.prg_bank = ((addr >> 6) & 0x1f) as u8;
+        self.prg_16k = addr & 0x20 != 0;
+        self.chr_bank = (((addr & 0x0f) << 2) as u8) | (val & 3);
+    }
+    fn ppu_read(&mut self, addr: u16) -> u8 {
+        let bank = self.chr_bank as usize % self.chr_banks8;
+        self.chr[bank * CHR_BANK + (addr as usize & 0x1fff)]
+    }
+    fn ppu_write(&mut self, _addr: u16, _val: u8) {
+        // CHR is ROM on both cartridges.
+    }
+    fn mirroring(&self) -> Mirroring {
+        self.mirroring
+    }
+}
+impl SaveState for Action52 {
+    fn save(&self, w: &mut WriteCursor) {
+        // CHR is ROM, so it is not part of the state.
+        w.u8(self.chip);
+        w.u8(self.prg_bank);
+        w.u8(u8::from(self.prg_16k));
+        w.u8(self.chr_bank);
+        w.u8(u8::from(matches!(self.mirroring, Mirroring::Horizontal)));
+    }
+    fn load(&mut self, r: &mut ReadCursor) -> Result<(), LoadError> {
+        self.chip = r.u8()?;
+        self.prg_bank = r.u8()?;
+        self.prg_16k = r.u8()? != 0;
+        self.chr_bank = r.u8()?;
+        self.mirroring = if r.u8()? != 0 {
+            Mirroring::Horizontal
+        } else {
+            Mirroring::Vertical
+        };
+        Ok(())
+    }
+}
+
 /// Mapper 68: Sunsoft-4. Four 2 KiB CHR banks ($8000/$9000/$A000/$B000), a 16 KiB
 /// PRG bank at $8000 ($F000, last 16 KiB fixed at $C000), and a mirroring/control
 /// register ($E000: bits 1-0 = V/H/1scA/1scB). The CHR-ROM-as-nametable feature
@@ -2926,6 +3076,7 @@ pub fn make_mapper(cart: Cartridge) -> Result<Box<dyn Mapper>, CartError> {
         119 => Ok(Box::new(Mmc3::new_tqrom(cart))),
         113 => Ok(Box::new(Nina113::new(cart))),
         232 => Ok(Box::new(Bf9096::new(cart))),
+        228 => Ok(Box::new(Action52::new(cart))),
         // Mapper 34: NINA-001 (CHR ROM) vs BNROM (CHR RAM).
         34 if !cart.chr_is_ram => Ok(Box::new(Nina001::new(cart))),
         34 => Ok(Box::new(BankSwap::new(cart, BankSwapKind::Bnrom))),
@@ -3011,5 +3162,210 @@ mod tests {
         let mut m = Nrom::new(cart);
         // $8000 and $C000 alias the same 16 KiB bank.
         assert_eq!(m.cpu_read(0x8000), m.cpu_read(0xc000));
+    }
+
+    // --- Mapper 228: Action 52 / Cheetahmen II --------------------------------
+
+    /// An Action-52-shaped cart: three 512 KiB PRG chips and 512 KiB of CHR,
+    /// with every 16 KiB PRG bank filled with its own absolute index and every
+    /// 8 KiB CHR bank filled with its own.
+    ///
+    /// That makes a read self-identifying: the byte at `$8000` IS the bank
+    /// number the mapper chose, so a wrong chip select shows up as a number
+    /// rather than as a game that looks a bit off.
+    fn synth_228(prg_banks: usize, chr_banks: usize) -> Vec<u8> {
+        let mut v = vec![0u8; HEADER_LEN];
+        v[0..4].copy_from_slice(b"NES\x1a");
+        v[4] = prg_banks as u8;
+        v[5] = chr_banks as u8;
+        v[6] = (228 & 0x0f) << 4;
+        v[7] = ((228 >> 4) << 4) as u8;
+        for b in 0..prg_banks {
+            v.extend(std::iter::repeat(b as u8).take(PRG_BANK));
+        }
+        for b in 0..chr_banks {
+            v.extend(std::iter::repeat(b as u8).take(CHR_BANK));
+        }
+        v
+    }
+
+    fn a52() -> Action52 {
+        let cart = Cartridge::from_ines(&synth_228(96, 64)).unwrap();
+        assert_eq!(cart.mapper, 228, "the synthetic header should say 228");
+        Action52::new(cart)
+    }
+
+    /// Build the write address from the published field layout, so the tests
+    /// below read as the documentation does:
+    ///
+    /// ```text
+    /// FEDCBA98 76543210
+    /// 1.MHHPPP PPS.CCCC
+    /// ```
+    fn a52_addr(horiz: bool, chip: u16, bank: u16, mirror16k: bool, chr_hi: u16) -> u16 {
+        0x8000
+            | (u16::from(horiz) << 13)
+            | (chip << 11)
+            | (bank << 6)
+            | (u16::from(mirror16k) << 5)
+            | chr_hi
+    }
+
+    #[test]
+    fn action52_chip_three_addresses_the_third_block_of_the_file() {
+        // The board has four chip selects and three chips: 0, 1 and 3 are
+        // populated and 2 is not. The file holds only what exists, in order,
+        // so chip select 3 is the THIRD 512 KiB block, bank 64 onwards.
+        //
+        // Getting this wrong by treating the select as a plain multiply puts
+        // chip 3 at bank 96, off the end of a 1536 KiB cart, and aliases a
+        // third of the games onto the wrong code.
+        let mut m = a52();
+        m.cpu_write(a52_addr(false, 3, 5, true, 0), 0);
+        assert_eq!(m.cpu_read(0x8000), 69, "chip 3, bank 5 is absolute bank 64+5");
+        assert_eq!(m.cpu_read(0xc000), 69, "and 16 KiB mode mirrors it into both halves");
+    }
+
+    #[test]
+    fn action52_chip_two_is_not_there() {
+        // Unpopulated on both cartridges. Nothing should come back from it,
+        // and in particular it must not alias onto chip 3's block.
+        let mut m = a52();
+        m.cpu_write(a52_addr(false, 2, 5, true, 0), 0);
+        assert_eq!(m.cpu_read(0x8000), 0, "chip 2 is absent silicon");
+        assert_eq!(m.cpu_read(0xc000), 0);
+        // And the chips either side of it are fine, so this is about chip 2
+        // rather than about the test rig.
+        m.cpu_write(a52_addr(false, 1, 5, true, 0), 0);
+        assert_eq!(m.cpu_read(0x8000), 37, "chip 1, bank 5 is absolute bank 32+5");
+        m.cpu_write(a52_addr(false, 0, 5, true, 0), 0);
+        assert_eq!(m.cpu_read(0x8000), 5);
+    }
+
+    #[test]
+    fn action52_bank_size_bit_picks_a_32k_pair_or_a_16k_mirror() {
+        // Size 0 puts the bank with bit 0 clear at $8000 and the bank with
+        // bit 0 set at $C000, which is a 32 KiB pair however odd the number
+        // written. Size 1 puts one 16 KiB bank in both halves.
+        let mut m = a52();
+        m.cpu_write(a52_addr(false, 0, 5, false, 0), 0);
+        assert_eq!(m.cpu_read(0x8000), 4, "an odd bank still starts its 32 KiB pair at 4");
+        assert_eq!(m.cpu_read(0xc000), 5);
+        m.cpu_write(a52_addr(false, 0, 4, false, 0), 0);
+        assert_eq!(m.cpu_read(0x8000), 4, "and an even one gives the same pair");
+        assert_eq!(m.cpu_read(0xc000), 5);
+        m.cpu_write(a52_addr(false, 0, 5, true, 0), 0);
+        assert_eq!(m.cpu_read(0x8000), 5, "16 KiB mode uses the bank exactly");
+        assert_eq!(m.cpu_read(0xc000), 5);
+    }
+
+    #[test]
+    fn action52_chr_bank_is_four_address_bits_over_two_data_bits() {
+        // Six bits in total, which is the 64 banks of 8 KiB that make up the
+        // cart's 512 KiB of CHR. The low two come from the DATA, which is the
+        // only thing the data byte is used for on this board.
+        let mut m = a52();
+        m.cpu_write(a52_addr(false, 0, 0, true, 0x0d), 0x02);
+        assert_eq!(m.ppu_read(0x0000), (0x0d << 2) | 2, "bank 54");
+        assert_eq!(m.ppu_read(0x1fff), (0x0d << 2) | 2, "the whole 8 KiB window");
+        // The data's upper six bits are not part of it.
+        m.cpu_write(a52_addr(false, 0, 0, true, 0x0d), 0xfe);
+        assert_eq!(m.ppu_read(0x0000), (0x0d << 2) | 2, "only data bits 1-0 count");
+        // And the address bit above the CHR field is not part of it either.
+        m.cpu_write(a52_addr(false, 0, 0, true, 0x0f), 0x03);
+        assert_eq!(m.ppu_read(0x0000), 63);
+    }
+
+    #[test]
+    fn action52_mirroring_follows_the_address_and_not_the_header() {
+        // The header for a mapper 228 cart carries a mirroring bit that the
+        // board does not wire up; every change comes through the register.
+        let mut m = a52();
+        m.cpu_write(a52_addr(true, 0, 0, true, 0), 0);
+        assert_eq!(m.mirroring(), Mirroring::Horizontal);
+        m.cpu_write(a52_addr(false, 0, 0, true, 0), 0);
+        assert_eq!(m.mirroring(), Mirroring::Vertical);
+    }
+
+    #[test]
+    fn action52_powers_on_as_if_zero_had_been_written_to_8000() {
+        // Documented, and games rely on it: a write of $00 to $8000 selects
+        // chip 0, bank 0, 32 KiB mode, CHR bank 0, vertical mirroring. So the
+        // reset state has to be that and not, say, the last bank.
+        let mut fresh = a52();
+        let mut written = a52();
+        written.cpu_write(0x8000, 0x00);
+        for addr in [0x8000u16, 0xbfff, 0xc000, 0xffff] {
+            assert_eq!(
+                fresh.cpu_read(addr),
+                written.cpu_read(addr),
+                "reset state should match a $00 write to $8000 at ${addr:04x}"
+            );
+        }
+        assert_eq!(fresh.cpu_read(0x8000), 0);
+        assert_eq!(fresh.cpu_read(0xc000), 1, "32 KiB mode, so the pair is banks 0 and 1");
+        assert_eq!(fresh.mirroring(), Mirroring::Vertical);
+        assert_eq!(fresh.ppu_read(0x0000), 0);
+    }
+
+    #[test]
+    fn action52_writes_below_8000_are_not_the_register() {
+        // The board only decodes $8000-$FFFF. A game writing to work RAM or a
+        // hardware register must not reconfigure the cart.
+        let mut m = a52();
+        m.cpu_write(a52_addr(true, 3, 7, true, 0x0f), 0x03);
+        let (bank, chr, mir) = (m.cpu_read(0x8000), m.ppu_read(0), m.mirroring());
+        for addr in [0x0000u16, 0x4020, 0x6000, 0x7fff] {
+            m.cpu_write(addr, 0x00);
+        }
+        assert_eq!(m.cpu_read(0x8000), bank, "a write below $8000 changed the PRG bank");
+        assert_eq!(m.ppu_read(0), chr, "a write below $8000 changed the CHR bank");
+        assert_eq!(m.mirroring(), mir, "a write below $8000 changed mirroring");
+    }
+
+    #[test]
+    fn action52_survives_a_savestate_round_trip() {
+        // The byte-identical savestate contract binds every in-house core, and
+        // a mapper that forgets a register comes back on the wrong bank.
+        let mut m = a52();
+        m.cpu_write(a52_addr(true, 3, 21, true, 0x0b), 0x03);
+        let (bank, chr, mir) = (m.cpu_read(0x8000), m.ppu_read(0), m.mirroring());
+        let mut w = WriteCursor::new();
+        m.save(&mut w);
+        let blob = w.into_bytes();
+
+        // Restore into a machine sitting somewhere else entirely, so "it was
+        // already right" cannot pass this.
+        let mut other = a52();
+        other.cpu_write(a52_addr(false, 0, 0, false, 0), 0x00);
+        assert_ne!(other.cpu_read(0x8000), bank, "the decoy must start different");
+        let mut r = ReadCursor::new(&blob);
+        other.load(&mut r).unwrap();
+        r.finish().unwrap();
+        assert_eq!(other.cpu_read(0x8000), bank);
+        assert_eq!(other.ppu_read(0), chr);
+        assert_eq!(other.mirroring(), mir);
+
+        // Byte-identical re-save, which is the part of the contract that binds
+        // across cores: a state written by one build must be readable by the
+        // next and come back out the same.
+        let mut w2 = WriteCursor::new();
+        other.save(&mut w2);
+        assert_eq!(blob, w2.into_bytes());
+    }
+
+    #[test]
+    fn action52_handles_a_cart_smaller_than_three_chips() {
+        // Cheetahmen II is the other mapper 228 cart and it is not 1536 KiB.
+        // Selecting a chip the cart does not carry has to read as absent
+        // rather than wrap onto bank 0 and run the wrong code.
+        let cart = Cartridge::from_ines(&synth_228(16, 8)).unwrap();
+        let mut m = Action52::new(cart);
+        m.cpu_write(a52_addr(false, 0, 3, true, 0), 0);
+        assert_eq!(m.cpu_read(0x8000), 3, "what it does have still works");
+        m.cpu_write(a52_addr(false, 1, 0, true, 0), 0);
+        assert_eq!(m.cpu_read(0x8000), 0, "a chip past the end of the file is absent");
+        m.cpu_write(a52_addr(false, 3, 0, true, 0), 0);
+        assert_eq!(m.cpu_read(0x8000), 0);
     }
 }

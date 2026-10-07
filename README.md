@@ -48,7 +48,11 @@ NES library: hundreds of licensed titles boot and play.
   incl. extended-attribute mode), 7 (AxROM), 9 (MMC2), 11 (Color Dreams),
   13 (CPROM), 34 (BNROM/NINA-001), 64 (RAMBO-1), 65 (Irem H3001), 66 (GxROM),
   69 (Sunsoft FME-7), 71 (Camerica), 79 (NINA-03), 113 (NINA-113),
-  118 (TxSROM), 119 (TQROM), 232 (Camerica BF9096).
+  118 (TxSROM), 119 (TQROM), 228 (Active Enterprises), 232 (Camerica BF9096).
+  Mapper 228 is there for *Action 52* and *Cheetahmen II*: a board whose whole
+  register is the write address, with four chip selects over three populated
+  chips, which is why the cart is a non-power-of-two 1536 KiB with a hole in
+  the middle of its address space.
 - **Famicom Disk System**: the RAM adapter (mapper 20), **with no firmware file
   required**: disk-image parsing, the byte-level drive with gap/mark framing,
   timer + transfer IRQs, disk reads *and writes* (in-game saves), the RP2C33
