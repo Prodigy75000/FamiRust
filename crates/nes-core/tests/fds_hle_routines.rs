@@ -337,7 +337,11 @@ fn cycles_of_call_in(disk: &[u8], bios: &[u8], addr: u16, prog: &[u8]) -> u64 {
     // A deadline, because a routine that never returns would otherwise hang
     // the whole suite rather than fail one test. Two frames is far more than
     // any routine measured here takes.
-    let give_up = start + 2 * 29_781;
+    // Generous, because one of these routines is a delay: $E153 at y=0 waits
+    // 256 ms, which is 468,544 cycles or about sixteen frames. The deadline is
+    // here to turn a hang into a failed test rather than to police duration,
+    // so it only has to be larger than anything legitimate.
+    let give_up = start + 64 * 29_781;
     loop {
         nes.step();
         if nes.dbg_pc() < BIOS_BASE && nes.cpu.sp >= sp_in {
@@ -2206,5 +2210,159 @@ fn the_flush_costs_exactly_what_the_real_bios_costs() {
                 "the real BIOS should agree for {queue:02x?}"
             );
         }
+    }
+}
+
+// --- $E153, the millisecond delay -------------------------------------------
+
+/// `ldy #n`, the only argument `$E153` takes.
+fn delay_setup(ms: u8) -> Vec<u8> {
+    vec![0xa0, ms]
+}
+
+#[test]
+fn the_delay_at_e153_waits_five_plus_1790_per_millisecond() {
+    // 1790 cycles is 1.0001 ms on NTSC, which is what makes "milliseconds" the
+    // right word rather than a coincidence.
+    //
+    // This is the second routine where our usual rule inverts. Everywhere else
+    // being faster than the original is safe; here, as at $E149, the duration
+    // IS the product and the count has to be exact in both directions. So this
+    // asserts equality, not an inequality.
+    let Some(disk) = a_disk() else { return skipped() };
+    for ms in [1u8, 2, 5, 10] {
+        let want = 5 + 1790 * u64::from(ms);
+        assert_eq!(
+            cycles_of_call_after(&disk, &[], 0xe153, &delay_setup(ms)),
+            want,
+            "y={ms} should take 5 + 1790*{ms}"
+        );
+        if let Some(real) = real_bios() {
+            assert_eq!(
+                cycles_of_call_after(&disk, &real, 0xe153, &delay_setup(ms)),
+                want,
+                "and the real BIOS should agree at y={ms}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_delay_of_zero_milliseconds_waits_two_hundred_and_fifty_six() {
+    // The loop is a do-while on y, so zero is the long way round rather than
+    // no wait at all: 458,245 cycles, about sixteen frames. A game asking for
+    // "none" and getting a quarter of a second is the original's behaviour and
+    // has to be ours.
+    let Some(disk) = a_disk() else { return skipped() };
+    let want = 5 + 1790 * 256;
+    assert_eq!(
+        cycles_of_call_after(&disk, &[], 0xe153, &delay_setup(0)),
+        want,
+        "y=0 should mean 256 milliseconds"
+    );
+    if let Some(real) = real_bios() {
+        assert_eq!(
+            cycles_of_call_after(&disk, &real, 0xe153, &delay_setup(0)),
+            want
+        );
+    }
+}
+
+#[test]
+fn the_delay_preserves_a_and_leaves_carry_as_a_is_at_least_twenty() {
+    // `a` survives, `x` and `y` both come out zero, N and Z follow the final
+    // `dey`, and V, D and I pass through.
+    //
+    // Carry is the awkward one and took three goes. It is not cleared, not
+    // set, and not preserved: it comes out as `a >= $20`, with a clean
+    // threshold that $1F and $20 straddle. That is also how `a` can survive a
+    // routine which leaves a flag derived from it.
+    //
+    // NMI is off for the duration and I is set. A 2 ms wait is 3585 cycles and
+    // an interrupt can land inside it; when one does, the game's own handler
+    // alters the P it pushed and the carry this test is about comes back
+    // whatever that handler left. Two earlier readings of this routine's carry
+    // were wrong for exactly that reason.
+    if a_disk().is_none() {
+        return skipped();
+    }
+    for (a_in, want_carry) in [(0x00u8, 0u8), (0x1f, 0), (0x20, 1), (0x5a, 1), (0xff, 1)] {
+        let mut p = Prog::default();
+        p.poke(0x2000, 0x00);
+        p.poke(0x00fd, 0x40);
+        p.ldx(0xaa);
+        p.0.extend_from_slice(&[0x24, 0xfd]); // bit $fd, whose bit 6 sets V
+        p.0.push(0x78); // sei
+        // Carry in deliberately the OPPOSITE of what should come out, so
+        // "preserved" cannot pass as "derived".
+        p.0.push(if want_carry == 1 { 0x18 } else { 0x38 });
+        p.lda(a_in);
+        p.ldy(0x02);
+        p.jsr(0xe153).record_and_halt();
+        let Some((r, _)) = both(&p.0, 30) else { return skipped() };
+        assert!(r.reached, "$E153 never came back with a=${a_in:02x}");
+        assert_eq!(r.a, a_in, "a is the caller's and must survive");
+        assert_eq!(r.x, 0x00, "x is clobbered to zero though it is not an argument");
+        assert_eq!(r.y, 0x00, "y counts down to zero");
+        assert_eq!(
+            r.p & 0x01,
+            want_carry,
+            "carry should be (a >= $20) for a=${a_in:02x}, not the carry going in"
+        );
+        assert_eq!(r.p & 0x02, 0x02, "Z from the final dey");
+        assert_eq!(r.p & 0x80, 0x00, "N from the final dey");
+        assert_eq!(r.p & 0x40, 0x40, "V should be preserved");
+        assert_eq!(r.p & 0x04, 0x04, "I should be preserved");
+    }
+}
+
+#[test]
+fn the_millisecond_delay_is_decimal_proof() {
+    // Nothing in it adds, so decimal mode cannot change the count. This is the
+    // test that stops someone "simplifying" the loop into arithmetic later,
+    // the same way the one on $E149 does.
+    let Some(disk) = a_disk() else { return skipped() };
+    let mut setup = vec![0xf8]; // sed
+    setup.extend_from_slice(&delay_setup(3));
+    assert_eq!(
+        cycles_of_call_after(&disk, &[], 0xe153, &setup),
+        5 + 1790 * 3,
+        "decimal mode must not move the count"
+    );
+
+    let mut p = Prog::default();
+    // NMI off, as in the carry test above and for the same reason: an
+    // interrupt landing mid-wait makes this a test of whose handler ran.
+    p.poke(0x2000, 0x00);
+    p.0.push(0xf8); // sed
+    p.0.push(0x78); // sei
+    p.ldy(0x02);
+    p.jsr(0xe153);
+    p.record_and_halt();
+    let Some((r, _)) = both(&p.0, 30) else { return skipped() };
+    assert!(r.reached, "it never returned with decimal mode set");
+    assert_eq!(r.p & 0x08, 0x08, "and D should still be set on the way out");
+}
+
+#[test]
+fn the_delay_touches_nothing_at_all() {
+    // No writes anywhere, and in particular no stack writes: there is no `pha`
+    // in it, which is exactly why `a` cannot be borrowed as a counter and why
+    // the loop has the shape it has. The real one also reads $0000 repeatedly
+    // while it waits, but those are dummy reads with no effect, so ours does
+    // not reproduce them and makes no access below $E000 at all.
+    let Some(disk) = a_disk() else { return skipped() };
+    let mut p = Prog::default();
+    p.ldy(0x01).jsr(0xe153).record_and_halt();
+    let writes = writes_inside_call(&disk, &[], &p.0, 0xe153);
+    assert!(
+        writes.is_empty(),
+        "a delay should write nothing, got {writes:04x?}"
+    );
+    if let Some(real) = real_bios() {
+        assert!(
+            writes_inside_call(&disk, &real, &p.0, 0xe153).is_empty(),
+            "and the real one writes nothing either, which is what we are matching"
+        );
     }
 }

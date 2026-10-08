@@ -349,8 +349,68 @@ delay_131:
 ; 3 + 3 + 2 + 39 + 2 + 2 + 70 + 4 + 6 = 131
 .assert (delay_131_end - delay_131) == 45
 delay_131_end:
+; --- $E153: delay y milliseconds -------------------------------------------
+;
+; Four titles were stopped on it: 19 - Neunzehn, Lutter, and both Super Lode
+; Runners. It takes y and comes back when that many milliseconds have gone.
+;
+;   cycles = 5 + 1790*y, with y=0 meaning 256
+;
+; 1790 cycles is 1.0001 ms on NTSC, which is what makes "milliseconds" the
+; right word rather than a coincidence. Measured exactly: forced y=$01 gave
+; 1795, y=$02 3585, y=$0A 17905. Interrupts taken during the wait are on top,
+; since it counts cycles rather than watching a clock.
+;
+; **This is a delay, so the duration IS the product and faster is NOT safe**,
+; the same rule as $E149. The count has to be exact in both directions.
+;
+; That is what forces the shape below. `a` is preserved and the routine makes
+; NO stack writes at all, so there is no `pha` available and `a` cannot be
+; borrowed as a counter: `x` and `y` are the only registers in play and `y` is
+; already the argument. One 8-bit inner loop therefore has to cover 1790
+; cycles on its own, and the arithmetic has exactly three solutions. This is
+; the one with room in the outer pad for the `clc`:
+;
+;   2 (ldx) + [7*254 - 1] + 6 (pad) + 2 (dey) + 3 (bne) = 1790
+;
+; Entry overhead has to be ZERO for the total to come out at 5 + 1790*y, so
+; the loop starts on the entry point itself with nothing in front of it.
+;
+; Exit: `a` preserved, `x` and `y` both $00, N=0 and Z=1 from the final `dey`,
+; and **C = (a >= $20)**, which is why a compare is in the pad.
+; V, D and I are preserved. Decimal-proof by construction: nothing here adds.
+;
+; **Carry is `a >= $20`**, and it took three goes to get right. The note this
+; was written from recorded "C=0 always", measured by `fdsprof` on a live
+; Lutter whose calls were taking interrupts, so the game's handler was altering
+; the P it had pushed. Re-measuring with NMI off through $2000, with I set, and
+; on calls proven to make no writes at all said C=1 instead, which was just as
+; wrong: that program happened to hold `a`=$5A. Carry does not depend on the
+; carry coming in, on `y`, or on decimal mode. It depends on `a`, with a clean
+; threshold: $1F gives 0 and $20 gives 1, swept either side. Hence the compare
+; rather than a `sec`, which also explains how `a` survives a routine that
+; leaves a flag derived from it.
+;
+; The real one reads $0000 over and over while it waits. Those are dummy reads
+; with no effect, proven by forcing $00, $01, $70, $80 and $FF into it and
+; getting byte-identical 466,204-cycle calls, so ours does not reproduce them
+; and makes no bus access below $E000 at all.
 .org $E153
-  jmp unimplemented
+delay_ms:
+  ldx #254                  ; 2
+@inner:
+  nop                       ; 2
+  dex                       ; 2
+  bne @inner                ; 3, and 2 on the last pass
+  cmp #$20                  ; 2   carry out is (a >= $20), measured
+  nop                       ; 2
+  nop                       ; 2
+  dey                       ; 2
+  bne delay_ms              ; 3, and 2 on the last pass. y=0 wraps to 255 and
+                            ;    so runs 256 times, which is the contract
+  rts                       ; 6
+.assert (delay_ms_end - delay_ms) == 14
+delay_ms_end:
 ; --- $E161 $E16B $E171 $E17E $E185: the PPUMASK family ----------------------
 ;
 ; Five entry points that are one routine with five masks. $E161 alone stops 10

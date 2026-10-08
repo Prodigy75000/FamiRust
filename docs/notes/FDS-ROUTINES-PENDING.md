@@ -26,31 +26,30 @@ anything there, so black-box observation cannot locate it and the stub stays.
 
 ---
 
-## `$E153`: delay Y milliseconds
+## `$E153`: WRITTEN 2026-10-08, and the note below was wrong about carry
 
-Not part of the family above, despite sitting among them.
+Implemented and held against the real BIOS. The duration measurement here was
+right (`5 + 1790*Y`, `Y=0` meaning 256, decimal-proof) and is now reproduced
+exactly, including at `Y=0`.
 
-**Duration = `5 + 1790*Y` cycles, with `Y=0` meaning 256**, plus whatever time
-the caller's own interrupt handlers steal mid-delay. Forced `y=$01` gave 1795,
-`y=$02` 3585, `y=$0A` 17905, exact. 1790 cycles is 1.0001 ms NTSC, so the
-interface really is "delay Y milliseconds".
+**The flag measurement was wrong, and the way it was wrong is the lesson.**
+This note recorded "`N=0`, `Z=1`, `C=0` always" with an added "loose end" that
+an NMI landing mid-call gave `C=1` on Lutter. Both halves were backwards. The
+`C=0` readings came from `fdsprof` on a LIVE game whose calls were taking
+interrupts, so the handler was altering the P it had pushed; the uninterrupted
+value was the thing the note called the anomaly.
 
-`A` is preserved (forced `$80` came back `$80`). **`X` and `Y` both come out
-`$00`**, and `X` is clobbered even though it is not an argument.
+Re-measured with NMI off through `$2000`, with `I` set, and on calls proven by
+the access log to make no writes at all and therefore to take no interrupt:
+**carry comes out as `a >= $20`**, a clean threshold with `$1F` giving 0 and
+`$20` giving 1. It does not depend on the carry coming in, on `y`, or on
+decimal mode. A first correction said "always set", which was also wrong and
+only looked right because that probe happened to hold `a`=$5A.
 
-Uninterrupted exit flags: **`N=0`, `Z=1`, `C=0` always; `V`, `D`, `I`
-preserved.** Note it preserves `V` where `$E149` clears it, so the two are not
-the same kind of delay. Decimal-proof: `D=1` left `y=$01` at exactly 1795.
-
-It reads `$0000` repeatedly during the wait but **the value is irrelevant**:
-forcing `$00`, `$01`, `$70`, `$80` and `$FF` all gave byte-identical
-466,204-cycle calls, so those are dummy reads and ours need not reproduce them.
-No writes anywhere, no stack writes, exit `rts`.
-
-**Loose end.** Calls with an NMI landing inside came back with `C=1` on Lutter.
-Uninterrupted calls are always `C=0`, so that is the game's own handler touching
-its stacked `P` rather than anything the routine does. Separating it further
-would mean instrumenting Lutter's NMI handler.
+The general point for anything still on this page: **a flag measured on a live
+game is a flag measured through that game's interrupt handlers.** Turn NMI off,
+set `I`, and confirm from the access log that the call made no stack writes
+before believing any flag it reports.
 
 ---
 

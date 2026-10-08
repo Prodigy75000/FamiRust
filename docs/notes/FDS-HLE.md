@@ -243,7 +243,7 @@ work as taking transfer interrupts in the loader.
 
 ### The routines
 
-Twenty-two of the forty entry points are implemented. The other 18 are stubs that put
+Twenty-three of the forty entry points are implemented. The other 17 are stubs that put
 **NO ROUTINE** on the screen and stop, which is worth its 111 bytes: Zelda hands
 over correctly, runs its own code, jumps to `$EA84` and would otherwise
 disappear into the fill, looking like a hundred different bugs instead of one
@@ -273,6 +273,7 @@ missing routine. `fdstrace` names the address.
 | `$E9B1` | 10 | shift a zero page register right one bit, with feedback | a random number generator; access-trace-exact, 3 cycles fast |
 | `$EAFD` | 11 | jump through a table of addresses written after the call | a tail call: it consumes its own frame. Cycle-exact, 45 |
 | `$E86A` | 10 | flush the queued VRAM transfer buffer at `$0302` | cycle-exact; NOT `$E7BB`'s length language |
+| `$E153` | 7 | delay `y` milliseconds | cycle-exact, 5 + 1790*y; the second place faster is WRONG |
 
 **Where the cycle counts do not match, ours is faster, never slower.** That is
 deliberate. A game that runs one of these inside vblank has more room than it
@@ -350,12 +351,20 @@ needs:
 | `$E8D2` | **4** |
 | `$E9D3` | **3** |
 
-**95 of the 114 now reach their own code without asking for a routine we have
-not written**, up from 50 when the queue was first measured, in an unattended
-1800-frame run with START mashed. 19 are still stopped by a missing routine,
-and no single routine now blocks more than four titles.
+Then `$E153`:
 
-Ninety-five is NOT "ninety-five titles play correctly": thirty seconds of
+| entry | titles stuck on it now |
+|---|---|
+| `$E8D2` | **4** |
+| `$E9D3` | **3** |
+| `$E239` | **2** |
+
+**99 of the 114 now reach their own code without asking for a routine we have
+not written**, up from 50 when the queue was first measured, in an unattended
+1800-frame run with START mashed. 15 are still stopped by a missing routine,
+and the queue is down to a tail of ones and twos behind `$E8D2`.
+
+Ninety-nine is NOT "ninety-nine titles play correctly": thirty seconds of
 unattended running reaches what it reaches, and a game that needs a routine
 only when you open its menu has not asked yet.
 
@@ -378,9 +387,10 @@ what comes back. That is the oracle at the level the work happens at.
 2. ~~Baseline smoke on the real BIOS, one ledger row per title.~~ The census
    rows and `fds-hle-check.py` are this.
 3. ~~HLE boot with our own graphics and no BIOS file present.~~ Done 2026-09-29.
-4. Routine by routine, each held against the real BIOS. Twenty-two of forty
-   done. The queue by BLOCKING is now flat: `$E153` and `$E8D2` at four each,
-   `$E9D3` at three. `$E153` is already measured and ready to write, see
-   [`FDS-ROUTINES-PENDING.md`](FDS-ROUTINES-PENDING.md), which also records why
-   Kaettekita Mario Bros. jams and what `$EC22` has to do with it.
+4. Routine by routine, each held against the real BIOS. Twenty-three of forty
+   done. The queue by BLOCKING is now a tail: `$E8D2` at four, `$E9D3` at
+   three, then ones and twos. See
+   [`FDS-ROUTINES-PENDING.md`](FDS-ROUTINES-PENDING.md), which records why
+   Kaettekita Mario Bros. jams, what `$EC22` has to do with it, and why a flag
+   measured on a live game is a flag measured through its interrupt handlers.
 5. Cycle accounting per routine, starting from the `cyc/call` column.
