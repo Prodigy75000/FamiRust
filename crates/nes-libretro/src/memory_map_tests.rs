@@ -200,3 +200,42 @@ fn the_map_is_published_again_after_a_reset() {
     assert_eq!(second[0].2, 0x800);
     assert_ne!(second[0].3, 0, "and still point at real memory");
 }
+
+/// The version a front-end sees must be the package version, not a literal.
+///
+/// It WAS a literal, `c"0.2.2"`, and it went on saying 0.2.2 after the crates
+/// were bumped. That looked cosmetic and was not, because the field has a
+/// reader downstream of this repo: TrophyHubAndroid's release gate snapshots
+/// `version: {declared, built}` per core into a tracked `cores.lock.json` and
+/// compares them. A constant cannot disagree with itself, so that check sat
+/// there looking green across six weeks and several hundred commits while the
+/// sha256 and the source-commit comparison did all the work.
+///
+/// A test rather than a comment, because the next person to touch this has no
+/// way of knowing a second repo is reading the string.
+#[test]
+fn the_library_version_is_the_package_version_and_not_a_literal() {
+    let mut info = crate::retro_system_info {
+        library_name: std::ptr::null(),
+        library_version: std::ptr::null(),
+        valid_extensions: std::ptr::null(),
+        need_fullpath: true,
+        block_extract: true,
+    };
+    unsafe {
+        crate::retro_get_system_info(&mut info);
+        assert!(!info.library_version.is_null(), "a front-end reads this");
+        let got = std::ffi::CStr::from_ptr(info.library_version)
+            .to_str()
+            .expect("the version should be plain ASCII");
+        assert_eq!(
+            got,
+            env!("CARGO_PKG_VERSION"),
+            "library_version has drifted from the package version. If you just \
+             bumped the crate, do not paste the new number here: make this read \
+             CARGO_PKG_VERSION so it cannot drift again."
+        );
+        let name = std::ffi::CStr::from_ptr(info.library_name).to_str().unwrap();
+        assert_eq!(name, "FamiRust");
+    }
+}
