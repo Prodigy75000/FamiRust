@@ -40,11 +40,16 @@ SRC="$TARGET_DIR/$TRIPLE/release/$SO"
 DST="$ANDROID/app/src/main/jniLibs/$ABI/$SO"
 [ -f "$SRC" ] || { echo "ERROR: built core not found at $SRC" >&2; exit 1; }
 echo "[2/3] cp core -> $DST"
-cp "$SRC" "$DST"
+# -p throughout: the artifact's mtime is read downstream as "when was this
+# built". TrophyHubAndroid's release gate takes builtAt from the .so's mtime,
+# and a plain cp resets it to the copy time, which silently disables its
+# staleness check. Harmless when the copy follows the build by seconds, not
+# harmless when an out/release artifact is picked up hours or days later.
+cp -p "$SRC" "$DST"
 # Keep the checked-in-looking copy under out/release in step with what shipped,
 # so "what is on the device" can be answered from this repo alone.
 mkdir -p "$REPO/out/release"
-cp "$SRC" "$REPO/out/release/libnescore_libretro.android-arm64.so"
+cp -p "$SRC" "$REPO/out/release/libnescore_libretro.android-arm64.so"
 
 echo "[3/3] ./gradlew :app:assembleDebug"
 ( cd "$ANDROID" && ./gradlew :app:assembleDebug )
@@ -72,7 +77,7 @@ echo "APK: $APK"
 DRIVE_DIR="${TROPHYHUB_DRIVE_DIR:-/g/My Drive/Trophy Hub}"
 DRIVE_SLOT="${TROPHYHUB_DEBUG_APK:-$DRIVE_DIR/TrophyHub-debug-famirust.apk}"
 if [ -d "$(dirname "$DRIVE_SLOT")" ]; then
-  cp "$APK" "$DRIVE_SLOT"
+  cp -p "$APK" "$DRIVE_SLOT"
   echo "Drive: $DRIVE_SLOT (replaced)"
 
   # A note beside it, so the file is self-describing. Same reasoning as the
@@ -88,7 +93,7 @@ if [ -d "$(dirname "$DRIVE_SLOT")" ]; then
     echo "the only thing this build is FOR is the NES/FDS core inside it."
     echo
     echo "FamiRust HEAD   $(cd "$REPO" && git rev-parse --short HEAD) $(cd "$REPO" && git log -1 --format=%ad --date=short)"
-    echo "core source at  $(cd "$REPO" && git log -1 --format='%h %ad' --date=short -- crates/nes-core/src crates/nes-libretro/src)"
+    echo "core source at  $(bash "$REPO/scripts/core-source-rev.sh")"
     echo "TrophyHubAndroid $(cd "$ANDROID" && git rev-parse --short HEAD 2>/dev/null || echo '(unknown)')"
     echo "APK md5         $(md5sum "$APK" | cut -d' ' -f1)"
     echo "core .so md5    $(md5sum "$SRC" | cut -d' ' -f1)"
