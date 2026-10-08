@@ -1565,9 +1565,23 @@ impl Action52 {
             (self.prg_bank as usize & !1) | usize::from(!low)
         };
         let abs = self.chip_slot()? * 32 + local;
-        // Past the end of the file is absent silicon too, which is how a cart
-        // with fewer than three chips behaves.
-        (abs < self.prg_banks16).then_some(abs)
+        // Past the end of the ROM MIRRORS rather than reading as nothing. A
+        // cart smaller than the board's full complement leaves the top address
+        // lines unconnected, so the chip answers to every alias of itself.
+        //
+        // Cheetahmen II is the case that proves it, and it grey-screened until
+        // this was right. It is 256 KiB, sixteen 16 KiB banks, and it selects
+        // CHIP 1: bank 0 and bank 1 of chip 1 are absolute 32 and 33 against a
+        // cart that has sixteen. Returning open bus there fed the CPU zeroes
+        // half a million times in sixty frames. Wrapping puts them back on
+        // banks 0 and 1, which is the same data the one chip holds at every
+        // alias.
+        //
+        // Chip select 2 is still genuinely nothing: that is a hole in the
+        // middle of Action 52's three populated chips rather than an address
+        // off the end of them, so it stays open bus and does not wrap onto
+        // chip 3's half.
+        Some(abs % self.prg_banks16)
     }
 }
 impl Mapper for Action52 {
@@ -3180,8 +3194,12 @@ mod tests {
         v[5] = chr_banks as u8;
         v[6] = (228 & 0x0f) << 4;
         v[7] = ((228 >> 4) << 4) as u8;
+        // PRG bank b holds b+1, never 0, so a read of 0 can ONLY mean open
+        // bus. Filling bank b with b made bank 0 indistinguishable from absent
+        // silicon, and the smaller-cart test below passed by coincidence for
+        // exactly that reason while the mapper had the behaviour wrong.
         for b in 0..prg_banks {
-            v.extend(std::iter::repeat(b as u8).take(PRG_BANK));
+            v.extend(std::iter::repeat(b as u8 + 1).take(PRG_BANK));
         }
         for b in 0..chr_banks {
             v.extend(std::iter::repeat(b as u8).take(CHR_BANK));
@@ -3222,8 +3240,8 @@ mod tests {
         // third of the games onto the wrong code.
         let mut m = a52();
         m.cpu_write(a52_addr(false, 3, 5, true, 0), 0);
-        assert_eq!(m.cpu_read(0x8000), 69, "chip 3, bank 5 is absolute bank 64+5");
-        assert_eq!(m.cpu_read(0xc000), 69, "and 16 KiB mode mirrors it into both halves");
+        assert_eq!(m.cpu_read(0x8000), 70, "chip 3, bank 5 is absolute bank 64+5");
+        assert_eq!(m.cpu_read(0xc000), 70, "and 16 KiB mode mirrors it into both halves");
     }
 
     #[test]
@@ -3237,9 +3255,9 @@ mod tests {
         // And the chips either side of it are fine, so this is about chip 2
         // rather than about the test rig.
         m.cpu_write(a52_addr(false, 1, 5, true, 0), 0);
-        assert_eq!(m.cpu_read(0x8000), 37, "chip 1, bank 5 is absolute bank 32+5");
+        assert_eq!(m.cpu_read(0x8000), 38, "chip 1, bank 5 is absolute bank 32+5");
         m.cpu_write(a52_addr(false, 0, 5, true, 0), 0);
-        assert_eq!(m.cpu_read(0x8000), 5);
+        assert_eq!(m.cpu_read(0x8000), 6);
     }
 
     #[test]
@@ -3249,14 +3267,14 @@ mod tests {
         // written. Size 1 puts one 16 KiB bank in both halves.
         let mut m = a52();
         m.cpu_write(a52_addr(false, 0, 5, false, 0), 0);
-        assert_eq!(m.cpu_read(0x8000), 4, "an odd bank still starts its 32 KiB pair at 4");
-        assert_eq!(m.cpu_read(0xc000), 5);
+        assert_eq!(m.cpu_read(0x8000), 5, "an odd bank still starts its 32 KiB pair at 4");
+        assert_eq!(m.cpu_read(0xc000), 6);
         m.cpu_write(a52_addr(false, 0, 4, false, 0), 0);
-        assert_eq!(m.cpu_read(0x8000), 4, "and an even one gives the same pair");
-        assert_eq!(m.cpu_read(0xc000), 5);
+        assert_eq!(m.cpu_read(0x8000), 5, "and an even one gives the same pair");
+        assert_eq!(m.cpu_read(0xc000), 6);
         m.cpu_write(a52_addr(false, 0, 5, true, 0), 0);
-        assert_eq!(m.cpu_read(0x8000), 5, "16 KiB mode uses the bank exactly");
-        assert_eq!(m.cpu_read(0xc000), 5);
+        assert_eq!(m.cpu_read(0x8000), 6, "16 KiB mode uses the bank exactly");
+        assert_eq!(m.cpu_read(0xc000), 6);
     }
 
     #[test]
@@ -3302,8 +3320,8 @@ mod tests {
                 "reset state should match a $00 write to $8000 at ${addr:04x}"
             );
         }
-        assert_eq!(fresh.cpu_read(0x8000), 0);
-        assert_eq!(fresh.cpu_read(0xc000), 1, "32 KiB mode, so the pair is banks 0 and 1");
+        assert_eq!(fresh.cpu_read(0x8000), 1);
+        assert_eq!(fresh.cpu_read(0xc000), 2, "32 KiB mode, so the pair is banks 0 and 1");
         assert_eq!(fresh.mirroring(), Mirroring::Vertical);
         assert_eq!(fresh.ppu_read(0x0000), 0);
     }
@@ -3355,17 +3373,36 @@ mod tests {
     }
 
     #[test]
-    fn action52_handles_a_cart_smaller_than_three_chips() {
-        // Cheetahmen II is the other mapper 228 cart and it is not 1536 KiB.
-        // Selecting a chip the cart does not carry has to read as absent
-        // rather than wrap onto bank 0 and run the wrong code.
+    fn a_cart_smaller_than_the_board_mirrors_rather_than_reading_as_nothing() {
+        // Cheetahmen II is the other mapper 228 cart and it is 256 KiB, not
+        // 1536. It selects CHIP 1, whose bank 0 is absolute bank 32 against a
+        // cart that has sixteen. Reading that as absent silicon grey-screened
+        // the game: the CPU was fed zeroes half a million times in sixty
+        // frames. A chip smaller than the window it sits in leaves the top
+        // address lines unconnected and answers to every alias of itself, so
+        // the right answer is bank 32 mod 16, which is bank 0.
+        //
+        // This test used to assert the opposite and passed anyway, because the
+        // fixture filled bank b with b and bank 0 therefore held 0, which is
+        // what open bus returns too. The fill is b+1 now so that zero can only
+        // ever mean open bus.
         let cart = Cartridge::from_ines(&synth_228(16, 8)).unwrap();
         let mut m = Action52::new(cart);
         m.cpu_write(a52_addr(false, 0, 3, true, 0), 0);
-        assert_eq!(m.cpu_read(0x8000), 3, "what it does have still works");
+        assert_eq!(m.cpu_read(0x8000), 4, "what it does have still works");
         m.cpu_write(a52_addr(false, 1, 0, true, 0), 0);
-        assert_eq!(m.cpu_read(0x8000), 0, "a chip past the end of the file is absent");
+        assert_eq!(
+            m.cpu_read(0x8000),
+            1,
+            "chip 1 bank 0 is absolute 32, which mirrors onto bank 0, not nothing"
+        );
+        m.cpu_write(a52_addr(false, 1, 1, true, 0), 0);
+        assert_eq!(m.cpu_read(0x8000), 2, "and chip 1 bank 1 onto bank 1");
         m.cpu_write(a52_addr(false, 3, 0, true, 0), 0);
-        assert_eq!(m.cpu_read(0x8000), 0);
+        assert_eq!(m.cpu_read(0x8000), 1, "chip 3 likewise, absolute 64 mod 16");
+        // Chip 2 is still nothing. That is a hole between populated chips
+        // rather than an address off the end of one, so it must not wrap.
+        m.cpu_write(a52_addr(false, 2, 0, true, 0), 0);
+        assert_eq!(m.cpu_read(0x8000), 0, "chip 2 stays absent even on a small cart");
     }
 }
