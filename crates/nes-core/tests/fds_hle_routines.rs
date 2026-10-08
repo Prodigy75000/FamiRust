@@ -2366,3 +2366,498 @@ fn the_delay_touches_nothing_at_all() {
         );
     }
 }
+
+// --- $E8D2, the producer side of the VRAM transfer queue --------------------
+
+/// Where a queued block's source data goes: clear of the program at $0600, its
+/// output at $0700 and the buffer at $0300.
+const QSRC: u16 = 0x0760;
+
+/// A caller for $E8D2: one block of `data` bound for VRAM `hi`/`lo`, with the
+/// buffer's size at $0300 and its write index at $0301 planted first.
+///
+/// The buffer is filled with $AA before the call, so a byte the routine left
+/// alone is distinguishable from one it wrote as zero. Without that, "it did
+/// not get this far" and "it wrote a zero here" look the same and a truncated
+/// copy passes.
+fn queue_prog(hi: u8, lo: u8, count: u8, cap: u8, start: u8, data: &[u8]) -> Vec<u8> {
+    let mut p = Prog::default();
+    // NMI off. The routine never touches the PPU, but an interrupt landing
+    // mid-call hands the machine to whatever handler the disk left in $DFF6,
+    // and then this compares two games rather than one routine.
+    p.poke(0x2000, 0x00);
+    p.ldx(0x60).lda(0xaa);
+    p.raw(&[0x9d, 0x00, 0x03, 0xca, 0xd0, 0xfa]); // sta $0300,x : dex : bne
+    p.poke(0x0300, cap).poke(0x0301, start);
+    p.bytes_at(QSRC, data);
+    p.lda(hi).ldx(lo).ldy(count);
+    p.jsr(0xe8d2);
+    p.0.extend_from_slice(&QSRC.to_le_bytes());
+    p.record_and_halt();
+    p.0
+}
+
+/// Everything a caller of $E8D2 can see in memory: the zero page it borrows,
+/// the buffer's size and index, and the buffer itself.
+fn queue_watch() -> Vec<u16> {
+    (0x0000..=0x0006u16).chain(0x0300..=0x0360u16).collect()
+}
+
+/// One watched byte, by address rather than by position in the vector.
+fn watched(vals: &[u8], addr: u16) -> u8 {
+    let i = match addr {
+        0x0000..=0x0006 => addr as usize,
+        0x0300..=0x0360 => 7 + (addr - 0x0300) as usize,
+        _ => panic!("${addr:04x} is not in the watch list"),
+    };
+    vals[i]
+}
+
+#[test]
+fn vram_queue_at_e8d2_appends_a_block_and_matches_the_real_bios() {
+    // $E8D2, entered by 5 of the 114 corpus titles and the last routine four
+    // of them are stopped on. a and x are the VRAM address, y the byte count,
+    // and the word after the jsr points at the data.
+    let data: Vec<u8> = (0..8u8).map(|i| i.wrapping_mul(17).wrapping_add(3)).collect();
+    let prog = queue_prog(0x22, 0xcb, 8, 0x4e, 0x00, &data);
+    let Some((r, v)) = both_watching(&prog, 30, &queue_watch()) else {
+        return skipped();
+    };
+    assert!(r.reached, "the routine never returned");
+    assert_eq!(r.a, 0xff, "a is the terminator it planted");
+    assert_eq!(r.x, 0x0b, "x is the committed length");
+    assert_eq!(r.y, 0x07, "y indexes the last byte copied, so count-1");
+    assert_eq!(r.p & 0x01, 0x00, "carry clear: the block fitted");
+    assert_eq!(watched(&v, 0x0301), 0x0b, "three header bytes and eight of data");
+    assert_eq!(
+        [watched(&v, 0x0302), watched(&v, 0x0303), watched(&v, 0x0304)],
+        [0x22, 0xcb, 0x08],
+        "address high, address low, count"
+    );
+    for (i, b) in data.iter().enumerate() {
+        assert_eq!(watched(&v, 0x0305 + i as u16), *b, "data byte {i}");
+    }
+    assert_eq!(watched(&v, 0x030d), 0xff, "and the queue is ended");
+    assert_eq!(watched(&v, 0x030e), 0xaa, "with nothing written past it");
+}
+
+#[test]
+fn what_the_queue_appends_is_what_the_flush_writes() {
+    // The two halves of one contract, run end to end. Worth doing because
+    // $E8D2 and $E86A could agree with each other on a header order that
+    // agrees with neither the real BIOS nor the hardware, and each routine's
+    // own test would still pass.
+    let Some(disk) = a_disk() else { return skipped() };
+    let data: Vec<u8> = vec![0xde, 0xad, 0xbe, 0xef, 0x11, 0x22];
+    let mut p = Prog::default();
+    p.poke(0x2000, 0x00).poke(0x00ff, 0x00).clear_vram();
+    p.poke(0x0300, 0x4e).poke(0x0301, 0x00).poke(0x0302, 0xff);
+    p.bytes_at(QSRC, &data);
+    p.lda(0x20).ldx(0x00).ldy(data.len() as u8);
+    p.jsr(0xe8d2);
+    p.0.extend_from_slice(&QSRC.to_le_bytes());
+    p.jsr(0xe86a);
+    p.record_and_halt();
+
+    let (ours, mut nes) = run(&disk, &[], &p.0, 30);
+    assert!(ours.reached, "the pair never returned");
+    assert_eq!(&nes.dbg_ciram()[..data.len()], &data[..], "VRAM $2000");
+    assert_eq!(nes.peek(0x0301), 0x00, "the flush resets the index");
+    assert_eq!(nes.peek(0x0302), 0xff, "and leaves an empty queue");
+    if let Some(real) = real_bios() {
+        let (theirs, mut rn) = run(&disk, &real, &p.0, 30);
+        assert!(theirs.reached, "the real BIOS never finished the test program");
+        assert_eq!(
+            nes.dbg_ciram()[..64],
+            rn.dbg_ciram()[..64],
+            "the two BIOSes put different bytes in video memory"
+        );
+    }
+}
+
+#[test]
+fn the_queue_appends_rather_than_starting_over() {
+    // $0301 is the game's index and it is READ here, not assumed zero. A
+    // routine that ignored it would pass every test above and drop whatever
+    // the game had already queued this frame.
+    let data: Vec<u8> = vec![0x5a; 8];
+    let prog = queue_prog(0x22, 0xcb, 8, 0x4e, 0x10, &data);
+    let Some((r, v)) = both_watching(&prog, 30, &queue_watch()) else {
+        return skipped();
+    };
+    assert!(r.reached);
+    assert_eq!(watched(&v, 0x0312), 0x22, "the block starts at the index given");
+    assert_eq!(watched(&v, 0x0311), 0xaa, "and not one byte before it");
+    assert_eq!(watched(&v, 0x031d), 0xff, "terminated after $10 + $0B");
+    assert_eq!(watched(&v, 0x0301), 0x1b, "and the index is $10 + $0B");
+    assert_eq!(r.x, 0x1b, "x is the new length, not the block's own size");
+}
+
+#[test]
+fn a_block_that_does_not_fit_rolls_the_buffer_back() {
+    // The failure is reported, not papered over: $0301 keeps the length it
+    // had, the terminator goes back where the call started, and the caller
+    // gets a=$01 with carry set instead of a=$FF with carry clear.
+    let data: Vec<u8> = (0..8u8).map(|i| i | 0x40).collect();
+    let prog = queue_prog(0x22, 0xcb, 8, 0x0b, 0x00, &data);
+    let Some((r, v)) = both_watching(&prog, 30, &queue_watch()) else {
+        return skipped();
+    };
+    assert!(r.reached, "an overflow still has to return");
+    assert_eq!(r.a, 0x01, "a is the error code");
+    assert_eq!(r.p & 0x01, 0x01, "and carry is set");
+    assert_eq!(r.x, 0x00, "x is the index the call started at");
+    assert_eq!(watched(&v, 0x0301), 0x00, "the index is left alone");
+    assert_eq!(watched(&v, 0x0302), 0xff, "and the queue reads as empty again");
+    assert_eq!(watched(&v, 0x0002), 0xcb, "$02/$03 keep the address as passed");
+    assert_eq!(watched(&v, 0x0003), 0x22);
+
+    // One byte more of room and the same block fits, which is what makes the
+    // test above about the boundary rather than about overflow in general.
+    // The terminator needs a byte of its own: $0B bytes of block want $0C.
+    let prog = queue_prog(0x22, 0xcb, 8, 0x0c, 0x00, &data);
+    let Some((r, v)) = both_watching(&prog, 30, &queue_watch()) else {
+        return skipped();
+    };
+    assert_eq!(r.a, 0xff, "with room for the terminator it succeeds");
+    assert_eq!(r.p & 0x01, 0x00, "carry clear");
+    assert_eq!(watched(&v, 0x0301), 0x0b, "and commits");
+}
+
+#[test]
+fn the_limit_is_checked_after_every_byte_not_once_up_front() {
+    // A size check made once, before the copy, would either refuse the whole
+    // block or write all of it. This writes as much as fits and then rolls
+    // back, so the number of bytes it got through is the evidence.
+    let data: Vec<u8> = vec![0x77; 8];
+    for (cap, written, y) in [(0x01u8, 1usize, 0xffu8), (0x04, 4, 0x00), (0x05, 5, 0x01)] {
+        let prog = queue_prog(0x22, 0xcb, 8, cap, 0x00, &data);
+        let Some((r, v)) = both_watching(&prog, 30, &queue_watch()) else {
+            return skipped();
+        };
+        assert_eq!(r.a, 0x01, "cap ${cap:02x} cannot fit the block");
+        assert_eq!(r.y, y, "cap ${cap:02x}: y shows how far the copy got");
+        // The rolled-back terminator sits at $0302, so the bytes that prove
+        // how far it went start one later.
+        for i in 1..written {
+            assert_ne!(
+                watched(&v, 0x0302 + i as u16),
+                0xaa,
+                "cap ${cap:02x}: byte {i} should have been written"
+            );
+        }
+        assert_eq!(
+            watched(&v, 0x0302 + written as u16),
+            0xaa,
+            "cap ${cap:02x}: and byte {written} should not"
+        );
+    }
+}
+
+#[test]
+fn a_queued_count_of_zero_means_two_hundred_and_fifty_six() {
+    // The count is the whole byte, as in $E86A. Zero reading as nothing would
+    // look like a successful empty block; it is instead 256 bytes, which no
+    // buffer in the corpus can hold, so it always overflows.
+    let data: Vec<u8> = (0..8u8).map(|i| i.wrapping_add(0x90)).collect();
+    let prog = queue_prog(0x22, 0xcb, 0, 0x4e, 0x00, &data);
+    let Some((r, v)) = both_watching(&prog, 30, &queue_watch()) else {
+        return skipped();
+    };
+    assert!(r.reached);
+    assert_eq!(r.a, 0x01, "256 bytes cannot fit, so this is an overflow");
+    assert_eq!(watched(&v, 0x0304), 0x00, "the count byte went in as passed");
+    assert_eq!(watched(&v, 0x0305), data[0], "and the copy started");
+    assert_ne!(
+        watched(&v, 0x034f),
+        0xaa,
+        "a count of zero should run the copy to the end of the buffer"
+    );
+}
+
+#[test]
+fn the_queue_steps_over_its_inline_source_pointer() {
+    // The pointer sits after the jsr and would be executed as opcodes if the
+    // return address were not stepped on. $60 $07 is an `rts` followed by a
+    // stray byte, so a routine that failed to step over it would return to the
+    // caller's caller and never reach the recorder below.
+    let Some(disk) = a_disk() else { return skipped() };
+    let mut p = Prog::default();
+    p.poke(0x2000, 0x00);
+    p.poke(0x0300, 0x4e).poke(0x0301, 0x00);
+    p.bytes_at(QSRC, &[0x11, 0x22]);
+    p.lda(0x22).ldx(0x00).ldy(0x02);
+    p.jsr(0xe8d2);
+    p.0.extend_from_slice(&QSRC.to_le_bytes());
+    p.lda(0x3d).record_and_halt();
+    let (r, _) = run(&disk, &[], &p.0, 30);
+    assert!(r.reached, "control did not resume after the inline pointer");
+    assert_eq!(r.a, 0x3d, "execution resumed at the wrong place");
+}
+
+#[test]
+fn the_queued_address_moves_on_by_one_row_of_thirty_two() {
+    // $02/$03 come back pointing one nametable row further down, and the carry
+    // the caller sees is that add's. A low byte of $F0 carries into the high
+    // byte, and the `adc #$00` there consumes the carry, so the caller still
+    // sees it clear: that is why this is two cases and not one.
+    let data: Vec<u8> = vec![0x01; 4];
+    for (lo, hi, want_lo, want_hi) in [(0xcbu8, 0x22u8, 0xebu8, 0x22u8), (0xf0, 0x22, 0x10, 0x23)] {
+        let prog = queue_prog(hi, lo, 4, 0x4e, 0x00, &data);
+        let Some((r, v)) = both_watching(&prog, 30, &queue_watch()) else {
+            return skipped();
+        };
+        assert_eq!(r.a, 0xff, "lo ${lo:02x} should have fitted");
+        assert_eq!(watched(&v, 0x0002), want_lo, "lo ${lo:02x}: $02");
+        assert_eq!(watched(&v, 0x0003), want_hi, "lo ${lo:02x}: $03");
+        assert_eq!(r.p & 0x01, 0x00, "lo ${lo:02x}: carry clear on the way out");
+        assert_eq!(watched(&v, 0x0303), lo, "and the block kept the address given");
+    }
+}
+
+#[test]
+fn the_queue_leaves_its_zero_page_scratch_where_the_real_bios_does() {
+    // $00-$06 all belong to the routine while it runs, and a game that reads
+    // them afterwards has to find what the real BIOS left. $05 is a block
+    // counter the tail decrements, which is why it is 0 after a success and 1
+    // after an overflow rather than simply unused.
+    let data: Vec<u8> = vec![0x3c; 6];
+    let prog = queue_prog(0x21, 0x40, 6, 0x4e, 0x00, &data);
+    let Some((_, v)) = both_watching(&prog, 30, &queue_watch()) else {
+        return skipped();
+    };
+    assert_eq!(
+        [watched(&v, 0x0000), watched(&v, 0x0001)],
+        QSRC.to_le_bytes(),
+        "$00/$01 keep the source pointer"
+    );
+    assert_eq!(watched(&v, 0x0004), 0x06, "$04 keeps the count as passed");
+    assert_eq!(watched(&v, 0x0005), 0x00, "$05 reaches zero");
+    assert_eq!(watched(&v, 0x0006), 0x00, "$06 counts the copy down to zero");
+
+    let prog = queue_prog(0x21, 0x40, 6, 0x05, 0x00, &data);
+    let Some((_, v)) = both_watching(&prog, 30, &queue_watch()) else {
+        return skipped();
+    };
+    assert_eq!(watched(&v, 0x0005), 0x01, "and an overflow never decrements it");
+    // A cap of 5 leaves room for the three header bytes and two of the six
+    // data bytes, so the countdown stops four short rather than one.
+    assert_eq!(watched(&v, 0x0006), 0x04, "$06 keeps what was left to copy");
+}
+
+#[test]
+fn the_queue_is_not_slower_than_the_real_bios() {
+    // 182 + 28 per byte against the original's 224 + 41, so the margin grows
+    // with the block. Hand-counted from the source rather than recorded from a
+    // run, so the numbers can disagree with the implementation.
+    let Some(disk) = a_disk() else { return skipped() };
+    for count in [4u8, 8, 32] {
+        let data: Vec<u8> = vec![0x5a; count as usize];
+        let prog = queue_prog(0x22, 0x00, count, 0x4e, 0x00, &data);
+        let ours = cycles_of_call_in(&disk, &[], 0xe8d2, &prog);
+        assert_eq!(
+            ours,
+            182 + 28 * count as u64,
+            "count {count}: ours should be 182 + 28 per byte"
+        );
+        if let Some(real) = real_bios() {
+            let theirs = cycles_of_call_in(&disk, &real, 0xe8d2, &prog);
+            assert_eq!(
+                theirs,
+                224 + 41 * count as u64,
+                "count {count}: the original should be 224 + 41 per byte"
+            );
+            assert!(ours < theirs, "count {count}: {ours} against {theirs}");
+        }
+    }
+}
+
+// --- $E8E1, the same tail with the shape packed into the data ---------------
+
+/// A caller for $E8E1. The shape byte goes in front of the data, where the
+/// routine expects to find it, and `y` is set to something conspicuous
+/// because it is not an argument here and must not become one.
+fn packed_prog(hi: u8, lo: u8, shape: u8, cap: u8, start: u8, data: &[u8], y: u8) -> Vec<u8> {
+    let mut p = Prog::default();
+    p.poke(0x2000, 0x00);
+    p.ldx(0x60).lda(0xaa);
+    p.raw(&[0x9d, 0x00, 0x03, 0xca, 0xd0, 0xfa]); // sta $0300,x : dex : bne
+    p.poke(0x0300, cap).poke(0x0301, start);
+    p.poke(QSRC, shape);
+    p.bytes_at(QSRC + 1, data);
+    p.lda(hi).ldx(lo).ldy(y);
+    p.jsr(0xe8e1);
+    p.0.extend_from_slice(&QSRC.to_le_bytes());
+    p.record_and_halt();
+    p.0
+}
+
+#[test]
+fn vram_queue_packed_at_e8e1_writes_several_blocks_and_matches_the_real_bios() {
+    // Shape $23: two blocks of three bytes. The second block's VRAM address is
+    // one row of 32 further down, so $2140 is followed by $2160.
+    let data: Vec<u8> = vec![0xa0, 0xa1, 0xa2, 0xb0, 0xb1, 0xb2];
+    let prog = packed_prog(0x21, 0x40, 0x23, 0x4e, 0x00, &data, 0x55);
+    let Some((r, v)) = both_watching(&prog, 30, &queue_watch()) else {
+        return skipped();
+    };
+    assert!(r.reached, "the routine never returned");
+    assert_eq!(r.a, 0xff, "a is the terminator it planted");
+    assert_eq!(r.x, 0x0c, "two blocks of three plus two headers");
+    assert_eq!(r.y, 0x06, "y walks the source and ends on the last byte read");
+    assert_eq!(watched(&v, 0x0301), 0x0c);
+    let got: Vec<u8> = (0..13).map(|i| watched(&v, 0x0302 + i)).collect();
+    assert_eq!(
+        got,
+        vec![0x21, 0x40, 0x03, 0xa0, 0xa1, 0xa2, 0x21, 0x60, 0x03, 0xb0, 0xb1, 0xb2, 0xff],
+        "two headers, two runs of data, one terminator"
+    );
+}
+
+#[test]
+fn the_packed_nibbles_are_blocks_high_and_bytes_low() {
+    // $23 and $32 are the same two digits and must not produce the same
+    // buffer: two blocks of three is twelve bytes, three of two is fifteen.
+    let data: Vec<u8> = (0..8u8).map(|i| 0xc0 | i).collect();
+    for (shape, len) in [(0x23u8, 0x0cu8), (0x32, 0x0f)] {
+        let prog = packed_prog(0x21, 0x40, shape, 0x4e, 0x00, &data, 0x01);
+        let Some((r, v)) = both_watching(&prog, 30, &queue_watch()) else {
+            return skipped();
+        };
+        assert_eq!(r.a, 0xff, "shape ${shape:02x} should have fitted");
+        assert_eq!(watched(&v, 0x0301), len, "shape ${shape:02x}: committed length");
+        assert_eq!(watched(&v, 0x0304), shape & 0x0f, "the count byte is the low nibble");
+    }
+}
+
+#[test]
+fn the_packed_form_ignores_y_entirely() {
+    // Measured on Druid: forced to $00 and to $55 the call came out identical,
+    // registers and memory. A routine that used y as the count, as $E8D2 does,
+    // would differ on every byte.
+    let data: Vec<u8> = vec![0x11, 0x22, 0x33, 0x44];
+    let a = packed_prog(0x21, 0x40, 0x22, 0x4e, 0x00, &data, 0x00);
+    let b = packed_prog(0x21, 0x40, 0x22, 0x4e, 0x00, &data, 0x55);
+    let Some((ra, va)) = both_watching(&a, 30, &queue_watch()) else {
+        return skipped();
+    };
+    let Some((rb, vb)) = both_watching(&b, 30, &queue_watch()) else {
+        return skipped();
+    };
+    assert_eq!(ra, rb, "y should make no difference to what comes back");
+    assert_eq!(va, vb, "nor to the buffer");
+}
+
+#[test]
+fn the_packed_copy_index_does_not_restart_between_blocks() {
+    // The source index walks on through every block. If it reset, block two
+    // would be a copy of block one, which is a plausible implementation and
+    // the wrong one.
+    let data: Vec<u8> = vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06];
+    let prog = packed_prog(0x21, 0x40, 0x23, 0x4e, 0x00, &data, 0x00);
+    let Some((r, v)) = both_watching(&prog, 30, &queue_watch()) else {
+        return skipped();
+    };
+    assert_eq!(r.a, 0xff);
+    assert_eq!(
+        [watched(&v, 0x0305), watched(&v, 0x0306), watched(&v, 0x0307)],
+        [0x01, 0x02, 0x03],
+        "block one"
+    );
+    assert_eq!(
+        [watched(&v, 0x030b), watched(&v, 0x030c), watched(&v, 0x030d)],
+        [0x04, 0x05, 0x06],
+        "and block two carries on from there rather than repeating"
+    );
+    assert_eq!(r.y, 0x06, "six bytes read in total");
+}
+
+#[test]
+fn each_packed_block_commits_its_own_length() {
+    // Three blocks of three with room for two and a bit. The rollback goes to
+    // the SECOND block's commit, not to where the call started, which is the
+    // only way to see that $0301 is written per block rather than once.
+    let data: Vec<u8> = (0..9u8).map(|i| 0xd0 | i).collect();
+    let prog = packed_prog(0x21, 0x40, 0x33, 0x0d, 0x00, &data, 0x00);
+    let Some((r, v)) = both_watching(&prog, 30, &queue_watch()) else {
+        return skipped();
+    };
+    assert_eq!(r.a, 0x01, "the third block cannot fit");
+    assert_eq!(r.x, 0x0c, "rolled back to two blocks, not to none");
+    assert_eq!(watched(&v, 0x0301), 0x0c, "and that is what $0301 holds");
+    assert_eq!(watched(&v, 0x030e), 0xff, "the terminator goes after block two");
+    assert_eq!(watched(&v, 0x0305), 0xd0, "block one survives");
+    assert_eq!(watched(&v, 0x030b), 0xd3, "and so does block two");
+}
+
+#[test]
+fn a_packed_zero_in_either_nibble_means_two_hundred_and_fifty_six() {
+    // Neither nibble reads a zero as nothing and neither reads it as sixteen.
+    // Both are a `dec`/`bne` countdown, so both overflow any real buffer.
+    let data: Vec<u8> = vec![0x5a; 16];
+    for shape in [0x10u8, 0x01] {
+        let prog = packed_prog(0x21, 0x40, shape, 0x4e, 0x00, &data, 0x00);
+        let Some((r, v)) = both_watching(&prog, 30, &queue_watch()) else {
+            return skipped();
+        };
+        assert_eq!(r.a, 0x01, "shape ${shape:02x} cannot fit");
+        assert_ne!(
+            watched(&v, 0x034f),
+            0xaa,
+            "shape ${shape:02x} should have run to the end of the buffer"
+        );
+    }
+
+    // And sixteen in a nibble is not available to say it with: $0F is the most
+    // either can carry, so fifteen of fifteen is the largest shape there is.
+    let prog = packed_prog(0x21, 0x40, 0xff, 0x4e, 0x00, &data, 0x00);
+    let Some((r, v)) = both_watching(&prog, 30, &queue_watch()) else {
+        return skipped();
+    };
+    assert_eq!(r.a, 0x01, "fifteen blocks of fifteen overflow a 78-byte buffer");
+    assert_eq!(watched(&v, 0x0304), 0x0f, "and the count is the low nibble only");
+}
+
+#[test]
+fn the_packed_form_steps_over_its_inline_pointer() {
+    let Some(disk) = a_disk() else { return skipped() };
+    let mut p = Prog::default();
+    p.poke(0x2000, 0x00);
+    p.poke(0x0300, 0x4e).poke(0x0301, 0x00);
+    p.poke(QSRC, 0x12);
+    p.bytes_at(QSRC + 1, &[0x11, 0x22]);
+    p.lda(0x21).ldx(0x40).ldy(0x00);
+    p.jsr(0xe8e1);
+    p.0.extend_from_slice(&QSRC.to_le_bytes());
+    p.lda(0x3d).record_and_halt();
+    let (r, _) = run(&disk, &[], &p.0, 30);
+    assert!(r.reached, "control did not resume after the inline pointer");
+    assert_eq!(r.a, 0x3d, "execution resumed at the wrong place");
+}
+
+#[test]
+fn the_packed_form_is_not_slower_than_the_real_bios() {
+    // 117 + 80 a block + 28 a byte against the original's 119 + 120 + 41.
+    // Hand-counted from the source, so the numbers can disagree with it.
+    let Some(disk) = a_disk() else { return skipped() };
+    for (blocks, bytes) in [(1u8, 1u8), (2, 1), (2, 14), (4, 3)] {
+        let data: Vec<u8> = vec![0x5a; (blocks * bytes) as usize];
+        let shape = (blocks << 4) | bytes;
+        let prog = packed_prog(0x20, 0x00, shape, 0x7f, 0x00, &data, 0x00);
+        let ours = cycles_of_call_in(&disk, &[], 0xe8e1, &prog);
+        assert_eq!(
+            ours,
+            117 + blocks as u64 * (80 + 28 * bytes as u64),
+            "shape ${shape:02x}: ours should be 117 + 80 a block + 28 a byte"
+        );
+        if let Some(real) = real_bios() {
+            let theirs = cycles_of_call_in(&disk, &real, 0xe8e1, &prog);
+            assert_eq!(
+                theirs,
+                119 + blocks as u64 * (120 + 41 * bytes as u64),
+                "shape ${shape:02x}: the original should be 119 + 120 a block + 41 a byte"
+            );
+            assert!(ours < theirs, "shape ${shape:02x}: {ours} against {theirs}");
+        }
+    }
+}

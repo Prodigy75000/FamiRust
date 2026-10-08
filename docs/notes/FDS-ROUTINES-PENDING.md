@@ -114,4 +114,6 @@ path rather than just tightening the test, so it is written down here rather
 than half-done.
 
 Next step is to profile `$EC22`, which is also the last blocker Youkai Yashiki
-sits on.
+sits on, and as of 2026-10-08 Druid as well: writing `$E8D2` and `$E8E1` freed
+Druid from both and landed it here. Two titles plus this jam makes it the next
+one to take even though `$E9D3` blocks three.

@@ -243,7 +243,7 @@ work as taking transfer interrupts in the loader.
 
 ### The routines
 
-Twenty-three of the forty entry points are implemented. The other 17 are stubs that put
+Twenty-five of the forty entry points are implemented. The other 15 are stubs that put
 **NO ROUTINE** on the screen and stop, which is worth its 111 bytes: Zelda hands
 over correctly, runs its own code, jumps to `$EA84` and would otherwise
 disappear into the fill, looking like a hundred different bugs instead of one
@@ -274,6 +274,8 @@ missing routine. `fdstrace` names the address.
 | `$EAFD` | 11 | jump through a table of addresses written after the call | a tail call: it consumes its own frame. Cycle-exact, 45 |
 | `$E86A` | 10 | flush the queued VRAM transfer buffer at `$0302` | cycle-exact; NOT `$E7BB`'s length language |
 | `$E153` | 7 | delay `y` milliseconds | cycle-exact, 5 + 1790*y; the second place faster is WRONG |
+| `$E8D2` | 5 | append one block to the queued VRAM transfer buffer | the producer side of `$E86A`; 182 + 28 a byte against 224 + 41 |
+| `$E8E1` | 3 | append several blocks, the shape packed into the data | shares its whole tail with `$E8D2`; written with it because Druid needs both |
 
 **Where the cycle counts do not match, ours is faster, never slower.** That is
 deliberate. A game that runs one of these inside vblank has more room than it
@@ -359,10 +361,26 @@ Then `$E153`:
 | `$E9D3` | **3** |
 | `$E239` | **2** |
 
-**99 of the 114 now reach their own code without asking for a routine we have
+Then `$E8D2`, and `$E8E1` with it. Writing the pair together was not tidiness:
+Druid was one of the four stopped on `$E8D2` and calls `$E8E1` as well, so
+shipping the first alone would have moved its wall fifteen bytes down the page
+and bought it nothing. Three of the four went all the way through; Druid
+stopped at `$EC22`, which was already on the list for another reason.
+
+| entry | titles stuck on it now |
+|---|---|
+| `$E9D3` | **3** |
+| `$E239` | **2** |
+| `$EC22` | **2** |
+| `$E844` | **2** |
+
+**102 of the 114 now reach their own code without asking for a routine we have
 not written**, up from 50 when the queue was first measured, in an unattended
-1800-frame run with START mashed. 15 are still stopped by a missing routine,
-and the queue is down to a tail of ones and twos behind `$E8D2`.
+1800-frame run with START mashed. 12 are still stopped by a missing routine,
+and nothing left blocks more than three.
+
+`$EC22` is the one to take next even though two others tie it at two titles: it
+is also what the Kaettekita Mario Bros. jam points at, so it is worth three.
 
 Ninety-nine is NOT "ninety-nine titles play correctly": thirty seconds of
 unattended running reaches what it reaches, and a game that needs a routine
@@ -381,15 +399,27 @@ which registers are arguments.
 disk to handover under both BIOSes, plants a caller in work RAM, and compares
 what comes back. That is the oracle at the level the work happens at.
 
+And `scripts/mutate-fds-queue.py` is the third half, for the two queue
+routines: it breaks the implementation fourteen different ways and checks a
+test notices each time. Two things it does are the point of it rather than
+incidental. It asserts the anchor matched EXACTLY once and that the assembled
+image actually moved, because a mutation that failed to apply looks exactly
+like a suite that caught it. And it records the one mutation that survived
+along with the proof that it is a no-op: swapping `dec $06` and `sta BUF,x` in
+the copy loop changes the bytes and cannot change anything observable, since
+the store never touches `$0006`, sets no flags, and costs the same. An
+unobservable mutation is not a hole in the tests, and saying so beats leaving
+the next person to find out.
+
 ## Running order
 
 1. ~~Dynamic tracer, then a census across the corpus.~~ Done 2026-09-29.
 2. ~~Baseline smoke on the real BIOS, one ledger row per title.~~ The census
    rows and `fds-hle-check.py` are this.
 3. ~~HLE boot with our own graphics and no BIOS file present.~~ Done 2026-09-29.
-4. Routine by routine, each held against the real BIOS. Twenty-three of forty
-   done. The queue by BLOCKING is now a tail: `$E8D2` at four, `$E9D3` at
-   three, then ones and twos. See
+4. Routine by routine, each held against the real BIOS. Twenty-five of forty
+   done. The queue by BLOCKING is now a tail: `$E9D3` at three, then twos and
+   ones. See
    [`FDS-ROUTINES-PENDING.md`](FDS-ROUTINES-PENDING.md), which records why
    Kaettekita Mario Bros. jams, what `$EC22` has to do with it, and why a flag
    measured on a live game is a flag measured through its interrupt handlers.

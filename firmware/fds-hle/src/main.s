@@ -94,8 +94,10 @@ PPUSCROLL = $2005
 PPUADDR   = $2006
 PPUDATA   = $2007
 
-; The queued VRAM transfer buffer $E86A empties. $0301 is the game's own write
-; index into it, which the BIOS only ever resets.
+; The queued VRAM transfer buffer: $E8D2 appends to it and $E86A empties it.
+; $0301 is the write index, which $E8D2 commits and $E86A resets to zero.
+; $0300 is how many bytes the buffer holds, which the game sets and the BIOS
+; only reads: the corpus has it at $4E and $5F on different titles.
 BUF       = $0302
 JOY1      = $4016
 JOY2      = $4017
@@ -839,10 +841,197 @@ vram_flush:
 ; indexing gives for free.
 .assert (vram_flush_end - vram_flush) == 74
 vram_flush_end:
+; --- $E8D2: append one block to the VRAM transfer buffer at $0302 ----------
+;
+; 5 of the 114 corpus titles call it and four are stopped on it: Druid, Kick
+; Challenger, Konamic Tennis and Topple Zip. The producer side of $E86A, and
+; the fourth routine in the file to take its argument inline:
+;
+;   a   the VRAM address high byte      the two bytes after the `jsr` are a
+;   x   the VRAM address low byte       little-endian pointer to the data, and
+;   y   how many bytes to copy          the return address steps over them
+;
+; It APPENDS: $0301 is read as the starting index and the block goes in as
+; address high, address low, count, then the data, followed by a $FF
+; terminator, which is the empty-queue byte $E86A leaves behind.
+;
+; Everything below was pinned by forcing one field at a time on Topple Zip and
+; reading the access log, not inferred from the shape of the thing:
+;
+;   * $0301 is honoured rather than assumed zero. Forced to $10 the block
+;     landed at $0312 and the committed length came back $1B, not $0B.
+;   * the count is the whole byte and a count of zero means 256. A forced
+;     y=$00 walked 253 bytes past the source and off the end of the buffer.
+;   * $0300 is a hard limit on the index, checked AFTER every single byte, and
+;     an overflow does not truncate: it ROLLS BACK. The $FF goes to the index
+;     the call started at, $0301 is left alone, and the caller gets a=$01 with
+;     carry SET, against a=$FF and carry clear on success. Forced limits of
+;     $00 $01 $02 $03 $04 $0B and $0C gave 1, 1, 2, 3, 4, 11 and 12 bytes
+;     written, which is what puts the check after the store rather than before
+;     it and what shows the terminator needs a byte of its own: with a start
+;     of $00 and a count of 8 the limit has to reach $0C, not $0B.
+;   * y comes back as count-1, because the copy loop leaves it indexing the
+;     last byte it read. y=$08 in gave $07 out, y=$20 gave $1F, and an
+;     overflow before the first data byte gave $FF, which is what pins
+;     `ldy #$FF` ahead of the header rather than inside the loop.
+;   * on the way out $02/$03 move on by one row of 32. Carry out comes from
+;     that add, so it is clear unless the high byte itself wraps: a forced
+;     x=$F0 still returned carry clear, because the $20 carried into $03 and
+;     the `adc #$00` there consumed it.
+;   * $05 is a block counter the tail decrements, and this entry sets it to 1.
+;     It is 0 on success and 1 after an overflow. $E8E1 next door sets it
+;     higher, which is where the back edge below was measured; see that
+;     routine for what a second block does.
+;
+; The original costs 224 + 41 per byte, measured across four titles with
+; counts of 2, 8, 9, 24 and 32 (552 cycles for 8, 1536 for 32). This runs in
+; 182 + 28 per byte, so it is faster everywhere. It builds a buffer rather
+; than driving the PPU, so there is no window for it to be too fast for.
 .org $E8D2
-  jmp unimplemented
+  jmp vram_queue
+
+; --- $E8E1: append SEVERAL blocks, with the shape packed into the data ------
+;
+; 3 of the 114 corpus titles call it, Druid among them, which is why it is
+; written beside $E8D2 rather than after it: Druid is stopped on $E8D2 and
+; calls this one too, so writing the first alone would have moved its wall
+; fifteen bytes down the page.
+;
+; Same arguments as $E8D2 minus the count:
+;
+;   a   the VRAM address high byte      the two bytes after the `jsr` are a
+;   x   the VRAM address low byte       pointer, and the FIRST byte there is
+;   y   ignored, measured               the shape: blocks in the high nibble,
+;                                       bytes per block in the low one
+;
+; Each block gets its own three-byte header and its own commit to $0301, and
+; the VRAM address walks on by 32 between them, so a packed $2E is two rows of
+; fourteen bytes one under the other. Measured on Druid by forcing the shape
+; byte:
+;
+;   $21 -> two blocks of one byte, $0301 committed at $16 then $1A
+;   $11 -> one block of one byte
+;   $FF -> fifteen of fifteen, so the low nibble is masked and not the byte
+;   $10 -> a count of 0 is 256, not 16 and not nothing: it ran off the buffer
+;   $01 -> a block count of 0 is likewise 256, committing 27 times before the
+;          buffer filled
+;
+; `y` is not an argument and not preserved: forced to $00 and to $55 the call
+; came out identical, because the copy index starts at the shape byte and
+; walks on through every block without resetting. Two blocks of fourteen leave
+; it at 28.
+;
+; The original costs 119 + 120 per block + 41 per byte (280 cycles for one
+; block of one, 1507 for two of fourteen). This runs in 117 + 80 per block +
+; 28 per byte.
 .org $E8E1
-  jmp unimplemented
+  jmp vram_queue_packed
+
+.org $F400
+; $E8D2 and $E8E1 differ only in where the shape comes from. Everything from
+; `queue_block` down is shared, including the back edge, which is the part
+; only $E8E1 ever takes.
+vram_queue:
+  sta $03                   ; 3   the VRAM address high
+  stx $02                   ; 3   and low
+  sty $04                   ; 3   the count is an argument here
+  jsr queue_inline          ; 6
+  lda #$01                  ; 2   one block
+  sta $05                   ; 3
+  ldx BUF-1                 ; 4   the write index: we append to what is there
+  ldy #$FF                  ; 2   the copy loop `iny`s before its first read,
+  jmp queue_block           ; 3   and here the data starts at the pointer
+; 90 cycles to queue_block, and 182 + 28 per byte for the call.
+
+vram_queue_packed:
+  sta $03                   ; 3
+  stx $02                   ; 3   and y is not an argument: measured ignored
+  jsr queue_inline          ; 6
+  ldy #$00                  ; 2
+  lda ($00),y               ; 5   the shape byte, read twice because that is
+  and #$0F                  ; 2   cheaper than keeping it: bytes per block
+  sta $04                   ; 3
+  lda ($00),y               ; 5
+  lsr a                     ; 2
+  lsr a                     ; 2
+  lsr a                     ; 2
+  lsr a                     ; 2   and blocks
+  sta $05                   ; 3
+  ldx BUF-1                 ; 4   y stays at $00, so the first `iny` steps off
+                            ;     the shape byte and onto the data
+; 105 cycles to here, and it falls straight in.
+
+queue_block:
+  lda $03                   ; 3
+  sta BUF,x                 ; 5
+  inx                       ; 2
+  cpx BUF-2                 ; 4   the buffer size. Every byte is checked, and
+  bcs @full                 ; 2   the check is after the store, not before
+  lda $02                   ; 3
+  sta BUF,x                 ; 5
+  inx                       ; 2
+  cpx BUF-2                 ; 4
+  bcs @full                 ; 2
+  lda $04                   ; 3
+  sta $06                   ; 3   the countdown, all eight bits: 0 means 256
+  sta BUF,x                 ; 5
+@data:
+  inx                       ; 2
+  cpx BUF-2                 ; 4
+  bcs @full                 ; 2
+  iny                       ; 2
+  lda ($00),y               ; 5
+  sta BUF,x                 ; 5
+  dec $06                   ; 5
+  bne @data                 ; 3 taken
+  inx                       ; 2   room for the terminator is checked too
+  cpx BUF-2                 ; 4
+  bcs @full                 ; 2
+  stx BUF-1                 ; 4   commit, per block: nothing before here is
+  lda $02                   ; 3   visible to the game if the block did not fit
+  clc                       ; 2
+  adc #$20                  ; 2   on to the next row of the nametable
+  sta $02                   ; 3
+  lda $03                   ; 3
+  adc #$00                  ; 2   and this is where the exit carry comes from
+  sta $03                   ; 3
+  dec $05                   ; 5
+  bne queue_block           ; 3   $E8D2 passes 1 and never takes this
+  lda #$FF                  ; 2
+  sta BUF,x                 ; 5   so $E86A finds the queue ended
+  rts                       ; 6
+; 80 cycles a block plus 28 a byte, and 13 more on the way out.
+@full:
+  ldx BUF-1                 ; 4   roll back to the last committed length
+  lda #$FF                  ; 2
+  sta BUF,x                 ; 5
+  lda #$01                  ; 2   the error code. `a` last so N and Z are its
+  rts                       ; 6   own and carry is still the compare's
+
+; The inline operand, shared because stepping the caller over it is the one
+; part of this worth having only one copy of. Called with a `jsr`, so the
+; game's return address is two further up the stack than it would be at the
+; entry point: $0103/$0104 past x rather than $0101/$0102.
+queue_inline:
+  tsx                       ; 2
+  lda $0103,x               ; 4   the stacked return address points at the
+  sta $05                   ; 3   jsr's last byte. $05/$06 hold the pre-bump
+  clc                       ; 2   copy, which is what the operand is read
+  adc #$02                  ; 2   through, and the bump rides along on the
+  sta $0103,x               ; 5   same `a` rather than loading it twice
+  lda $0104,x               ; 4
+  sta $06                   ; 3
+  adc #$00                  ; 2   the carry from the low byte, still live
+  sta $0104,x               ; 5
+  ldy #$01                  ; 2
+  lda ($05),y               ; 5   the two bytes after the jsr: the pointer
+  sta $00                   ; 3
+  iny                       ; 2
+  lda ($05),y               ; 5
+  sta $01                   ; 3
+  rts                       ; 6
+.assert (vram_queue_end - vram_queue) == 169
+vram_queue_end:
 .org $E997
   jmp unimplemented
 ; --- $E9B1: shift a multi-byte register right one bit, with feedback --------
