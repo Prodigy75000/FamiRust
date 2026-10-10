@@ -25,6 +25,18 @@
 //! other tools here this one wants the REAL BIOS: it is measuring the thing
 //! being reimplemented.
 //!
+//! ## A title screen is not gameplay, and silence here is a lie
+//!
+//! With no input the machine sits on the title screen forever, so a routine a
+//! game only calls once it is PLAYING reports "never called from game code"
+//! and looks like a dead entry point. Measured on 2026-10-10: Kaettekita Mario
+//! Bros. enters `$EC22` 1386 times in the census, from three game-code sites,
+//! and this tool saw zero of them for 3000 frames because nothing ever pressed
+//! START. `--mash` is the fix, and it taps START on exactly the schedule
+//! `fdstrace --mash` uses, so a title gets to the same place it got to in the
+//! census and the blocker sweep. `--hold` is for a routine that wants a
+//! direction held as well.
+//!
 //! ## One thing the cycle counts do not include
 //!
 //! Cycles come from the CPU's own counter, which ticks once per bus access the
@@ -139,11 +151,25 @@ fn profile(
     want: usize,
     max_frames: u64,
     forces: &[Force],
+    mash: bool,
+    hold: u8,
 ) -> Result<Vec<Call>, String> {
     let mut nes = nes_core::Nes::from_fds(disk, bios).map_err(|e| format!("{e:?}"))?;
     let mut calls = Vec::new();
     let mut prev = nes.dbg_pc();
+    // Buttons are pushed once per frame rather than once per instruction, and
+    // the schedule is `fdstrace --mash`'s to the frame: START for 8 frames
+    // every 120 from frame 240. Copied rather than reinvented so that a title
+    // profiled here is at the same point in itself as the same title in the
+    // census and in the blocker sweep.
+    let mut input_frame = u64::MAX;
     while nes.dbg_frame() < max_frames && calls.len() < want {
+        let frame = nes.dbg_frame();
+        if frame != input_frame {
+            input_frame = frame;
+            let mashed = if mash && frame >= 240 && (frame % 120) < 8 { 0x08 } else { 0 };
+            nes.set_buttons(0, mashed | hold);
+        }
         let pc = nes.dbg_pc();
         // Entered at the routine, and from game code rather than from the BIOS
         // calling itself.
@@ -276,6 +302,11 @@ fn usage() -> ExitCode {
     eprintln!("  --force k=v,..  override state at the instant of each call; keys");
     eprintln!("               a x y p are registers, anything else a hex address");
     eprintln!("               (e.g. --force a=00,ff=1e,0100=80). Values are hex.");
+    eprintln!("  --mash       tap START every 2s from frame 240, to get past a title");
+    eprintln!("               screen. Without it a routine the game only calls while");
+    eprintln!("               PLAYING reports as never called.");
+    eprintln!("  --hold HEX   hold these pad-1 buttons every frame (A=01 B=02");
+    eprintln!("               SELECT=04 START=08 U=10 D=20 L=40 R=80)");
     eprintln!("  $FDS_BIOS    the real disksys.rom; this tool measures what it does");
     ExitCode::FAILURE
 }
@@ -290,6 +321,8 @@ fn main() -> ExitCode {
     let mut trace = false;
     let mut trace_max = 80usize;
     let mut forces: Vec<Force> = Vec::new();
+    let mut mash = false;
+    let mut hold = 0u8;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--routine" => {
@@ -320,6 +353,13 @@ fn main() -> ExitCode {
                         return usage();
                     }
                 },
+                None => return usage(),
+            },
+            "--mash" => mash = true,
+            "--hold" => match args.next().and_then(|v| {
+                u8::from_str_radix(v.trim_start_matches('$').trim_start_matches("0x"), 16).ok()
+            }) {
+                Some(v) => hold = v,
                 None => return usage(),
             },
             "--trace" => trace = true,
@@ -363,7 +403,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let calls = match profile(&disk, &bios, target, calls_wanted, frames, &forces) {
+    let calls = match profile(&disk, &bios, target, calls_wanted, frames, &forces, mash, hold) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("{path}: {e}");
@@ -379,6 +419,13 @@ fn main() -> ExitCode {
     println!("${target:04x}  {title}");
     if calls.is_empty() {
         println!("  never called from game code in {frames} frames");
+        // An empty result is a claim about this run, not about the title. Say
+        // what the run could not have seen, because the one time this was read
+        // as "the game does not call it" the game called it 1386 times and was
+        // sitting on its title screen waiting for START.
+        if !mash && hold == 0 {
+            println!("  no input was supplied, so this is only true of a title screen: retry with --mash");
+        }
         if let Some(p) = &json_out {
             let _ = std::fs::write(p, json!({"routine": target, "title": title, "calls": 0}).to_string());
         }
