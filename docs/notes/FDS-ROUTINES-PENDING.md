@@ -53,6 +53,76 @@ before believing any flag it reports.
 
 ---
 
+## `$EC22`: measured 2026-10-10, one field short of writable
+
+A metasprite blitter, and the largest routine left in the queue by a wide
+margin: 1072 memory accesses for one call against about 200 for the whole of
+`$E8D2`. It blocks Druid and Youkai Yashiki.
+
+**It takes a pointer in `$00/$01` to a 12-byte parameter block** and writes an
+N by M grid of OAM entries into the sprite page. It touches NO hardware at
+all, in either caller: no `$20xx`, no `$40xx`. It borrows `$02-$0C`.
+
+| field | Druid | Youkai | what it is |
+|---|---|---|---|
+| +00 | `$00` | `$00` | read, use not established |
+| +01 | `$00` | `$70` | goes to `$08`, the Y origin |
+| +03 | `$82` | `$E0` | goes to `$0A`, the X origin |
+| +05 | `$0B` | `$00` | frame stride, added once PER SPRITE |
+| +06 | `$00` | `$78` | tile source, high byte |
+| +07 | `$8A` | `$5B` | tile source, low byte |
+| +08 | `$00` | `$00` | attribute base |
+| +09 | `$03` | `$02` | added to +08 to make the attribute |
+| +0A | `$21` | `$64` | rows in the high nibble, columns in the low |
+| +0B | `$38` | `$00` | OAM offset within page 2 |
+
+Each of those was forced one at a time on Youkai rather than inferred:
+
+  * `+0A` is a product and the nibbles are NOT interchangeable. `$11` writes 4
+    bytes and reads one tile; `$12` and `$21` both write 8 and read two, but
+    cost 492 and 466 cycles, so one nibble is the inner loop and one the outer.
+  * `+05` moves the tile source by one whole FRAME, not one byte. Forced 0 to 1
+    it moved `$785b-$7872` to `$7873-$788a`, exactly +24, which is the sprite
+    count. That is why the field is read 24 times in a 24-sprite call.
+  * `+08` and `+09` are SUMMED. `$00+$03` gives the `$03` Druid writes and
+    `$00+$02` the `$02` Youkai writes. Either alone would have looked right.
+  * `+0B` is an offset, not a flag: forced `$80` moved the block to
+    `$0280-$02df` and `a` on exit moved with it.
+
+**Two passes.** The first writes Y, attribute and X at OAM +0, +2 and +3,
+walking a strip downward by 8 and then stepping the X origin on by 8 for the
+next strip. The second walks back over the block writing the tile bytes at +1.
+`$07` and `$08` are REUSED between the passes, which is what made this hard to
+read: in the first pass `$07` is the strip counter, in the second it is the
+tile source low byte. `a` on exit is `+0B + 4*sprites + 1`.
+
+**What is not established, and it is the thing that blocks writing it.** How
+the tile byte is fetched has two paths and only one is understood. With the
+source high byte nonzero it is a plain `(ptr),y` read: Druid forced to `$78A0`
+read `$78a0-$78a1`, two bytes for two sprites. Unforced, Druid's source is
+`$00A0` and it instead reads `$0040-$0041` AND `$0140-$0141`, two parallel
+tables at the same offset in pages 0 and 1, with `y` coming out at `$A2`
+instead of `$02`. Youkai forced to a `$00` high byte stopped reading PRG and
+read `$00b6-$00cd` instead. So the high byte selects a path, and the second
+path has not been mapped.
+
+**The third caller cannot currently be profiled.** Kaettekita Mario Bros.
+enters `$EC22` 1386 times under the real BIOS, which the census rows confirm:
+462 each from `$A386` by `jsr` and from `$A391` and `$A3A4` by `jmp`. All three
+are game code. `fdsprof` reports zero calls because it does not press START, so
+that title never leaves its title screen under the profiler. Giving `fdsprof`
+an input option is the cheapest way to a third caller, and `fds-blockers.py`
+already mashes START so the machinery exists to copy.
+
+**And the reason this was promoted above `$E9D3` is dead.** The note below
+guessed `$EC22` was what services or disables the FDS timer, on the strength of
+the real run calling it 1386 times where ours never does. It touches no
+hardware whatsoever, so that reading is wrong. The 1386 calls and the timer
+difference are both real and the link between them is not. The Kaettekita jam
+needs its own investigation.
+
+---
+
 ## Two notes about the address band, not routines
 
 **`$E14A-$E15B` are not entry points.** They are addresses an `rts`/`rti`
