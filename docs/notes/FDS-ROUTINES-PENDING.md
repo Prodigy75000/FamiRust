@@ -53,7 +53,41 @@ before believing any flag it reports.
 
 ---
 
-## `$EC22`: fully measured 2026-10-10, ready to write
+## `$EC22`: WRITTEN 2026-10-14, and four things writing it found
+
+Implemented and held against the real BIOS: twelve tests in
+`crates/nes-core/tests/fds_hle_routines.rs`, a forty-block sweep among them,
+and `scripts/mutate-fds-metasprite.py` breaking it fifteen ways. The full
+contract now lives beside the code in `firmware/fds-hle/src/main.s`. Druid and
+Youkai Yashiki, the two titles stopped on it, go through.
+
+The measurement below was right about the layout and wrong or silent on four
+things, each found by fuzzing the implementation against the original over
+about 1100 forced blocks rather than by reading a caller:
+
+  * **+05 is a frame, not a stride.** The source moves on by frame * rows *
+    strips as a sixteen-bit add, and the literal-or-pointer mode is decided
+    AFTER that add, so a big enough frame carries a literal base into pointer
+    mode. Every corpus caller but Druid passes frame 0.
+  * **A row at `$F4` stays there.** Y steps by 8 except from exactly `$F4`,
+    the off-screen value: `$EC $F4 $F4`, but `$E5 $ED $F5 $FD $05`. The hide
+    bit is nothing more than starting at `$F4`. Found because a 15-row grid
+    from `$C4` came out `$F4` all the way down where the model said `$FC $04`.
+  * **The two passes address differently**, which only shows when a grid runs
+    off page 2: Y, attribute and X go through `($02),y` and carry on into
+    `$03xx`, while tiles go through `$0200,x` and wrap within the page.
+  * **The open field is closed.** `$0A` exits as the mode, `$FF` literal and
+    `$00` pointer. The whole exit state is a function of which flips are set,
+    including carry and overflow from a different final sum per flip; the
+    table is in the source.
+
+The early exits keep the caller's `x` and overflow, with carry holding bit 3
+of the shape byte from the shifts that extract the rows.
+
+What follows is the measurement as it stood before the code, kept because it
+records how the layout was established.
+
+### As measured 2026-10-10
 
 A metasprite blitter, and the largest routine left in the queue: 1072 memory
 accesses for one call against about 200 for the whole of `$E8D2`. It blocks

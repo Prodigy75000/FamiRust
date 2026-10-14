@@ -243,7 +243,7 @@ work as taking transfer interrupts in the loader.
 
 ### The routines
 
-Twenty-five of the forty entry points are implemented. The other 15 are stubs that put
+Twenty-six of the forty entry points are implemented. The other 14 are stubs that put
 **NO ROUTINE** on the screen and stop, which is worth its 111 bytes: Zelda hands
 over correctly, runs its own code, jumps to `$EA84` and would otherwise
 disappear into the fill, looking like a hundred different bugs instead of one
@@ -276,6 +276,7 @@ missing routine. `fdstrace` names the address.
 | `$E153` | 7 | delay `y` milliseconds | cycle-exact, 5 + 1790*y; the second place faster is WRONG |
 | `$E8D2` | 5 | append one block to the queued VRAM transfer buffer | the producer side of `$E86A`; 182 + 28 a byte against 224 + 41 |
 | `$E8E1` | 3 | append several blocks, the shape packed into the data | shares its whole tail with `$E8D2`; written with it because Druid needs both |
+| `$EC22` | 3 | draw a metasprite: a grid of OAM entries from a 12-byte block | exit state fitted over ~1100 forced blocks; 192 + 87 a sprite against 206 + 131 |
 
 **Where the cycle counts do not match, ours is faster, never slower.** That is
 deliberate. A game that runs one of these inside vblank has more room than it
@@ -382,6 +383,20 @@ and nothing left blocks more than three.
 `$EC22` is the one to take next even though two others tie it at two titles: it
 is also what the Kaettekita Mario Bros. jam points at, so it is worth three.
 
+Then `$EC22`. Both titles stopped on it went through, Druid and Youkai Yashiki.
+The jam it was promoted for did not move, and was never going to: measuring it
+showed it touches no hardware at all, so it cannot be what leaves the FDS timer
+running. Kaettekita Mario Bros. still halts and is its own investigation.
+
+| entry | titles stuck on it now |
+|---|---|
+| `$E9D3` | **3** |
+| `$E239` | **2** |
+| `$E844` | **2** |
+
+**104 of the 114 now reach their own code without asking for a routine we have
+not written.** 10 are still stopped by a missing routine.
+
 Ninety-nine is NOT "ninety-nine titles play correctly": thirty seconds of
 unattended running reaches what it reaches, and a game that needs a routine
 only when you open its menu has not asked yet.
@@ -400,7 +415,7 @@ disk to handover under both BIOSes, plants a caller in work RAM, and compares
 what comes back. That is the oracle at the level the work happens at.
 
 And `scripts/mutate-fds-queue.py` is the third half, for the two queue
-routines: it breaks the implementation fourteen different ways and checks a
+routines (`scripts/mutate-fds-metasprite.py` does the same for `$EC22`): it breaks the implementation fourteen different ways and checks a
 test notices each time. Two things it does are the point of it rather than
 incidental. It asserts the anchor matched EXACTLY once and that the assembled
 image actually moved, because a mutation that failed to apply looks exactly
@@ -417,7 +432,7 @@ the next person to find out.
 2. ~~Baseline smoke on the real BIOS, one ledger row per title.~~ The census
    rows and `fds-hle-check.py` are this.
 3. ~~HLE boot with our own graphics and no BIOS file present.~~ Done 2026-09-29.
-4. Routine by routine, each held against the real BIOS. Twenty-five of forty
+4. Routine by routine, each held against the real BIOS. Twenty-six of forty
    done. The queue by BLOCKING is now a tail: `$E9D3` at three, then twos and
    ones. See
    [`FDS-ROUTINES-PENDING.md`](FDS-ROUTINES-PENDING.md), which records why

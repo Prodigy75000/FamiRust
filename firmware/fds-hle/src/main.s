@@ -1599,7 +1599,366 @@ vram_upload:
   ldy #0                    ; sets Z=1 and N=0, the measured exit flags
   rts
 .org $EC22
-  jmp unimplemented
+; --- $EC22: draw a metasprite into the sprite page --------------------------
+;
+; 3 of the 114 corpus titles call it and two were stopped on it, Druid and
+; Youkai Yashiki; the third, Kaettekita Mario Bros., calls it 1386 times once
+; it is playing. The measurement is in docs/notes/FDS-ROUTINES-PENDING.md. It
+; touches no hardware: it writes OAM entries into page 2 and borrows $02-$0C.
+;
+; a, x and y are not arguments. $00/$01 point at a twelve-byte block:
+;
+;   +00 control: $00 draws, bit 7 draws with every Y at $F4, anything else
+;       returns at once having drawn nothing
+;   +01 Y of the top row            +03 X of the left strip
+;   +05 frame: the tile source moves on by frame * rows * strips
+;   +06 +07 tile source, high then low. After the frame is added, a ZERO high
+;       byte makes the low byte a base tile number counting up, and anything
+;       else makes the pair a pointer to one tile index per sprite
+;   +08 flips: bit 0 vertical, bit 4 horizontal
+;   +09 attribute, masked with $23     +0A rows high nibble, strips low
+;   +0B where in page 2 the first entry goes
+;   (+02 and +04 are never read)
+;
+; Sprites go strip by strip, left to right, and top to bottom within a strip,
+; Y stepping 8 and X stepping 8, except that a row at $F4, the off-screen Y,
+; stays there instead of stepping on: $EC $F4 $F4, but $E5 $ED $F5 $FD $05.
+; That is also all the hide bit is: it starts every strip at $F4. A flip sets
+; the hardware flip bit and walks the tiles from the other end: vertical
+; reverses them within each strip and horizontal reverses the order of the
+; strips. No sprite moves.
+;
+; Two passes, like the original, and the split is observable: Y, attribute
+; and X go through ($02),y with y wrapping at 256, so a grid that runs past
+; the end of the page carries on into $03xx, while the tiles go through
+; $0200,x and wrap WITHIN the page. Measured with 120 sprites from $F8: Y,
+; attribute and X reached $03F7 and the tiles landed from $0201.
+;
+; The exit state was fitted against the real BIOS over about 1100 forced
+; blocks, every field and all four flip settings. x is $00 and Z is set on
+; every drawn path. a, y, carry and overflow come from the last sum the
+; original does, which differs per flip, and each tile loop below is shaped so
+; that its own last sum is that one:
+;
+;   none        a = $02, y = base + n   flags of (off + 4n - 3) + 4
+;   both flips  a = $02, y = base - 1   the same
+;   vertical    a = y = base + n        flags of (base + n - r) + r
+;   horizontal  a = y = base - 1        flags of (base + r - 1) - r
+;
+; where n is rows * strips, r is rows, and base is the base tile in literal
+; mode and 0 in pointer mode. $05 ends as the strip count on the first two and
+; 0 on the others, $0B as 0 and as n, and $0C as r except -r for horizontal.
+; The early exits leave x and overflow as the caller had them, with carry
+; holding bit 3 of +0A out of the shifts. That is why the tile loops test the
+; mode with lda rather than bit, which would overwrite overflow.
+;
+; Never slower than the original, which costs about 206 + 131 a sprite. This
+; is about 192 + 87 a sprite + 21 a strip unflipped: 300 against 337 for one
+; sprite, 756 against 1008 for Kaettekita's six, 2364 against 3382 for
+; Youkai's 24. The margin is thinnest at a lone sprite, and thinnest of all,
+; 3 cycles over 1100 swept, when it is hidden, flipped vertically and its
+; literal base has been carried into pointer mode by the frame; the original
+; is quicker when hiding. That is what the one-sprite path through the frame
+; add is for, and why the tile loops test the mode inline rather than paying
+; to copy a pointer.
+metasprite:
+  ldy #$0B
+  lda ($00),y
+  sta $02                   ; the OAM pointer, $0200 + offset
+  lda #$02
+  sta $03
+  dey
+  lda ($00),y               ; the shape
+  lsr a
+  lsr a
+  lsr a
+  lsr a                     ; carry is now bit 3, which the exits keep
+  beq @out                  ; no rows: a=0, y=$0A, x untouched
+  sta $04
+  sta $0C                   ; every exit from here on leaves the rows here
+  lda ($00),y
+  and #$0F
+  beq @out                  ; no strips: a=0, y=$0A, x untouched
+  sta $05
+  ldy #$01
+  lda ($00),y
+  tax                       ; x = the Y origin, and the control exit's x
+  dey
+  lda ($00),y               ; the control byte
+  beq @show
+  bmi @hide
+@out:
+  rts                       ; a = +00, x = +01, y = 0
+@hide:
+  ldx #$F4                  ; bit 7: start at $F4, which then never moves
+@show:
+  stx $06                   ; the Y of the top row
+
+  ; ---- the attribute: (+08 bit 0 -> $80) | (+08 bit 4 -> $40) | +09 & $23
+  ldy #$08
+  lda ($00),y
+  sta $0C                   ; the flips, parked until the tiles
+  and #$11
+  tax
+  iny
+  lda ($00),y
+  and #$23
+  ora flip_bits,x
+  sta $09
+  ldy #$03
+  lda ($00),y
+  sta $0A                   ; X of the current strip
+  lda $05
+  sta $07                   ; strips left
+
+  ; ---- pass 1: Y, attribute and X, through ($02),y ----
+  ldy #$00
+@strip:
+  lda $06
+  sta $08                   ; Y of the current row
+  ldx $04
+@first:                     ; the top row of a strip takes no step
+  sta ($02),y
+  iny
+  iny                       ; the tile byte belongs to pass 2
+  lda $09
+  sta ($02),y
+  iny
+  lda $0A
+  sta ($02),y
+  iny
+  dex
+  beq @strip_done
+  lda $08
+  cmp #$F4                  ; $F4 stays $F4
+  beq @first
+  clc
+  adc #$08
+  sta $08
+  jmp @first
+@strip_done:
+  dec $07
+  beq @pass1_done
+  lda $0A
+  clc
+  adc #$08
+  sta $0A
+  jmp @strip
+@pass1_done:
+
+  ; ---- n = rows * strips, at most 225, so the adds never carry ----
+  lda $04
+  ldx $05
+  dex
+  beq @n_done
+  clc
+@n:
+  adc $04
+  dex
+  bne @n
+@n_done:
+  sta $0B
+
+  ; ---- the tile source, moved on by frame * n ----
+  ldy #$07
+  lda ($00),y
+  sta $07
+  dey
+  lda ($00),y
+  sta $08
+  dey
+  lda ($00),y
+  beq @moved                ; frame 0, the common case
+  ldx $0B
+  dex
+  bne @multi
+  clc                       ; one sprite: the frame is the whole product
+  adc $07
+  sta $07
+  bcc @moved
+  inc $08
+  bcs @moved                ; always: inc leaves the carry set
+@multi:
+  sta $06                   ; add the frame n times, sixteen bits, the sum
+  clc                       ; kept in a and the first add taken out of the
+  adc $07                   ; loop so the count in x is n - 1
+  bcc @add
+  inc $08
+  clc
+@add:
+  adc $06
+  bcc @nc
+  inc $08
+  clc
+@nc:
+  dex
+  bne @add
+  sta $07
+
+  ; ---- the mode, decided AFTER the frame is added: a literal base can
+  ; spill into pointer mode. y starts at base, x at the first tile byte.
+@moved:
+  ldy #$00
+  ldx #$00
+  lda $08
+  bne @ptrmode
+  ldy $07                   ; literal: base = the tile number
+  dex
+@ptrmode:
+  stx $0A                   ; $FF literal, $00 pointer
+  ldx $02
+  inx
+  lda $0C
+  and #$11
+  beq @none
+  cmp #$01
+  beq @vert_in
+  cmp #$10
+  bne @both
+  jmp @horiz
+
+  ; ---- no flip: every tile, first first ----
+@none:
+  lda $0A
+  beq @n_ptr
+  tya                       ; literal: the tile is its own number
+  jmp @n_have
+@n_ptr:
+  lda ($07),y
+@n_have:
+  sta $0200,x
+  iny
+  txa
+  clc
+  adc #$04                  ; the last of these is where the flags come from
+  tax
+  dec $0B
+  bne @none                 ; y = base + n, $0B = 0
+@linear:
+  lda $04
+  sta $0C
+  stx $02                   ; offset + 4n + 1
+  txa
+  ldx #$00                  ; x = 0, and Z set, N clear
+  stx $06
+  rts
+
+  ; ---- both flips: every tile, last first ----
+@both:
+  tya
+  clc
+  adc $0B
+  tay
+  dey                       ; base + n - 1
+@b_tile:
+  lda $0A
+  beq @b_ptr
+  tya
+  jmp @b_have
+@b_ptr:
+  lda ($07),y
+@b_have:
+  sta $0200,x
+  dey
+  txa
+  clc
+  adc #$04
+  tax
+  dec $0B
+  bne @b_tile
+  beq @linear               ; y = base - 1
+
+  ; ---- vertical: strips in order, each read bottom up ----
+@vert_in:
+  sty $06                   ; base
+@vert:
+  lda $04
+  sta $0C                   ; rows left. A counter rather than a cpy, which
+  lda $06                   ; would overwrite the carry the add below leaves
+  clc
+  adc $04                   ; the last of these is where the flags come from
+  sta $06
+  tay
+@v_tile:
+  dey
+  lda $0A
+  beq @v_ptr
+  tya
+  jmp @v_have
+@v_ptr:
+  lda ($07),y
+@v_have:
+  sta $0200,x
+  inx
+  inx
+  inx
+  inx
+  dec $0C
+  bne @v_tile
+  dec $05
+  bne @vert
+  lda $04
+  sta $0C
+  stx $02                   ; offset + 4n + 1
+  lda $06                   ; base + n
+  tay
+  ldx #$00
+  stx $06
+  rts
+
+  ; ---- horizontal: strips last first, each read top down ----
+@horiz:
+  lda #$00
+  sec
+  sbc $04
+  sta $02                   ; -rows. $02 is free until it is rebuilt from x
+  tya
+  clc
+  adc $0B
+  sec
+  sbc #$01
+  sta $06                   ; base + n - 1
+@h_strip:
+  lda $02
+  sta $0C                   ; -rows, counted up to zero
+  lda $06
+  sec
+  sbc $04                   ; the last of these is where the flags come from
+  sta $06
+  tay
+@h_tile:
+  iny
+  lda $0A
+  beq @h_ptr
+  tya
+  jmp @h_have
+@h_ptr:
+  lda ($07),y
+@h_have:
+  sta $0200,x
+  inx
+  inx
+  inx
+  inx
+  inc $0C
+  bne @h_tile
+  dec $05
+  bne @h_strip
+  lda $02
+  sta $0C                   ; -rows on the way out
+  stx $02                   ; offset + 4n + 1
+  lda $06                   ; base - 1
+  tay
+  ldx #$00
+  stx $06
+  rts
+
+; The hardware flip bits, indexed by +08 & $11: bit 0 is vertical and becomes
+; $80, bit 4 is horizontal and becomes $40.
+flip_bits:
+  .byte $00, $80, $00, $00, $00, $00, $00, $00
+  .byte $00, $00, $00, $00, $00, $00, $00, $00
+  .byte $40, $C0
 
 ; ===========================================================================
 ; $E18B: the NMI handler

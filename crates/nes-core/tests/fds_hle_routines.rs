@@ -2861,3 +2861,357 @@ fn the_packed_form_is_not_slower_than_the_real_bios() {
         }
     }
 }
+
+// --- $EC22, the metasprite blitter ------------------------------------------
+
+/// Where these tests put $EC22's twelve-byte block, and the tile list.
+const MS_BLOCK: u16 = 0x0500;
+const MS_TILES: u16 = 0x0400;
+
+/// The tile list every pointer-mode test reads: index i holds i ^ $5A, so
+/// every index reads differently and none reads as its own number, which is
+/// what tells the pointer path from the literal one.
+fn ms_tile(i: u8) -> u8 {
+    i ^ 0x5a
+}
+
+/// A caller for $EC22.
+///
+/// It paints pages 2 and 3 with $EE and the borrowed zero page with $CC
+/// before the call, so "never written" is told apart from "written as zero",
+/// and a routine that stopped early or wrote one byte too many shows up.
+/// Page 3 is included because a grid that runs off the end of the sprite page
+/// carries on into it.
+fn ms_prog(block: [u8; 12], regs: (u8, u8, u8)) -> Vec<u8> {
+    let mut p = Prog::default();
+    p.poke(0x2000, 0x00); // NMI off, as for the queue tests
+    p.raw(&[
+        0xa2, 0x00, // ldx #0
+        0xa9, 0xee, // lda #$ee
+        0x9d, 0x00, 0x02, // sta $0200,x
+        0x9d, 0x00, 0x03, // sta $0300,x
+        0x8a, // txa
+        0x49, 0x5a, // eor #$5a
+        0x9d, 0x00, 0x04, // sta $0400,x
+        0xe8, // inx
+        0xd0, 0xef, // bne, back to the lda
+        0xa2, 0x0a, // ldx #$0a
+        0xa9, 0xcc, // lda #$cc
+        0x95, 0x02, // sta $02,x
+        0xca, // dex
+        0x10, 0xfb, // bpl
+    ]);
+    p.bytes_at(MS_BLOCK, &block);
+    p.poke(0x0000, MS_BLOCK as u8).poke(0x0001, (MS_BLOCK >> 8) as u8);
+    p.lda(regs.0).ldx(regs.1).ldy(regs.2).jsr(0xec22).record_and_halt();
+    assert!(p.0.len() < 0x100, "the caller has grown into its own answers");
+    p.0
+}
+
+/// The borrowed zero page, then pages 2 and 3.
+fn ms_watch() -> Vec<u16> {
+    (0x0002..=0x000cu16).chain(0x0200..=0x03ffu16).collect()
+}
+
+/// One watched byte, by address.
+fn ms_at(vals: &[u8], addr: u16) -> u8 {
+    match addr {
+        0x0002..=0x000c => vals[(addr - 2) as usize],
+        0x0200..=0x03ff => vals[11 + (addr - 0x0200) as usize],
+        _ => panic!("${addr:04x} is not in the watch list"),
+    }
+}
+
+/// The four bytes of the OAM entry at `offset` within page 2, as Y, tile,
+/// attribute, X.
+fn ms_entry(vals: &[u8], offset: u8) -> [u8; 4] {
+    let a = 0x0200 + offset as u16;
+    [ms_at(vals, a), ms_at(vals, a + 1), ms_at(vals, a + 2), ms_at(vals, a + 3)]
+}
+
+/// $EC22 against the real BIOS, with pages 2 and 3 and the zero page compared.
+fn ms_both(block: [u8; 12]) -> Option<(Outcome, Vec<u8>)> {
+    ms_both_regs(block, (0x05, 0x00, 0x00))
+}
+
+fn ms_both_regs(block: [u8; 12], regs: (u8, u8, u8)) -> Option<(Outcome, Vec<u8>)> {
+    let r = both_watching(&ms_prog(block, regs), 30, &ms_watch());
+    if let Some((o, _)) = &r {
+        assert!(o.reached, "$EC22 never returned");
+    }
+    r
+}
+
+/// A block, laid out as the routine reads it.
+#[allow(clippy::too_many_arguments)]
+fn ms_block(control: u8, y: u8, x: u8, frame: u8, src: u16, flips: u8, attr: u8, shape: u8, at: u8)
+    -> [u8; 12]
+{
+    [control, y, 0x00, x, 0x00, frame, (src >> 8) as u8, src as u8, flips, attr, shape, at]
+}
+
+#[test]
+fn metasprite_at_ec22_draws_a_grid_and_matches_the_real_bios() {
+    // Youkai Yashiki's shape: six rows of four strips from the start of the
+    // page, attribute $02, at Y $70 and X $E0. Its own tile list lives in its
+    // PRG RAM; this one points at the test's.
+    let block = ms_block(0x00, 0x70, 0xe0, 0x00, MS_TILES, 0x00, 0x02, 0x64, 0x00);
+    let Some((r, v)) = ms_both(block) else { return skipped() };
+    // The exit Youkai's own call came back with.
+    assert_eq!((r.a, r.x, r.y), (0x61, 0x00, 0x18), "a = $02, x = 0, y = 24 sprites");
+    assert_eq!(ms_entry(&v, 0x00), [0x70, ms_tile(0), 0x02, 0xe0], "top of the left strip");
+    assert_eq!(ms_entry(&v, 0x04), [0x78, ms_tile(1), 0x02, 0xe0], "one row down");
+    assert_eq!(ms_entry(&v, 0x14), [0x98, ms_tile(5), 0x02, 0xe0], "foot of the strip");
+    assert_eq!(ms_entry(&v, 0x18), [0x70, ms_tile(6), 0x02, 0xe8], "top of the next strip");
+    assert_eq!(ms_entry(&v, 0x5c), [0x98, ms_tile(23), 0x02, 0xf8], "the last sprite");
+    assert_eq!(ms_at(&v, 0x0260), 0xee, "and nothing after it");
+    assert_eq!(
+        (0x02..=0x0cu16).map(|a| ms_at(&v, a)).collect::<Vec<_>>(),
+        [0x61, 0x02, 0x06, 0x04, 0x00, 0x00, 0x04, 0x02, 0x00, 0x00, 0x06],
+        "$02-$0C on the way out"
+    );
+}
+
+#[test]
+fn druids_call_draws_literal_tiles_from_a_frame() {
+    // Druid's block exactly as its game passes it: a zero source high byte,
+    // so +07 is a base tile, moved on by frame $0B of two tiles each. $8A +
+    // 22 is $A0, and the notes measured tiles $A0 and $A1 at $0239 and $023D.
+    let block = ms_block(0x00, 0x00, 0x82, 0x0b, 0x008a, 0x00, 0x03, 0x21, 0x38);
+    let Some((r, v)) = ms_both(block) else { return skipped() };
+    assert_eq!((r.a, r.y), (0x41, 0xa2), "a = $38 + 8 + 1, y = base + 2");
+    assert_eq!(ms_entry(&v, 0x38), [0x00, 0xa0, 0x03, 0x82]);
+    assert_eq!(ms_entry(&v, 0x3c), [0x08, 0xa1, 0x03, 0x82]);
+    assert_eq!([ms_at(&v, 0x0007), ms_at(&v, 0x0008)], [0xa0, 0x00], "the moved source");
+    assert_eq!(ms_at(&v, 0x000a), 0xff, "$0A says literal");
+}
+
+#[test]
+fn the_mode_is_picked_after_the_frame_moves_the_source() {
+    // A literal base of $10 moved on by $AB frames of six is $0412: the high
+    // byte is no longer zero, so it is now a POINTER, into the test's list.
+    // Deciding the mode before adding the frame would draw $10 upwards.
+    let block = ms_block(0x00, 0x40, 0x40, 0xab, 0x0010, 0x00, 0x00, 0x32, 0x00);
+    let Some((r, v)) = ms_both(block) else { return skipped() };
+    assert_eq!(ms_entry(&v, 0x00)[1], ms_tile(0x12), "first tile from the list at $0412");
+    assert_eq!(ms_entry(&v, 0x14)[1], ms_tile(0x17), "and the sixth");
+    assert_eq!([ms_at(&v, 0x0007), ms_at(&v, 0x0008)], [0x12, 0x04]);
+    assert_eq!(ms_at(&v, 0x000a), 0x00, "$0A says pointer");
+    assert_eq!(r.y, 0x06, "pointer mode counts from 0");
+}
+
+#[test]
+fn the_control_byte_hides_on_bit_7_and_otherwise_draws_nothing() {
+    let draw = |control| ms_block(control, 0x70, 0xe0, 0x00, MS_TILES, 0x00, 0x02, 0x32, 0x00);
+
+    let Some((_, v)) = ms_both(draw(0x80)) else { return skipped() };
+    for k in 0..6u8 {
+        assert_eq!(ms_entry(&v, 4 * k)[0], 0xf4, "sprite {k}: bit 7 parks every row at $F4");
+    }
+    assert_eq!(ms_entry(&v, 0x0c)[3], 0xe8, "but X and the rest are still drawn");
+
+    for control in [0x01u8, 0x08, 0x7f] {
+        let Some((r, v)) = ms_both_regs(draw(control), (0x11, 0x22, 0x33)) else {
+            return skipped();
+        };
+        assert_eq!((r.a, r.x, r.y), (control, 0x70, 0x00), "a = +00, x = +01, y = 0");
+        assert_eq!(ms_at(&v, 0x0200), 0xee, "control ${control:02x}: nothing drawn");
+        assert_eq!(ms_at(&v, 0x0006), 0xcc, "and nothing past the shape touched");
+    }
+}
+
+#[test]
+fn a_zero_in_either_nibble_draws_nothing_and_leaves_x_alone() {
+    for (shape, rows_written) in [(0x02u8, false), (0x30, true), (0x00, false)] {
+        let block = ms_block(0x00, 0x70, 0xe0, 0x00, MS_TILES, 0x00, 0x02, shape, 0x0c);
+        let Some((r, v)) = ms_both_regs(block, (0x11, 0x22, 0x33)) else {
+            return skipped();
+        };
+        assert_eq!((r.a, r.x, r.y), (0x00, 0x22, 0x0a), "shape ${shape:02x}");
+        assert_eq!(r.p & 0x02, 0x02, "shape ${shape:02x}: Z set");
+        assert_eq!(ms_at(&v, 0x0002), 0x0c, "the OAM pointer is set before the check");
+        assert_eq!(ms_at(&v, 0x0004) != 0xcc, rows_written, "shape ${shape:02x}: $04");
+        assert_eq!(ms_at(&v, 0x0005), 0xcc, "shape ${shape:02x}: $05 never reached");
+        assert_eq!(ms_at(&v, 0x020c), 0xee, "shape ${shape:02x}: nothing drawn");
+    }
+}
+
+#[test]
+fn flips_walk_the_tiles_backwards_and_never_move_a_sprite() {
+    // Three rows of two strips. Vertical reverses the order within a strip,
+    // horizontal the order of the strips, and every sprite keeps its place.
+    let cases: [(u8, u8, [u8; 6]); 4] = [
+        (0x00, 0x02, [0, 1, 2, 3, 4, 5]),
+        (0x01, 0x82, [2, 1, 0, 5, 4, 3]),
+        (0x10, 0x42, [3, 4, 5, 0, 1, 2]),
+        (0x11, 0xc2, [5, 4, 3, 2, 1, 0]),
+    ];
+    for (flips, attr, order) in cases {
+        let block = ms_block(0x00, 0x70, 0xe0, 0x00, MS_TILES, flips, 0x02, 0x32, 0x00);
+        let Some((_, v)) = ms_both(block) else { return skipped() };
+        for (k, idx) in order.iter().enumerate() {
+            let want = [0x70 + 8 * (k as u8 % 3), ms_tile(*idx), attr, 0xe0 + 8 * (k as u8 / 3)];
+            assert_eq!(ms_entry(&v, 4 * k as u8), want, "flips ${flips:02x}, sprite {k}");
+        }
+    }
+}
+
+#[test]
+fn the_attribute_keeps_palette_and_priority_and_takes_flips_from_08() {
+    // +09 is masked with $23, and +08 contributes only its two flip bits.
+    // $0F/$F0 is the probe that refused to fit the first, summed reading.
+    for (flips, attr, want) in [(0x00u8, 0xffu8, 0x23u8), (0x00, 0xe3, 0x23), (0x0f, 0xf0, 0xa0),
+                                (0xfe, 0x00, 0x40), (0xff, 0xff, 0xe3)] {
+        let block = ms_block(0x00, 0x70, 0xe0, 0x00, MS_TILES, flips, attr, 0x11, 0x00);
+        let Some((_, v)) = ms_both(block) else { return skipped() };
+        assert_eq!(ms_at(&v, 0x0202), want, "+08 ${flips:02x}, +09 ${attr:02x}");
+        assert_eq!(ms_at(&v, 0x0009), want, "and $09 keeps it");
+    }
+}
+
+#[test]
+fn a_row_at_f4_stays_there_rather_than_wrapping_back_on_screen() {
+    // $F4 is the off-screen Y. A strip that reaches it exactly stops moving;
+    // one that steps over it wraps like any byte. This is also all the hide
+    // bit is: it starts every strip at $F4.
+    for (top, want) in [
+        (0xecu8, [0xecu8, 0xf4, 0xf4, 0xf4, 0xf4]),
+        (0xe5, [0xe5, 0xed, 0xf5, 0xfd, 0x05]),
+        (0xf8, [0xf8, 0x00, 0x08, 0x10, 0x18]),
+    ] {
+        let block = ms_block(0x00, top, 0x10, 0x00, MS_TILES, 0x00, 0x00, 0x51, 0x00);
+        let Some((_, v)) = ms_both(block) else { return skipped() };
+        let got: Vec<u8> = (0..5u8).map(|k| ms_entry(&v, 4 * k)[0]).collect();
+        assert_eq!(got, want, "a strip starting at ${top:02x}");
+    }
+}
+
+#[test]
+fn a_grid_past_the_page_end_spills_y_attr_and_x_but_wraps_its_tiles() {
+    // Two passes, two addressing modes. From $F8, four sprites: the third
+    // and fourth have their Y, attribute and X at $0300-$0307, while their
+    // tiles wrap round to $0201 and $0205.
+    let block = ms_block(0x00, 0x70, 0xe0, 0x00, MS_TILES, 0x00, 0x02, 0x41, 0xf8);
+    let Some((r, v)) = ms_both(block) else { return skipped() };
+    assert_eq!(ms_entry(&v, 0xf8), [0x70, ms_tile(0), 0x02, 0xe0]);
+    assert_eq!(
+        [ms_at(&v, 0x0300), ms_at(&v, 0x0301), ms_at(&v, 0x0302), ms_at(&v, 0x0303)],
+        [0x80, 0xee, 0x02, 0xe0],
+        "the third sprite, with no tile byte in page 3"
+    );
+    assert_eq!(ms_at(&v, 0x0201), ms_tile(2), "its tile wrapped into page 2");
+    assert_eq!(ms_at(&v, 0x0205), ms_tile(3));
+    assert_eq!(ms_at(&v, 0x0200), 0xee, "and nothing else there was touched");
+    assert_eq!(r.a, 0x09, "$F8 + 16 + 1, in eight bits");
+}
+
+#[test]
+fn the_exit_flags_come_from_the_last_sum_each_walk_does() {
+    // Carry and overflow on the way out are not a single rule: each flip
+    // setting leaves the flags of a different sum. These blocks are picked so
+    // each sum overflows, which a routine that cleared V, or kept the
+    // caller's, or took it from another add, would get wrong.
+    //
+    //   none, both  (off + 4n - 3) + 4     off $7E, n 1:  $7F + 4
+    //   vertical    (base + n - r) + r     base $7F, 1x1: $7F + 1
+    //   horizontal  (base + r - 1) - r     base $80, 1x1: $80 - 1, carry set
+    // Z is set and N clear on every drawn path, from the x = 0 on the way out.
+    let cases = [
+        (0x00u8, 0x0000u16, 0x7eu8, 0x42u8),
+        (0x11, 0x0000, 0x7e, 0x42),
+        (0x01, 0x007f, 0x00, 0x42),
+        (0x10, 0x0080, 0x00, 0x43),
+    ];
+    for (flips, src, at, p) in cases {
+        let block = ms_block(0x00, 0x70, 0xe0, 0x00, src, flips, 0x00, 0x11, at);
+        let Some((r, _)) = ms_both(block) else { return skipped() };
+        assert_eq!(r.p & 0xc3, p, "flips ${flips:02x}: N V Z C");
+    }
+    // And the same sums NOT overflowing, so a routine that always set V
+    // cannot pass either: one sprite further along clears it.
+    for (flips, src, at) in [(0x00u8, 0x0000u16, 0x7au8), (0x01, 0x007e, 0x00), (0x10, 0x0081, 0x00)] {
+        let block = ms_block(0x00, 0x70, 0xe0, 0x00, src, flips, 0x00, 0x11, at);
+        let Some((r, _)) = ms_both(block) else { return skipped() };
+        assert_eq!(r.p & 0x40, 0x00, "flips ${flips:02x}: no overflow this time");
+    }
+}
+
+/// A fixed pseudo-random sequence, so the sweep below is the same every run.
+struct Lcg(u32);
+
+impl Lcg {
+    fn next(&mut self) -> u8 {
+        self.0 = self.0.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+        (self.0 >> 16) as u8
+    }
+}
+
+#[test]
+fn a_sweep_of_forced_blocks_matches_the_real_bios() {
+    // The cases above each pin one behaviour. This one is for the
+    // interactions nobody thought to write down: forty blocks with every
+    // field varied at once, compared byte for byte with the original. Only
+    // meaningful with the oracle present, so it skips without one.
+    if real_bios().is_none() {
+        eprintln!("note: no dumps/fds/disksys.rom, so the sweep has nothing to compare with");
+        return;
+    }
+    let mut g = Lcg(0xec22);
+    for case in 0..40 {
+        let control = [0x00, 0x00, 0x00, 0x80, 0x01][g.next() as usize % 5];
+        let shape = ((g.next() % 15 + 1) << 4) | (g.next() % 15 + 1);
+        let n = (shape >> 4) as u16 * (shape & 15) as u16;
+        // A source has to stay inside memory the two runs agree on. RAM
+        // outside the planted list differs between the BIOSes, and a frame
+        // big enough can carry a literal base into the PPU registers, whose
+        // reads differ too. So literal bases keep their frame small enough to
+        // stay literal, and pointers stay in the list.
+        let (frame, src) = if g.next() & 1 == 0 {
+            let lo = g.next() as u16;
+            ((g.next() as u16 % ((0xff - lo) / n + 1)) as u8, lo)
+        } else {
+            let lo = g.next() as u16 % (0x100 - n.min(0xff));
+            (0x00, MS_TILES + lo)
+        };
+        let block = ms_block(control, g.next(), g.next(), frame, src, g.next(), g.next(), shape,
+                             g.next());
+        let regs = (g.next(), g.next(), g.next());
+        eprintln!("case {case}: {block:02x?}");
+        let _ = ms_both_regs(block, regs);
+    }
+}
+
+#[test]
+fn the_metasprite_is_not_slower_than_the_real_bios() {
+    // About 192 + 87 a sprite + 21 a strip against the original's 206 + 131
+    // a sprite, so the margin grows with the grid. Held at the three corpus
+    // callers' own shapes (Druid's literal two with its frame, Kaettekita's
+    // six, Youkai's 24), at the largest grid there is, and at a lone sprite,
+    // where it is thinnest: hidden, flipped and carried into pointer mode by
+    // its frame, which a sweep put at 3 cycles to spare.
+    let Some(disk) = a_disk() else { return skipped() };
+    let Some(real) = real_bios() else { return };
+    let shapes = [
+        (0x00u8, 0x21u8, 0x008au16, 0x0bu8),
+        (0x00, 0x32, MS_TILES, 0x00),
+        (0x00, 0x64, MS_TILES, 0x00),
+        (0x00, 0x32, 0x0040, 0x01),
+        (0x00, 0xff, MS_TILES, 0x00),
+        (0x00, 0x11, MS_TILES, 0x00),
+        (0x00, 0x11, 0x0040, 0x00),
+        (0x80, 0x11, 0x00f7, 0x10),
+        (0x80, 0x12, 0x00f7, 0x10),
+    ];
+    for (control, shape, src, frame) in shapes {
+        for flips in [0x00u8, 0x01, 0x10, 0x11] {
+            let block = ms_block(control, 0x70, 0xe0, frame, src, flips, 0x02, shape, 0x00);
+            let prog = ms_prog(block, (0, 0, 0));
+            let ours = cycles_of_call_in(&disk, &[], 0xec22, &prog);
+            let theirs = cycles_of_call_in(&disk, &real, 0xec22, &prog);
+            assert!(
+                ours < theirs,
+                "control ${control:02x} shape ${shape:02x} flips ${flips:02x}: {ours} against {theirs}"
+            );
+        }
+    }
+}
