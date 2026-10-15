@@ -3215,3 +3215,105 @@ fn the_metasprite_is_not_slower_than_the_real_bios() {
         }
     }
 }
+
+// --- $E9D3, the zero-page timers --------------------------------------------
+
+/// A caller for $E9D3: NMI off, the WHOLE zero page filled with `fill` so the
+/// two BIOSes start from the same bytes (a walk that wraps visits all of
+/// them), then `plant` on top, then the call.
+fn timers_prog(a: u8, x: u8, y: u8, fill: u8, plant: &[(u8, u8)]) -> Vec<u8> {
+    let mut p = Prog::default();
+    p.poke(0x2000, 0x00);
+    // lda #fill : ldx #0 : sta $00,x : inx : bne
+    p.raw(&[0xa9, fill, 0xa2, 0x00, 0x95, 0x00, 0xe8, 0xd0, 0xfb]);
+    for (addr, v) in plant {
+        p.poke(*addr as u16, *v);
+    }
+    p.lda(a).ldx(x).ldy(y).jsr(0xe9d3).record_and_halt();
+    p.0
+}
+
+fn zero_page() -> Vec<u16> {
+    (0x0000..=0x00ffu16).collect()
+}
+
+fn timers_both(a: u8, x: u8, y: u8, fill: u8, plant: &[(u8, u8)]) -> Option<(Outcome, Vec<u8>)> {
+    let r = both_watching(&timers_prog(a, x, y, fill, plant), 30, &zero_page());
+    if let Some((o, _)) = &r {
+        assert!(o.reached, "$E9D3 never returned");
+    }
+    r
+}
+
+#[test]
+fn timers_at_e9d3_count_the_fast_ones_down_and_match_the_real_bios() {
+    // Bubble Bobble's own registers: prescaler at $2B, fast timers up to $2F,
+    // slow ones up to $31. The prescaler is at 5, so this is a fast tick.
+    let plant = [(0x2b, 0x05), (0x2c, 0x03), (0x2d, 0x00), (0x2e, 0x80), (0x2f, 0x01),
+                 (0x30, 0x07), (0x31, 0x07)];
+    let Some((r, z)) = timers_both(0x2f, 0x2b, 0x31, 0x00, &plant) else { return skipped() };
+    assert_eq!(z[0x2b], 0x04, "the prescaler counts down");
+    assert_eq!(&z[0x2c..=0x2f], &[0x02, 0x00, 0x7f, 0x00], "fast timers tick, zero stays zero");
+    assert_eq!(&z[0x30..=0x31], &[0x07, 0x07], "and the slow ones wait");
+    assert_eq!(z[0x00], 0x2b, "$00 holds where the walk stops");
+    assert_eq!((r.a, r.x, r.y), (0x03, 0x2b, 0x31), "a is the last timer loaded, before its dec");
+    assert_eq!(r.p & 0x03, 0x03, "Z and C from the final compare");
+}
+
+#[test]
+fn a_prescaler_underflow_reloads_nine_and_ticks_the_slow_timers() {
+    let plant = [(0x2b, 0x00), (0x2c, 0x03), (0x2f, 0x01), (0x30, 0x07), (0x31, 0x00)];
+    let Some((r, z)) = timers_both(0x2f, 0x2b, 0x31, 0x00, &plant) else { return skipped() };
+    assert_eq!(z[0x2b], 0x09, "0 - 1 reloads to 9, so the slow timers tick every tenth call");
+    assert_eq!(&z[0x2c..=0x31], &[0x02, 0x00, 0x00, 0x00, 0x06, 0x00]);
+    assert_eq!(r.a, 0x03, "the walk runs down to x+1 and $2C was loaded last");
+    // Any negative counts as an underflow, not just $FF.
+    let Some((_, z)) = timers_both(0x2f, 0x2b, 0x31, 0x00, &[(0x2b, 0xe0), (0x31, 0x02)]) else {
+        return skipped();
+    };
+    assert_eq!((z[0x2b], z[0x31]), (0x09, 0x01), "$E0 - 1 is negative too");
+}
+
+#[test]
+fn the_walk_stops_at_00_not_at_x_so_a_below_x_wraps_the_zero_page() {
+    // a below x: the index walks down through $00, decrementing every
+    // nonzero byte on the way, $00 itself included. With $00 one lower the
+    // walk ends a byte late and takes the prescaler a second time: $49 to $47.
+    let Some((r, z)) = timers_both(0x34, 0x3c, 0x3d, 0x01, &[(0x3c, 0x49)]) else {
+        return skipped();
+    };
+    assert_eq!(z[0x3c], 0x47, "the prescaler, decremented twice");
+    assert_eq!(z[0x00], 0x3b, "$00 was a timer too");
+    assert_eq!(z[0x80], 0x00, "and so was everything else the walk passed");
+    assert_eq!(z[0x3d], 0x00, "round the top and down to x again");
+    assert_eq!(z[0x3b], 0x01, "and only the new stop, $3B, is spared");
+    assert_eq!(r.x, 0x3b, "x stops where $00 now says");
+}
+
+#[test]
+fn the_timers_are_cycle_exact() {
+    // 19 + 15 a zero timer + 20 a nonzero one on a fast tick, 7 more when the
+    // prescaler reloads. Hand-counted from the source, then held against the
+    // original, wrapping walk included.
+    let Some(disk) = a_disk() else { return skipped() };
+    let cases: [(u8, u8, u8, &[(u8, u8)], u64); 4] = [
+        (0x2f, 0x2b, 0x31, &[(0x2b, 0x05)], 19 + 15 * 4),
+        (0x2f, 0x2b, 0x31, &[(0x2b, 0x00)], 26 + 15 * 6),
+        (0x2f, 0x2b, 0x31, &[(0x2b, 0x05), (0x2c, 0x09), (0x2e, 0x01)], 19 + 15 * 2 + 20 * 2),
+        (0x34, 0x3c, 0x3d, &[(0x3c, 0x49)], 0),
+    ];
+    // The last case wraps the zero page, filled with $01 so every byte it
+    // passes is a live timer; it has no hand count, only the original.
+    for (a, x, y, plant, want) in cases {
+        let fill = if want == 0 { 0x01 } else { 0x00 };
+        let prog = timers_prog(a, x, y, fill, plant);
+        let ours = cycles_of_call_in(&disk, &[], 0xe9d3, &prog);
+        if want != 0 {
+            assert_eq!(ours, want, "a={a:02x} x={x:02x}: the hand count");
+        }
+        if let Some(real) = real_bios() {
+            let theirs = cycles_of_call_in(&disk, &real, 0xe9d3, &prog);
+            assert_eq!(ours, theirs, "a={a:02x} x={x:02x}: ours against the original");
+        }
+    }
+}

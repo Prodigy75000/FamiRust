@@ -1129,7 +1129,54 @@ sprite_dma:
   sta OAMDMA
   rts
 .org $E9D3
-  jmp unimplemented
+; --- $E9D3: count a block of zero-page timers down, a tenth of them slowly ---
+;
+; 3 of the 114 corpus titles call it and all three were stopped on it: Bubble
+; Bobble, Nazo no Murasame-jou and Zelda no Densetsu. No inline arguments; the
+; stack reads in its access log are the rts.
+;
+;   x   the PRESCALER, a zero-page byte counting 9 down to 0
+;   a   the last of the FAST timers, x+1 up to a
+;   y   the last of the SLOW timers, x+1 up to y
+;
+; Each call decrements the prescaler. If that takes it below zero it is
+; reloaded with 9 and every timer from y down to x+1 is decremented; otherwise
+; only those from a down to x+1 are. A timer at zero stays at zero. So the
+; slow ones tick once every ten calls.
+;
+; The walk stops when the index comes back round to $00, which holds x. That
+; is a compare against memory, not against a register, and it is observable:
+; with a below x the index wraps the whole zero page, decrementing $00 itself
+; on the way, and the walk then ends one byte later than it would have. Forced
+; with x=$3C and a=$34 the prescaler went $49 -> $47 and the call took 4269
+; cycles.
+;
+; Exit: x comes back as it went in, because that is where the walk stops. y is
+; untouched. a is the last timer value LOADED, before its decrement. N, Z and C
+; are the final cpx (equal, so Z and C set) and V, D and I pass through.
+;
+; Every read in the original's access log is accounted for by this exact
+; shape, including the dummy read of $00 that each zp,x access makes: write
+; $00, then the prescaler's read-modify-write, then per timer a read of $00, the
+; timer, and $00 again for the compare.
+counter_logic:
+  stx $00                   ; where the walk stops
+  dec $00,x                 ; the prescaler
+  bpl @go                   ; still counting: a is the start, fast timers only
+  lda #$09
+  sta $00,x                 ; underflowed: reload, and walk the slow ones too
+  tya
+@go:
+  tax
+@timer:
+  lda $00,x
+  beq @next                 ; a timer at zero stays there
+  dec $00,x
+@next:
+  dex
+  cpx $00
+  bne @timer
+  rts
 ; --- $EA1F: read both pads and work out what was newly pressed -------------
 ;
 ; 26 of the 114 corpus titles call it. No register arguments; everything comes
