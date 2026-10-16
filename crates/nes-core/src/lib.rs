@@ -218,6 +218,12 @@ impl Nes {
         self.bus.mapper.dbg_chr_ram()
     }
 
+    /// Debug: one FDS side's medium, gaps and CRC footers included, so a test
+    /// can diff the disk across a write. Empty for a cartridge.
+    pub fn dbg_fds_image(&self, side: usize) -> &[u8] {
+        self.bus.mapper.dbg_fds_image(side)
+    }
+
     /// Debug: start logging CPU-space accesses, at most `cap` of them. See
     /// [`bus::Bus::dbg_log_start`]; this is how `fdsprof` learns what a BIOS
     /// routine does without reading its code.

@@ -314,6 +314,13 @@ pub trait Mapper: SaveState {
         &[]
     }
 
+    /// One FDS side's medium as the drive sees it, gaps and CRC footers
+    /// included, for diffing a disk before and after a write. Empty for a
+    /// cartridge or a side that does not exist.
+    fn dbg_fds_image(&self, _side: usize) -> &[u8] {
+        &[]
+    }
+
     // ---- FDS disk-control (only the RAM Adapter overrides these) ----
 
     /// Number of FDS disk sides; 0 for a normal cartridge.

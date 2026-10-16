@@ -105,6 +105,16 @@ const LEAD_IN_GAP: usize = 200;
 /// [gap, mark, data], keeping reads and writes on the same block positions.
 const BLOCK_GAP: usize = 1;
 
+/// Blank medium kept after the last block on top of the side's own unused
+/// bytes, for the gap, start mark and CRC every newly written block carries and
+/// a `.fds` side does not: 4 bytes a block, 8 a file. Room for 128 new files.
+///
+/// Without ANY blank medium a side ends at its last block, and a game saving a
+/// new file runs the head off the end mid-write: `end_of_head` is set, no
+/// byte-ready comes, and the BIOS waits for it forever. Measured under the real
+/// BIOS on Hao-kun no Fushigi na Tabi, whose save appends a file.
+const WRITE_SLACK: usize = 1024;
+
 // ---------------------------------------------------------------------------
 // Container
 // ---------------------------------------------------------------------------
@@ -269,6 +279,10 @@ impl MediumSide {
         // whole raw side after the lead-in so reads still return something sane.
         if !any {
             image.extend_from_slice(raw);
+        } else {
+            // The rest of the side is blank medium a game can write files into.
+            let room = raw.len().saturating_sub(pos);
+            image.resize(image.len() + room + WRITE_SLACK, 0);
         }
         MediumSide {
             image,
@@ -986,6 +1000,20 @@ impl Fds {
                 self.read_reg = side.image[self.head];
                 self.dbg_bytes_read += 1;
             }
+            XferMode::Write if self.ctrl & 0x10 != 0 => {
+                // CRC control: the drive writes the block's two CRC bytes, not
+                // the data register, and the BIOS holds the mode for one byte
+                // period. Writing one byte here left every rewritten block a
+                // byte short of the layout reads expect. The CRC is faked as on
+                // every reconstructed block, and reported valid on read.
+                for i in 0..CRC_FOOTER {
+                    if let Some(b) = side.image.get_mut(self.head + i) {
+                        *b = 0;
+                    }
+                }
+                self.head += CRC_FOOTER - 1; // the common advance takes the last
+                side.dirty = true;
+            }
             XferMode::Write => {
                 side.image[self.head] = self.write_reg;
                 side.dirty = true;
@@ -1188,6 +1216,10 @@ impl crate::cart::Mapper for Fds {
         &self.chr_ram
     }
 
+    fn dbg_fds_image(&self, side: usize) -> &[u8] {
+        self.sides.get(side).map(|s| &s.image[..]).unwrap_or(&[])
+    }
+
     fn fds_side_count(&self) -> usize {
         self.side_count()
     }
@@ -1280,9 +1312,13 @@ impl SaveState for Fds {
                 let _ = r.bool()?; // dirty flag
                 continue;
             }
-            if len != s.image.len() {
+            // A state saved before sides carried blank medium after their last
+            // block has a shorter image. The image is the disk as it was, so
+            // take it at its own length rather than refusing the state.
+            if len > 2 * (LEAD_IN_GAP + SIDE_LEN + WRITE_SLACK) {
                 return Err(LoadError::BadValue("fds side length"));
             }
+            s.image.resize(len, 0);
             r.bytes(&mut s.image)?;
             s.dirty = r.bool()?;
         }
@@ -1369,6 +1405,58 @@ mod tests {
         let block2 = LEAD_IN_GAP + 1 + 56 + CRC_FOOTER + BLOCK_GAP;
         assert_eq!(side.image[block2], START_MARK);
         assert_eq!(side.image[block2 + 1], 0x02);
+    }
+
+    #[test]
+    fn a_side_keeps_blank_medium_after_its_last_block() {
+        // The synthetic side parses to byte 79 of 65500. Rebuilt: a 200-byte
+        // lead-in, the four blocks with their marks, CRCs and gaps (60 + 6 +
+        // 20 + 9 = 95), then the 65421 unused bytes and 1024 of slack. Before
+        // this the image stopped at 295 and an appended file hung the BIOS.
+        let side = MediumSide::build(&synth_side());
+        assert_eq!(side.image.len(), 66740);
+        assert!(side.image[295..].iter().all(|&b| b == 0), "and it is blank");
+    }
+
+    #[test]
+    fn a_write_in_crc_mode_lays_down_two_crc_bytes() {
+        // Every reconstructed block carries two CRC bytes, so a rewritten one
+        // has to as well or it lands a byte short and everything after it on
+        // the side moves. The BIOS holds CRC mode for one byte period.
+        let disk = FdsDisk::parse(&synth_side()).unwrap();
+        let mut fds = Fds::new(disk, vec![0u8; BIOS_LEN]);
+        fds.sides[0].image[400..404].copy_from_slice(&[0xaa; 4]);
+        fds.mode = XferMode::Write;
+        fds.in_block = true;
+        fds.write_reg = 0x5c;
+        fds.head = 400;
+        fds.ctrl = 0x10;
+        fds.transfer_byte();
+        assert_eq!(&fds.sides[0].image[400..403], &[0x00, 0x00, 0xaa]);
+        assert_eq!(fds.head, 402);
+        // Out of CRC mode it is one byte, the data register's.
+        fds.byte_ready = false;
+        fds.ctrl = 0x00;
+        fds.transfer_byte();
+        assert_eq!(&fds.sides[0].image[402..404], &[0x5c, 0xaa]);
+        assert_eq!(fds.head, 403);
+    }
+
+    #[test]
+    fn a_state_from_before_the_blank_medium_still_loads() {
+        // Older states carry the side at its old, shorter length. The stored
+        // image is the disk as it was, so it is taken whole, not refused.
+        let mut old = Fds::new(FdsDisk::parse(&synth_side()).unwrap(), vec![0u8; BIOS_LEN]);
+        old.sides[0].image.truncate(295);
+        old.sides[0].image[294] = 0x77;
+        let mut w = WriteCursor::new();
+        old.save(&mut w);
+        let bytes = w.into_bytes();
+        let mut new = Fds::new(FdsDisk::parse(&synth_side()).unwrap(), vec![0u8; BIOS_LEN]);
+        assert_eq!(new.sides[0].image.len(), 66740);
+        new.load(&mut ReadCursor::new(&bytes)).expect("an old state should load");
+        assert_eq!(new.sides[0].image.len(), 295);
+        assert_eq!(new.sides[0].image[294], 0x77);
     }
 
     #[test]
