@@ -3317,3 +3317,138 @@ fn the_timers_are_cycle_exact() {
         }
     }
 }
+
+// --- $E844, an inline pointer for the caller's caller -----------------------
+
+/// Where the test's own `G` lives: `jsr $E844 : rts`, the shape a game
+/// subroutine that takes an inline pointer has.
+const INLINE_G: u16 = 0x06c0;
+
+/// A caller for $E844, two levels deep. A stub at `at` does `jsr G` with
+/// `word` after it and then jumps to the recorder, so the recorder is only
+/// reached if G's return address was stepped over exactly two bytes. The
+/// stack pointer is pinned first, because x comes back as the stack pointer
+/// and the two BIOSes need not hand over the same one.
+fn inline_prog(at: u16, word: u16, y: u8) -> Vec<u8> {
+    let mut p = Prog::default();
+    p.poke(0x2000, 0x00);
+    p.raw(&[0xa2, 0xef, 0x9a]); // ldx #$ef : txs
+    p.bytes_at(INLINE_G, &[0x20, 0x44, 0xe8, 0x60]);
+    // The stub's jmp target is the recorder, whose address is only known once
+    // the rest is laid out: everything below is fixed-size, so count it.
+    let stub_len = 8u16;
+    let tail = 5 * stub_len as usize + 2 + 3; // the stub's pokes, ldy, jmp
+    let record = PROG + (p.0.len() + tail) as u16;
+    let stub = [
+        0x20, INLINE_G as u8, (INLINE_G >> 8) as u8,
+        word as u8, (word >> 8) as u8,
+        0x4c, record as u8, (record >> 8) as u8,
+    ];
+    p.bytes_at(at, &stub);
+    p.ldy(y);
+    p.raw(&[0x4c, at as u8, (at >> 8) as u8]);
+    assert_eq!(PROG + p.0.len() as u16, record, "the recorder moved");
+    p.record_and_halt();
+    p.0
+}
+
+fn inline_watch() -> Vec<u16> {
+    vec![0x0000, 0x0001, 0x0005, 0x0006]
+}
+
+#[test]
+fn inline_ptr_at_e844_hands_the_callers_pointer_over_and_matches_the_real_bios() {
+    let Some((r, v)) = both_watching(&inline_prog(0x0570, 0xbeef, 0x77), 30, &inline_watch())
+    else {
+        return skipped();
+    };
+    assert!(r.reached, "G did not return past its pointer, or never returned");
+    assert_eq!([v[0], v[1]], [0xef, 0xbe], "$00/$01 = the word after G's jsr");
+    assert_eq!([v[2], v[3]], [0x72, 0x05], "$05/$06 = G's return address as it was");
+    // G's stub jsr is at $0570, so its return address is $0572 and the new
+    // one $0574: a is the high byte, x the stack pointer at entry, y 2.
+    assert_eq!((r.a, r.x, r.y), (0x05, 0xeb, 0x02));
+}
+
+#[test]
+fn the_inline_step_carries_into_the_high_byte() {
+    // G's jsr at $04FC: its return address is $04FE and the step lands on
+    // $0500, so the +2 carries. The pointer itself straddles the page too.
+    let Some((r, v)) = both_watching(&inline_prog(0x04fc, 0x1234, 0x00), 30, &inline_watch())
+    else {
+        return skipped();
+    };
+    assert!(r.reached, "the carry was dropped and G returned into $04xx");
+    assert_eq!([v[0], v[1]], [0x34, 0x12]);
+    assert_eq!(r.a, 0x05, "the stepped high byte");
+}
+
+#[test]
+fn inline_ptr_is_cycle_exact() {
+    // 64, as on both corpus callers, and 65 when the second byte of the
+    // pointer is across a page from G's return address: ($05),y pays for the
+    // crossing, and the original pays it too.
+    let Some(disk) = a_disk() else { return skipped() };
+    for (at, want) in [(0x0570u16, 64u64), (0x04fc, 65)] {
+        let prog = inline_prog(at, 0xbeef, 0x00);
+        let ours = cycles_of_call_in(&disk, &[], 0xe844, &prog);
+        assert_eq!(ours, want, "G at ${at:04x}");
+        if let Some(real) = real_bios() {
+            assert_eq!(ours, cycles_of_call_in(&disk, &real, 0xe844, &prog), "G at ${at:04x}");
+        }
+    }
+}
+
+// --- $E997, a nametable address to pixel coordinates ------------------------
+
+fn tile_prog(hi: u8, lo: u8) -> Vec<u8> {
+    let mut p = Prog::default();
+    p.poke(0x2000, 0x00).poke(0x0000, hi).poke(0x0001, lo);
+    p.poke(0x0002, 0xcc).poke(0x0003, 0xcc);
+    p.lda(0x5a).ldx(0x11).ldy(0x22).jsr(0xe997).record_and_halt();
+    p.0
+}
+
+#[test]
+fn tile_to_pixel_at_e997_matches_the_real_bios() {
+    // Knight Move's own call: $21D9 is row 14, column 25.
+    let watch = [0x0000u16, 0x0001, 0x0002, 0x0003];
+    let Some((r, v)) = both_watching(&tile_prog(0x21, 0xd9), 30, &watch) else {
+        return skipped();
+    };
+    assert!(r.reached);
+    assert_eq!([v[2], v[3]], [0x70, 0xc8], "Y = 14 * 8, X = 25 * 8");
+    assert_eq!([v[0], v[1]], [0x21, 0xd9], "the address is left as it was");
+    assert_eq!((r.a, r.x, r.y), (0x70, 0x11, 0x22), "a = Y, x and y untouched");
+}
+
+#[test]
+fn tile_to_pixel_takes_ten_bits_and_ignores_the_rest() {
+    // The top six bits of the high byte are not part of the tile, so $2xxx,
+    // $6xxx and $Exxx all give the same answer; the carry out is bit 1 of the
+    // low byte, from the second ror.
+    let watch = [0x0002u16, 0x0003];
+    for (hi, lo, y, x, c) in [
+        (0x20u8, 0x00u8, 0x00u8, 0x00u8, 0u8),
+        (0x23, 0xbf, 0xe8, 0xf8, 1),
+        (0xe3, 0xbf, 0xe8, 0xf8, 1),
+        (0x62, 0x41, 0x90, 0x08, 0),
+    ] {
+        let Some((r, v)) = both_watching(&tile_prog(hi, lo), 30, &watch) else {
+            return skipped();
+        };
+        assert_eq!([v[0], v[1]], [y, x], "${hi:02x}{lo:02x}");
+        assert_eq!(r.p & 0x01, c, "${hi:02x}{lo:02x}: carry");
+    }
+}
+
+#[test]
+fn tile_to_pixel_is_cycle_exact() {
+    let Some(disk) = a_disk() else { return skipped() };
+    let prog = tile_prog(0x21, 0xd9);
+    let ours = cycles_of_call_in(&disk, &[], 0xe997, &prog);
+    assert_eq!(ours, 49);
+    if let Some(real) = real_bios() {
+        assert_eq!(ours, cycles_of_call_in(&disk, &real, 0xe997, &prog));
+    }
+}

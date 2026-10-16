@@ -736,7 +736,49 @@ vram_struct:
 
 
 .org $E844
-  jmp unimplemented
+; --- $E844: fetch an inline pointer for the routine that called us ---------
+;
+; 2 of the 114 corpus titles call it and both were stopped on it: Knight Move
+; and Seiken Psycho Calibur. It serves the GAME's own subroutines, the ones
+; written to be called as `jsr G` followed by a two-byte pointer. G calls this,
+; and this reaches past its own return address to G's: it copies the two bytes
+; after G's jsr into $00/$01 and steps G's return address over them, so G's
+; rts lands after the pointer.
+;
+; Measured on both titles, 22 accesses a call and every one accounted for:
+;
+;   * G's return address is read from $0103,x and $0104,x after a tsx, which
+;     is SP+3 and SP+4 at entry: under our own return address, not ours.
+;   * it goes through $05/$06 as the pointer, and leaves it there.
+;   * the step is +2 with the carry rippled into the high byte, written back
+;     through sta abs,x, whose dummy read of the target is in the log too.
+;
+; Exit: a is G's new return high byte, x is the stack pointer as it was on
+; entry, y is 2, and the flags are those of the high byte's adc #0. 64 cycles,
+; matching the original on both callers. 38 bytes, which is exactly the gap to
+; $E86A.
+inline_ptr:
+  tsx
+  lda $0103,x               ; G's return address, low
+  sta $05
+  lda $0104,x               ; and high
+  sta $06
+  ldy #$01                  ; it points at the last byte of G's jsr
+  lda ($05),y
+  sta $00
+  iny
+  lda ($05),y
+  sta $01
+  lda $05
+  clc
+  adc #$02                  ; step G's return address over the pointer
+  sta $0103,x
+  lda $06
+  adc #$00
+  sta $0104,x
+  rts
+inline_ptr_end:
+.assert (inline_ptr_end - inline_ptr) == 38
 ; --- $E86A: flush the queued VRAM transfer buffer at $0302 -----------------
 ;
 ; 10 of the 114 corpus titles call it, 6305 calls between them, and 6 titles
@@ -1033,7 +1075,43 @@ queue_inline:
 .assert (vram_queue_end - vram_queue) == 169
 vram_queue_end:
 .org $E997
-  jmp unimplemented
+; --- $E997: a nametable address to pixel coordinates -----------------------
+;
+; 1 of the 114 corpus titles calls it, Knight Move, which was stopped on it
+; once $E844 let it through. $00/$01 is a nametable address, HIGH byte first,
+; and it comes back as the pixel position of that tile:
+;
+;   $03 = X = column * 8, the address's low five bits
+;   $02 = Y = row * 8, the next five bits
+;
+; Measured by setting one input bit at a time: $01 bits 0-4 land in $03 bits
+; 3-7, $01 bits 5-7 in $02 bits 3-5, $00 bits 0-1 in $02 bits 6-7, and nothing
+; else in a, x, y or $00 has any effect. Knight Move's own call, $21D9, gives
+; Y $70 and X $C8.
+;
+; Exit: a = Y, x and y untouched, N and Z from a, and carry is bit 1 of $01,
+; shifted out by the second ror. The original's access log is this sequence
+; exactly, including the two read-modify-writes of $02, and it is 49 cycles
+; and 26 bytes, the gap to $E9B1.
+tile_to_pixel:
+  lda $01
+  asl a
+  asl a
+  asl a
+  sta $03                   ; X: the column, times 8
+  lda $01
+  sta $02
+  lda $00
+  lsr a
+  ror $02
+  lsr a
+  ror $02                   ; the row's top two bits, shifted in from $00
+  lda $02
+  and #$F8                  ; Y: the row, times 8
+  sta $02
+  rts
+tile_to_pixel_end:
+.assert (tile_to_pixel_end - tile_to_pixel) == 26
 ; --- $E9B1: shift a multi-byte register right one bit, with feedback --------
 ;
 ; 10 of the 114 corpus titles call it, 7021 calls between them, and 7 titles

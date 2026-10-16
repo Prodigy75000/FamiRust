@@ -243,7 +243,7 @@ work as taking transfer interrupts in the loader.
 
 ### The routines
 
-Twenty-seven of the forty entry points are implemented. The other 13 are stubs that put
+Twenty-nine of the forty entry points are implemented. The other 11 are stubs that put
 **NO ROUTINE** on the screen and stop, which is worth its 111 bytes: Zelda hands
 over correctly, runs its own code, jumps to `$EA84` and would otherwise
 disappear into the fill, looking like a hundred different bugs instead of one
@@ -278,6 +278,8 @@ missing routine. `fdstrace` names the address.
 | `$E8E1` | 3 | append several blocks, the shape packed into the data | shares its whole tail with `$E8D2`; written with it because Druid needs both |
 | `$EC22` | 3 | draw a metasprite: a grid of OAM entries from a 12-byte block | exit state fitted over ~1100 forced blocks; 192 + 87 a sprite against 206 + 131 |
 | `$E9D3` | 3 | count zero-page timers down, the slow ones every tenth call | cycle-exact, including a walk that wraps the zero page |
+| `$E844` | 2 | fetch an inline pointer for the routine that called us | reaches past its own return address to its caller's. Cycle-exact, 64 |
+| `$E997` | 1 | a nametable address to pixel coordinates | cycle-exact, 49; found behind `$E844` on Knight Move |
 
 **Where the cycle counts do not match, ours is faster, never slower.** That is
 deliberate. A game that runs one of these inside vblank has more room than it
@@ -416,6 +418,24 @@ that shape came out cycle-exact over 400 forced calls without being tuned.
 **107 of the 114 now reach their own code.** 7 are still stopped by a missing
 routine, and nothing left blocks more than two.
 
+Then `$E844`, and `$E997` behind it. `$E844` is a helper for the GAME's own
+subroutines: one written to be called with a pointer after its `jsr` calls this,
+and it reaches past its own return address to its caller's, copies the pointer
+to `$00/$01` and steps that return address over it. Seiken Psycho Calibur went
+through; Knight Move went one routine further and stopped on `$E997`, which
+turns a nametable address into the pixel position of its tile. Both came out
+cycle-exact, and each fills exactly the gap to the next entry point: 38 bytes
+and 26.
+
+| entry | titles stuck on it now |
+|---|---|
+| `$E239` | **2** |
+| `$E32A` | **1** |
+| `$E305` | **1** |
+| `$E3E7` | **1** |
+
+**109 of the 114 now reach their own code.** 5 are still stopped.
+
 Ninety-nine is NOT "ninety-nine titles play correctly": thirty seconds of
 unattended running reaches what it reaches, and a game that needs a routine
 only when you open its menu has not asked yet.
@@ -451,7 +471,7 @@ the next person to find out.
 2. ~~Baseline smoke on the real BIOS, one ledger row per title.~~ The census
    rows and `fds-hle-check.py` are this.
 3. ~~HLE boot with our own graphics and no BIOS file present.~~ Done 2026-09-29.
-4. Routine by routine, each held against the real BIOS. Twenty-seven of forty
+4. Routine by routine, each held against the real BIOS. Twenty-nine of forty
    done. The queue by BLOCKING is now a tail of twos and ones. See
    [`FDS-ROUTINES-PENDING.md`](FDS-ROUTINES-PENDING.md), which records why
    Kaettekita Mario Bros. jams, what `$EC22` has to do with it, and why a flag
