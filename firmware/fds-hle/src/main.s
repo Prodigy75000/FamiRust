@@ -775,10 +775,11 @@ pf_err_v:
   bit lf_vflag              ; V, and C is kept
 pf_err:
   tax
-  lda LF_SHADOW
-  and #$09
+  lda LF_SHADOW             ; inline, not pf_ctrl: an error exit is where the
+  and #$09                  ; original is quickest, and bit 7 is clear here
   ora #$26
-  jsr pf_ctrl
+  sta LF_SHADOW
+  sta FDS_CTRL
   txa
   ldx LF_FRAME              ; back to the frame $E3E7 left
   txs
@@ -814,61 +815,7 @@ pf_count_end:
 .assert pf_count_end <= $E4A0
 
 .org $E4A0
-; $E4A0: header bytes 1 and 2, the ID against the list at ($02), then the
-; eight name bytes. A match leaves $09 = 0 and counts it in $0E HERE, not when
-; the body loads. A list's $FF ends it; a list STARTING with $FF means the
-; boot set, ID <= the boot code in $08. Out: a = 0, x = the ID, y = where the
-; list stopped, V and Z set, I clear, C from the compare.
-  jsr pf_rd                 ; the file number, not wanted
-  jsr pf_rd
-  tax                       ; the ID, to the end
-  lda #$08
-  sta $0101                 ; name bytes to go, as the original counts them
-  ldy #$00
-  lda (LF_P2),y
-  cmp #$FF
-  beq @boot
-@scan:
-  lda (LF_P2),y
-  cmp #$FF
-  beq @miss1
-  txa
-  cmp (LF_P2),y
-  beq @hit1
-  iny
-  jmp @scan                 ; no end but the $FF, as measured
-@boot:
-  cpx LF_BOOT               ; C = ID >= the boot code
-  beq @hit
-  bcc @hit
-  bcs @miss
-@hit1:
-  sec
-@hit:
-  lda #$00
-  sta LF_SKIP
-  inc LF_LOADED
-  jmp @name
-@miss1:
-  sec
-@miss:
-  lda #$FF
-  sta LF_SKIP
-@name:
-  php                       ; the carry, for the exit
-@byte:
-  jsr pf_rd
-  dec $0101
-  bne @byte
-  pla
-  and #$09                  ; D and C kept
-  ora #$42                  ; V and Z
-  pha
-  lda #$00
-  plp
-  rts
-pf_match_end:
-.assert pf_match_end <= $E4F9
+  jmp pf_e4a0               ; the body is at $E8E4
 .org $E4F9
   jmp pf_e4f9               ; the body is at $E23C
 .org $E68F
@@ -941,32 +888,47 @@ pf_rd:
 
 ; ---- the end of a header-type block. y is what its errors return; x is
 ; their carry, which pf_end1 sets ---------------------------------------------
+; Polled inline rather than through pf_rd: the original's error exits here are
+; its quickest paths, and a jsr chain per byte lost them. Each check is its
+; own status read AFTER the byte is taken, as the original's are; testing the
+; read that brought the byte instead put every check one byte early.
 pf_end1:
   ldx #$01
 pf_end:
-  jsr pf_rd                 ; CRC byte one
-  lda FDS_STATUS
+@one:
+  lda FDS_STATUS            ; CRC byte one
+  and #$42
+  beq @one
+  lda FDS_DATA
+  lda FDS_STATUS            ; end of head is checked here
   and #$40
-  beq @crc
-  lda #$28
-  bne @fail
-@crc:
+  bne @eoh
   lda LF_SHADOW
   ora #$10                  ; CRC mode
-  jsr pf_ctrl
-  jsr pf_rd                 ; and two
-  lda FDS_STATUS
+  sta LF_SHADOW
+  and #$7F
+  sta FDS_CTRL
+@two:
+  lda FDS_STATUS            ; and two
+  and #$42
+  beq @two
+  lda FDS_DATA
+  lda FDS_STATUS            ; CRC is checked here
   and #$10
   beq pf_off
   lda #$27
+  bne @fail
+@eoh:
+  lda #$28
 @fail:
   cpx #$01
   jmp pf_err_v
 ; disarm, then the drive: a = $4032 shifted right, C clear; no disk is $01
 pf_off:
   lda LF_SHADOW
-  and #$2F
-  jsr pf_ctrl
+  and #$2F                  ; bit 7 goes with it
+  sta LF_SHADOW
+  sta FDS_CTRL
   lda FDS_DRIVE
   lsr a
   bcs @gone
@@ -5242,6 +5204,76 @@ set_count:
   rts
 set_count_end:
 .assert set_count_end <= $E68F
+
+.org $E8E4
+; $E4A0: header bytes 1 and 2, the ID against the list at ($02), then the
+; eight name bytes. A match leaves $09 = 0 and counts it in $0E HERE, not when
+; the body loads. A list's $FF ends it; a list STARTING with $FF means the
+; boot set, ID <= the boot code in $08. Out: a = 0, x = the ID, y = where the
+; list stopped, V and Z set, I clear, C from the compare.
+pf_e4a0:
+  jsr pf_rd                 ; the file number, not wanted
+  jsr pf_rd
+  tax                       ; the ID, to the end
+  lda #$08
+  sta $0101                 ; name bytes to go, as the original counts them
+  ldy #$00
+  lda (LF_P2),y
+  cmp #$FF
+  beq @boot
+@scan:
+  lda (LF_P2),y
+  cmp #$FF
+  beq @miss1
+  txa
+  cmp (LF_P2),y
+  beq @hit1
+  iny
+  jmp @scan                 ; no end but the $FF, as measured
+@boot:
+  cpx LF_BOOT               ; C = ID >= the boot code
+  beq @hit
+  bcc @hit
+  bcs @miss
+@hit1:
+  sec
+@hit:
+  lda #$00
+  sta LF_SKIP
+  inc LF_LOADED
+  jmp @name
+@miss1:
+  sec
+@miss:
+  lda #$FF
+  sta LF_SKIP
+@name:
+  php                       ; the carry, for the exit
+@byte:
+  jsr pf_rd                 ; seven of the eight
+  dec $0101
+  lda $0101
+  cmp #$01
+  bne @byte
+  pla                       ; the exit flags are ready before the last byte
+  and #$09                  ; D and C kept
+  ora #$42                  ; V and Z
+  pha
+  dec $0101
+  lda #$02
+@last:
+  bit FDS_STATUS            ; a tight poll: the call ends on the drive's last
+  bvs @eoh                  ; byte, and the original's IRQ ends it within a
+  beq @last                 ; few cycles of that
+  lda FDS_DATA
+  lda #$00
+  plp
+  rts
+@eoh:
+  lda #$28
+  jmp pf_err_v
+pf_match_end:
+.assert pf_match_end <= $E997
 
 .org $FFFA
   .word nmi

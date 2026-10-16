@@ -522,6 +522,17 @@ The original leaves the drive armed with interrupts enabled between `$E4A0`
 and `$E4F9`, and on ours that would be a level IRQ our handler returns into
 forever.
 
+The helper then fuzzed our image against the same model, chained, on 1200
+cases and 7800 calls: nothing differs but three deliberate things (`$4025`
+bit 7, how often `$4030` is read, and an end of head mid-stream that the
+original waits on forever). Two rounds of that fuzz found what the repo tests
+could not reach: the block end first tested the status read that BROUGHT each
+CRC byte, one byte before the original's own check, and two exit tails were a
+few cycles slow. For a drive-bound call, cycles per call mislead: when one
+call returns sooner, the next starts earlier against the drive and waits
+longer for the same byte. Timed from the start of the chain, no call ends
+later than the original's.
+
 **No stubs are left: every entry point the census found is written, and 114
 of the 114 hand over identically.** Tobidase runs to its side B prompt and,
 turned over, to the same screen under both BIOSes.
