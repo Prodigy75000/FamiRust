@@ -3795,3 +3795,153 @@ fn the_spin_up_marks_bit_7_of_f9() {
         }
     }
 }
+
+// --- $E32A, a directory of the whole side -----------------------------------
+
+const DI_BUF: u16 = 0x0300;
+
+/// `jsr $E32A` with the buffer inline, after painting $00-$0F and the
+/// buffer's page so every byte compared is one the test planted.
+fn di_prog() -> Vec<u8> {
+    let mut p = Prog::default();
+    p.poke(0x2000, 0x00);
+    p.raw(&[0xa2, 0x0f, 0xa9, 0xcc, 0x95, 0x00, 0xca, 0x10, 0xfb]); // $00-$0F
+    p.raw(&[0xa2, 0x00, 0xa9, 0xa5, 0x9d, 0x00, 0x03, 0xe8, 0xd0, 0xfa]); // $0300-$03FF
+    p.poke(0x000e, 0x3c);
+    p.raw(&[0x78]); // sei, so the cli on the way out shows
+    p.jsr(0xe32a);
+    p.raw(&DI_BUF.to_le_bytes());
+    p.record_and_halt();
+    p.0
+}
+
+/// What a directory of side 0 should hold, worked out from the .fds file
+/// itself rather than from either BIOS: info bytes, count, ID and name per
+/// file, and the total of size + 261, high byte first.
+fn di_expected(disk: &[u8]) -> Vec<u8> {
+    let side = if disk.starts_with(b"FDS\x1a") { &disk[16..] } else { disk };
+    let mut out = side[15..25].to_vec(); // block 1 bytes $0F-$18, the type byte being 0
+    let mut at = 56;
+    assert_eq!(side[at], 0x02, "block 2 follows block 1");
+    let n = side[at + 1];
+    out.push(n);
+    at += 2;
+    let mut total: u16 = 0;
+    for _ in 0..n {
+        assert_eq!(side[at], 0x03, "a header");
+        out.extend_from_slice(&side[at + 2..at + 11]);
+        let size = u16::from_le_bytes([side[at + 13], side[at + 14]]);
+        total = total.wrapping_add(size).wrapping_add(261);
+        at += 16 + 1 + size as usize;
+    }
+    out.extend_from_slice(&total.to_be_bytes());
+    out
+}
+
+fn di_both(eject: bool) -> Option<(Outcome, Vec<u8>, Vec<u8>)> {
+    let disk = a_disk()?;
+    let prog = di_prog();
+    let go = |bios: &[u8]| {
+        let mut nes = boot_to_handover(&disk, bios);
+        if eject {
+            nes.fds_eject();
+        }
+        nes.dbg_poke(0x00f9, 0x11);
+        nes.dbg_poke(0x00fa, 0x0d); // each BIOS boots to its own; $2F expected
+        for (i, b) in prog.iter().enumerate() {
+            nes.dbg_poke(PROG + i as u16, *b);
+        }
+        nes.dbg_poke(OUT_SENTINEL, 0);
+        nes.dbg_set_pc(PROG);
+        let stop = nes.dbg_frame() + 1500; // a whole side under the original
+        while nes.dbg_frame() < stop && !nes.dbg_halted() && nes.peek(OUT_SENTINEL) != DONE {
+            nes.step();
+        }
+        let out = Outcome {
+            reached: nes.peek(OUT_SENTINEL) == DONE,
+            a: nes.peek(OUT),
+            x: nes.peek(OUT + 1),
+            y: nes.peek(OUT + 2),
+            p: nes.peek(OUT + 3),
+        };
+        let mut zp: Vec<u8> = (0x00..=0x0fu16).map(|a| nes.peek(a)).collect();
+        zp.extend([nes.peek(0x00f9), nes.peek(0x00fa), nes.peek(0x0101)]);
+        let buf: Vec<u8> = (0..0x100u16).map(|i| nes.peek(DI_BUF + i)).collect();
+        (out, zp, buf)
+    };
+    let ours = go(&[]);
+    if let Some(real) = real_bios() {
+        let theirs = go(&real);
+        assert!(theirs.0.reached, "the real BIOS never finished the test program");
+        assert_eq!(ours.0, theirs.0, "registers: ours (left) against the real BIOS (right)");
+        assert_eq!(ours.1, theirs.1, "$00-$0F, $F9, $FA, $0101: ours (left), real (right)");
+        assert_eq!(ours.2, theirs.2, "the buffer: ours (left) against the real BIOS (right)");
+    } else {
+        eprintln!("note: no dumps/fds/disksys.rom, so this is not held against the oracle");
+    }
+    Some(ours)
+}
+
+#[test]
+fn disk_info_at_e32a_writes_a_directory_of_the_side_and_matches_the_real_bios() {
+    let Some(disk) = a_disk() else { return skipped() };
+    let Some((r, zp, buf)) = di_both(false) else { return skipped() };
+    assert!(r.reached, "it never returned past its inline word");
+    let want = di_expected(&disk);
+    assert_eq!(buf[..want.len()], want[..], "the directory, against the .fds file");
+    assert!(buf[want.len()..].iter().all(|&b| b == 0xa5), "and nothing past it");
+    assert_eq!((r.a, r.x, r.y), (0x00, 0x00, 0x02));
+    assert_eq!(r.p & 0xc7, 0x42, "V and Z set, N, C and I clear");
+    let n = want[10] as u16;
+    let last = DI_BUF + 10 + 9 * n;
+    assert_eq!([zp[0x00], zp[0x01]], DI_BUF.to_le_bytes(), "$00/$01 = the buffer");
+    let total = u16::from_be_bytes([want[want.len() - 2], want[want.len() - 1]]);
+    assert_eq!([zp[0x02], zp[0x03]], total.to_le_bytes(), "$02/$03 = the total");
+    assert_eq!([zp[0x05], zp[0x06]], [0x02, 0x00], "no retry, no files left");
+    assert_eq!([zp[0x0a], zp[0x0b]], last.to_le_bytes(), "$0A/$0B on the last entry byte");
+    assert_eq!([zp[0x0c], zp[0x0d], zp[0x0e]], [0xff, 0xff, 0x3c]);
+    assert_eq!([zp[0x10], zp[0x11]], [0x91, 0x2f], "$F9 marked, $FA coasting, mirroring kept");
+}
+
+#[test]
+fn disk_info_with_no_disk_touches_nothing_but_its_frame() {
+    let Some((r, zp, buf)) = di_both(true) else { return skipped() };
+    assert!(r.reached, "the error did not land past the inline word");
+    assert_eq!((r.a, r.x, r.y), (0x01, 0x01, 0x3c), "y comes from $0E");
+    assert_eq!(r.p & 0x05, 0x01, "C set, I clear");
+    assert_eq!(zp[0x02], 0x00, "$02 is cleared at entry");
+    assert_eq!(&zp[0x07..0x0e], &[0xcc; 7], "and $07-$0D are not touched");
+    assert_eq!([zp[0x10], zp[0x11]], [0x11, 0x0d], "nor $F9 or $FA: the motor never moved");
+    assert!(buf.iter().all(|&b| b == 0xa5), "nor the buffer");
+}
+
+#[test]
+fn disk_info_is_no_slower_than_the_original() {
+    // A whole side is millions of cycles under the original, far past what
+    // cycles_of_call_in waits for, so this counts on its own deadline.
+    let Some(disk) = a_disk() else { return skipped() };
+    let Some(real) = real_bios() else { return skipped() };
+    let prog = di_prog();
+    let count = |bios: &[u8]| {
+        let mut nes = boot_to_handover(&disk, bios);
+        for (i, b) in prog.iter().enumerate() {
+            nes.dbg_poke(PROG + i as u16, *b);
+        }
+        nes.dbg_set_pc(PROG);
+        while nes.dbg_pc() != 0xe32a {
+            nes.step();
+        }
+        let sp_in = nes.cpu.sp;
+        let start = nes.dbg_cycles();
+        loop {
+            nes.step();
+            if nes.dbg_pc() < BIOS_BASE && nes.cpu.sp >= sp_in {
+                break;
+            }
+            assert!(nes.dbg_cycles() - start < 1500 * 29_781, "it never returned");
+        }
+        nes.dbg_cycles() - start
+    };
+    let (ours, theirs) = (count(&[]), count(&real));
+    assert!(ours <= theirs, "ours {ours} against the original's {theirs}");
+}

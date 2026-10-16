@@ -544,7 +544,7 @@ vint_wait:
 .org $E305
   jmp unimplemented
 .org $E32A
-  jmp unimplemented
+  jmp disk_info             ; the body is at $E000, its blocks at $EF07
 .org $E3E7
 ; --- $E3E7: fetch the inline arguments of the routine that called us, and ---
 ; --- check a disk is in --------------------------------------------------------
@@ -4175,6 +4175,395 @@ wf_checks_end:
 ; ===========================================================================
 ; Vectors
 ; ===========================================================================
+.org $E000
+; ===========================================================================
+; $E32A: read the whole side and write a directory of it into RAM
+; ===========================================================================
+;
+; 1 of the 114 corpus titles calls it and was stopped on it: Akumajou Dracula,
+; once, from $720F, and its next instruction checks the side holds ten files.
+; Measured by a helper with fault injection on the drive; never writes the disk.
+;
+; Called as `jsr $E32A` with one inline word, the buffer. It spins the side up
+; and reads every block, every body byte included, and leaves at the buffer:
+;
+;   +0..+9      disk-info bytes $0F-$18 of block 1
+;   +10         the file count from block 2
+;   +11+9k      file k: its ID (header byte 2), then its 8-byte name
+;   +11+9n      the total, HIGH byte first: the sum of size + 261 over files
+;
+; The total also goes to $02/$03, little-endian. $0A/$0B walks the buffer one
+; byte behind where the next entry goes, so it ends on the last entry byte.
+;
+; Exits, a = x = the code on every one, D always as it came in, I cleared:
+;
+;   success           a=0, y=2, V and Z set, C clear
+;   no disk at entry  a=1, y=[$0E], C set, V as it came; $F9/$FA untouched
+;   flat battery      a=2, y=0, C set
+;   disk pulled       a=1, y=0, C set, during the spin-up or between blocks
+;   block 1 type      a=$22, y=$22, C from the compare against $01
+;   magic byte i      a=$21, y=14-i, C from the compare
+;   block 2/3/4 type  a=$23/$24/$25, y the same, C from the compare
+;   end of head, CRC  a=$28/$27; y=0 C=0 at block 1, $23 C=1 at block 2,
+;                     $09 C=1 at a header. A body's status is never checked.
+;
+; V is set once any attempt gets past the spin-up, and passes through until
+; then. Any failure after the motor starts is retried once from the spin-up;
+; $05 ends as 2 less the failed attempts. Every exit but the first sets bit 7
+; of $F9 and leaves $FA = ($FA & 8) | $27. $08, $0E and $0101 are never
+; written: we poll, so the byte IRQ the original arms through $0101 is not
+; needed.
+;
+; Fuzzed by the helper against its model of the original, with faults keyed
+; to the status read each block makes: 2100 disks, every path identical but
+; one, and every case faster. The one is an end of head DURING a body, which
+; the original never reads for and ours, polling, does. On our drive that
+; only happens when the head truly runs off the side, a count larger than the
+; files present, where the original waits forever and ours returns $28.
+DI_PTR    = $00           ; 2: the buffer, from the inline word
+DI_TOTAL  = $02           ; 2: the running total, low byte first
+DI_FRAME  = $04           ; entry stack pointer minus 3
+DI_TRIES  = $05           ; 2 less the failed attempts
+DI_LEFT   = $06           ; files left; $05/$06 hold the return address first
+DI_BLK    = $07           ; the block in hand
+DI_HDR    = $09           ; $FF once a header's type has passed
+DI_DST    = $0A           ; 2: one byte behind the next entry
+DI_CNT    = $0C           ; 2: body bytes left, less one; ends $FFFF
+
+disk_info:
+  php                       ; V and D, for the exits that pass them through
+  tsx
+  lda $0102,x               ; our return address, under the P
+  sta DI_TRIES
+  clc
+  adc #$02                  ; stepped over the inline word in place
+  sta $0102,x
+  lda $0103,x
+  sta DI_LEFT
+  adc #$00
+  sta $0103,x
+  dex
+  dex
+  stx DI_FRAME              ; S at entry minus 3
+  ldy #$01
+  lda (DI_TRIES),y
+  sta DI_PTR
+  iny
+  lda (DI_TRIES),y
+  sta DI_PTR+1
+  lda #$00
+  sta DI_TOTAL
+  lda FDS_DRIVE
+  lsr a
+  bcc @disk
+  lda #$01
+  tax
+  ldy $0E
+  jmp di_flags
+@disk:
+  lda #$02
+  sta DI_TRIES
+
+@attempt:
+  jsr di_spin
+  bcs @failed
+  pla                       ; past the spin-up: V from here on
+  ora #$40
+  pha
+  jsr di_info
+  bcs @failed
+  jsr di_count
+  bcs @failed
+@file:
+  lda DI_LEFT
+  beq @done
+  jsr di_header
+  bcs @failed
+  jsr di_body
+  bcs @failed
+  dec DI_LEFT
+  jmp @file
+@failed:
+  dec DI_TRIES
+  bne @attempt
+  jmp di_exit
+@done:
+  ldy #$01
+  lda DI_TOTAL+1
+  sta (DI_DST),y
+  iny
+  lda DI_TOTAL
+  sta (DI_DST),y
+  lda #$00                  ; y is 2
+  tax
+  ; fall through
+
+; In: a = the code, y as returned, x = the carry to return.
+di_exit:
+  pha
+  lda LF_SHADOW
+  and #$08
+  ora #$27
+  sta LF_SHADOW
+  sta FDS_CTRL
+  pla
+di_flags:
+  plp                       ; the caller's P, with V if a spin-up passed
+  cli
+  cpx #$01                  ; C as the exit wants it
+  tax                       ; x = a, and N and Z from the code
+  rts
+
+; ---- the motor, the battery, the drive. Carry set: a = code, y, x --------
+di_spin:
+  jsr lf_base
+  ora #$02
+  sta FDS_CTRL
+  lda $F9                   ; as lf_spin: marked, and sent to $4026
+  ora #$80
+  sta $F9
+  sta FDS_EXT
+  lda FDS_BATT
+  bpl @flat
+  jsr lf_base
+  ora #$01
+  sta FDS_CTRL
+@wait:
+  lda FDS_DRIVE
+  lsr a
+  bcs di_gone
+  lsr a
+  bcs @wait
+  rts                       ; carry clear from the lsr
+@flat:
+  lda #$02
+  bne di_io
+di_gone:
+  lda #$01
+di_io:
+  ldy #$00
+  ldx #$01
+  sec
+  rts
+
+; ---- the block-level helpers, all called straight from a block routine ----
+;
+; A fault leaves the BLOCK routine, not just the helper, so each block reads
+; as a straight line. The y and carry a fault returns depend only on the
+; block in hand: 0 and clear at block 1, $23 and set at block 2, $09 and set
+; at a header. A body is never checked by the original; ours only faults
+; there if the head runs off the side, and gives a header's answer.
+
+; Open block a: its type byte, or leave with $21 + a, y the same, and the
+; compare's carry.
+di_open:
+  sta DI_BLK
+  jsr lf_next
+  jsr read_byte
+  bcs di_rd_eoh
+  cmp DI_BLK
+  bne @bad
+  rts
+@bad:
+  pla                       ; leave the block routine; pla keeps the carry
+  pla
+  ldx #$00
+  bcc @lt
+  inx
+@lt:
+  lda DI_BLK
+  clc
+  adc #$21
+  tay
+  sec
+  rts
+
+; One byte, or leave the block routine with an end of head.
+di_rd:
+  jsr read_byte
+  bcs di_rd_eoh
+  rts
+di_rd_eoh:
+  pla
+  pla
+di_eoh:
+  lda #$28
+di_fault:
+  ldx DI_BLK
+  ldy di_fault_y-1,x
+  cpx #$02                  ; C set from block 2 on
+  ldx #$00
+  bcc @lt
+  inx
+@lt:
+  sec
+  rts
+di_fault_y:
+  .byte $00, $23, $09, $09
+
+; A header-type block's end: end of head, then its CRC, then the drive.
+di_end:
+  lda FDS_STATUS
+  and #$40
+  bne di_eoh
+  jsr lf_base
+  ora #$51                  ; CRC mode
+  sta FDS_CTRL
+  jsr read_byte
+  bcs di_eoh
+  lda FDS_STATUS
+  and #$10
+  beq di_off
+  lda #$27
+  bne di_fault
+di_off:
+  jsr lf_base
+  ora #$01                  ; transfer off, motor on
+  sta FDS_CTRL
+  lda FDS_DRIVE
+  lsr a                     ; carry clear: still in
+  bcs di_gone
+  rts
+
+di_helpers_end:
+.assert di_helpers_end <= $E149
+
+; The four block routines, in the free run at $EF07.
+.org $EF07
+; ---- block 1: the magic, then the ten info bytes into the buffer ----------
+di_info:
+  lda #$01
+  jsr di_open
+  ldy #$01
+@magic:
+  jsr di_rd
+  cmp lf_magic-1,y
+  bne @bad
+  iny
+  cpy #15
+  bne @magic
+  lda #$00
+  sta DI_TOTAL
+  sta DI_TOTAL+1
+  tay
+@copy:
+  jsr di_rd
+  sta (DI_PTR),y
+  iny
+  cpy #10
+  bne @copy
+  lda DI_PTR
+  clc
+  adc #10
+  sta DI_DST
+  lda DI_PTR+1
+  adc #0
+  sta DI_DST+1
+  ldy #31                   ; the rest of block 1's 56 bytes
+@rest:
+  jsr di_rd
+  dey
+  bne @rest
+  jmp di_end
+@bad:
+  ldx #$00                  ; the compare's carry
+  bcc @lt
+  inx
+@lt:
+  tya                       ; y = 14 - i
+  eor #$FF
+  sec
+  adc #14
+  tay
+  lda #$21
+  sec
+  rts
+
+; ---- block 2: the count, into $06 and, once it has checked, the buffer ----
+di_count:
+  lda #$02
+  jsr di_open
+  jsr di_rd
+  sta DI_LEFT
+  jsr di_end
+  bcs @out
+  ldy #$00
+  lda DI_LEFT
+  sta (DI_DST),y
+  clc
+@out:
+  rts
+
+; ---- block 3: an entry for the buffer, and the size for the total ---------
+di_header:
+  lda #$03
+  jsr di_open
+  lda #$FF
+  sta DI_HDR
+  jsr di_rd                 ; the file number, not wanted
+  ldy #$01
+@entry:
+  jsr di_rd                 ; the ID, then the eight bytes of name
+  sta (DI_DST),y
+  iny
+  cpy #10
+  bne @entry
+  jsr di_rd                 ; the load address, not wanted
+  jsr di_rd
+  jsr di_rd
+  sta DI_CNT
+  jsr di_rd
+  sta DI_CNT+1
+  jsr di_rd                 ; the kind, not wanted
+  lda DI_DST                ; the entry is in: step past it
+  clc
+  adc #9
+  sta DI_DST
+  bcc @nc
+  inc DI_DST+1
+@nc:
+  lda DI_TOTAL              ; total += size + 261
+  clc
+  adc DI_CNT
+  tax
+  lda DI_TOTAL+1
+  adc DI_CNT+1
+  tay
+  txa
+  clc
+  adc #$05
+  sta DI_TOTAL
+  tya
+  adc #$01
+  sta DI_TOTAL+1
+  lda DI_CNT                ; and count the body down from size - 1
+  bne @lo
+  dec DI_CNT+1
+@lo:
+  dec DI_CNT
+  jmp di_end
+
+; ---- block 4: every byte streamed and dropped, CRC included ---------------
+di_body:
+  lda #$04
+  jsr di_open
+@loop:
+  jsr di_rd
+  lda DI_CNT
+  bne @lo
+  dec DI_CNT+1
+@lo:
+  dec DI_CNT
+  lda DI_CNT
+  and DI_CNT+1
+  cmp #$FF
+  bne @loop
+  jsr di_rd                 ; the CRC, as data
+  jsr di_rd
+  jmp di_off
+disk_info_end:
+.assert disk_info_end <= $F000
+
 .org $FFFA
   .word nmi
   .word reset
