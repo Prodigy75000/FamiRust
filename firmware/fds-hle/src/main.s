@@ -542,7 +542,7 @@ vint_wait:
 .org $E239
   jmp write_file            ; the body is at $F6E0
 .org $E305
-  jmp unimplemented
+  jmp set_count             ; the body is at $E4FC
 .org $E32A
   jmp disk_info             ; the body is at $E000, its blocks at $EF07
 .org $E3E7
@@ -4563,6 +4563,221 @@ di_body:
   jmp di_off
 disk_info_end:
 .assert disk_info_end <= $F000
+
+;
+; ===========================================================================
+; $E305: set the side's file count, by rewriting block 2
+; ===========================================================================
+;
+; The title stopped on it is Ginga Denshou - Galaxy Odyssey, whose save drops
+; the count from $0D to $0C and then appends the new save file through $E237.
+; Tobidase Daisakusen calls it too. Measured by a helper and fuzzed against
+; the original, 1700 cases for the model and 1300 for this code, with eject,
+; write protect, battery, bad type and magic bytes and ID mismatches forced.
+;
+; `jsr $E305` with the disk-ID template after it, and a is the count. With a
+; $FF there is a second word, copied to $02/$03, and ITS low byte is the
+; count. One pass: block 1 is read and its ID matched as the loader does,
+; then block 2 is written as $80 $02 count with its CRC where it was. No
+; verify, and the old count is never read.
+;
+;   success           a=x=0, y=0, V and Z set; $05=2, $06=count, $07=2,
+;                     $08 = the boot read file code
+;   no disk, protect  a=x=1 or 3, y=[$0E], before the motor; V as it came
+;   flat battery      a=x=2, y=0, C set, V clear
+;   type, magic, ID   the loader's codes; y is the byte that failed and $08
+;                     holds an ID code in binary
+;
+; Every failure after the motor moves is retried once, the battery included,
+; which the loader and the writer do not do. Every exit after the motor sets
+; bit 7 of $F9 and leaves $FA = ($FA & 8) | $27. The pre-motor exits are the
+; only tight budgets, 128 and 139 cycles in the original; these take 125 and
+; 129. The rest is the original's counted delays gone.
+.org $E4FC
+set_count:
+  sta $02                   ; the count, or $FF for "the count is inline"
+  tsx
+  dex
+  dex
+  dex
+  stx $04                   ; frame anchor, as $E1F8 and $E239
+  pla
+  sta $05
+  pla
+  sta $06                   ; $05/$06: the stacked return address
+  ldy #1
+  lda ($05),y
+  sta $00
+  iny
+  lda ($05),y
+  sta $01                   ; word 1: the disk-ID template
+  ldx #2
+  lda $02
+  cmp #$FF
+  bne @one
+  iny
+  lda ($05),y
+  sta $02                   ; word 2, low byte: the count
+  iny
+  lda ($05),y
+  sta $03
+  ldx #4
+@one:                       ; step the return address over x bytes; adc
+  php                       ; would lose the caller's V, which an early exit
+  txa                       ; hands back
+  clc
+  adc $05
+  tax
+  lda $06
+  adc #0
+  plp
+  pha
+  txa
+  pha
+  lda #0
+  sta $07
+  lda FDS_DRIVE
+  lsr a
+  bcc @disk
+  lda #$01
+  bne @early
+@disk:
+  lsr a
+  lsr a
+  bcc @go
+  lda #$03
+@early:
+  tax
+  ldy $0E                   ; measured: y is $0E as found
+  cli
+  clc
+  txa
+  rts
+@go:
+  lda $0101
+  pha
+  lda $09
+  pha
+  lda $02
+  sta $06
+  lda #0
+  sta $05                   ; the retry flag; every late exit leaves $00
+@attempt:
+  jsr lf_base
+  ora #$02
+  sta FDS_CTRL
+  lda $F9
+  ora #$80
+  sta $F9
+  sta FDS_EXT
+  lda FDS_BATT
+  bmi @batt_ok
+  ldx $05
+  bne @flat
+  inc $05
+  bne @attempt
+@flat:
+  lda #$02
+  ldy #$00
+  sty $05
+  clv
+  sec
+  jmp @tail
+@batt_ok:
+  jsr lf_base
+  ora #$01
+  sta FDS_CTRL
+@ready:
+  lda FDS_DRIVE
+  and #$03
+  bne @ready
+  lda #$01
+  sta $07
+  jsr lf_next
+  jsr read_byte
+  cmp #$01
+  beq @type_ok
+  lda #$22                  ; C is the compare against $01
+  ldy #$22
+  jmp @fail
+@type_ok:
+  ldx #0
+  ldy #13
+@magic:
+  jsr read_byte
+  cmp lf_magic,x
+  bne @magic_bad
+  inx
+  dey
+  bpl @magic
+  ldy #0
+@id:
+  jsr read_byte
+  sta $09
+  lda ($00),y
+  cmp #$FF
+  beq @wild
+  cmp $09
+  bne @id_bad
+@wild:
+  iny
+  cpy #10
+  bne @id
+  jsr read_byte
+  sta $08                   ; disk-info byte $19, the boot read file code
+  ldy #30
+@rest:
+  jsr read_byte
+  dey
+  bne @rest
+  jsr wf_crc
+  lda $06
+  jsr wf_put_count_a        ; $07 ends $02 from wf_open
+  lda #$02
+  sta $05
+  lda #$00
+  tay
+  clc
+  jmp @late
+@magic_bad:
+  lda #$21                  ; C is the compare of the disk byte
+  jmp @fail
+@id_bad:
+  lda lf_iderr,y
+  sta $08
+  cmp #$10
+  bne @bin
+  lda #$0A
+  sta $08
+  lda #$10
+@bin:
+  clc
+@fail:
+  ldx $05
+  bne @give_up
+  inc $05
+  jmp @attempt
+@give_up:
+  ldx #0
+  stx $05
+@late:
+  bit lf_vflag              ; V set; C is whatever the exit decided
+@tail:                      ; nothing below touches C or V
+  tax
+  pla
+  sta $09
+  pla
+  sta $0101
+  lda LF_SHADOW
+  and #$08
+  ora #$27
+  sta LF_SHADOW
+  sta FDS_CTRL
+  cli
+  txa
+  rts
+set_count_end:
+.assert set_count_end <= $E68F
 
 .org $FFFA
   .word nmi

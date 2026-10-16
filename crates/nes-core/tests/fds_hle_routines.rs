@@ -3945,3 +3945,145 @@ fn disk_info_is_no_slower_than_the_original() {
     let (ours, theirs) = (count(&[]), count(&real));
     assert!(ours <= theirs, "ours {ours} against the original's {theirs}");
 }
+
+// --- $E305, setting the side's file count -----------------------------------
+
+/// `jsr $E305` with the any-disk template (or one byte of it spoiled) and a
+/// as given; when a is $FF the second word, `word2`, follows.
+fn sc_prog(a: u8, word2: u16, bad_at: Option<u8>) -> Vec<u8> {
+    let mut p = Prog::default();
+    p.poke(0x2000, 0x00);
+    p.raw(&[0xa2, 0x0f, 0xa9, 0xcc, 0x95, 0x00, 0xca, 0x10, 0xfb]); // $00-$0F
+    p.raw(&[0xa9, 0xff, 0xa2, 0x09, 0x9d, 0x00, 0x05, 0xca, 0x10, 0xfa]); // template
+    if let Some(i) = bad_at {
+        p.poke(WF_TEMPLATE + i as u16, 0x77);
+    }
+    p.poke(0x000e, 0x3c);
+    p.lda(a);
+    p.raw(&[0x78]); // sei, so the cli on the way out shows
+    p.jsr(0xe305);
+    p.raw(&WF_TEMPLATE.to_le_bytes());
+    if a == 0xff {
+        p.raw(&word2.to_le_bytes());
+    }
+    p.record_and_halt();
+    p.0
+}
+
+/// Registers, $00-$0F with $F9 and $FA after them, and side 0 whole, under
+/// ours and the real BIOS, which have to agree on all of it.
+fn sc_both(prog: &[u8], eject: bool) -> Option<(Outcome, Vec<u8>, Vec<u8>)> {
+    let disk = a_disk()?;
+    let go = |bios: &[u8]| {
+        let mut nes = boot_to_handover(&disk, bios);
+        if eject {
+            nes.fds_eject();
+        }
+        nes.dbg_poke(0x00f9, 0x11);
+        nes.dbg_poke(0x00fa, 0x0d); // each BIOS boots to its own
+        for (i, b) in prog.iter().enumerate() {
+            nes.dbg_poke(PROG + i as u16, *b);
+        }
+        nes.dbg_poke(OUT_SENTINEL, 0);
+        nes.dbg_set_pc(PROG);
+        let stop = nes.dbg_frame() + 600; // about 60 frames a try under the original
+        while nes.dbg_frame() < stop && !nes.dbg_halted() && nes.peek(OUT_SENTINEL) != DONE {
+            nes.step();
+        }
+        let out = Outcome {
+            reached: nes.peek(OUT_SENTINEL) == DONE,
+            a: nes.peek(OUT),
+            x: nes.peek(OUT + 1),
+            y: nes.peek(OUT + 2),
+            p: nes.peek(OUT + 3),
+        };
+        let mut zp: Vec<u8> = (0x00..=0x0fu16).map(|a| nes.peek(a)).collect();
+        zp.extend([nes.peek(0x00f9), nes.peek(0x00fa)]);
+        (out, zp, nes.dbg_fds_image(0).to_vec())
+    };
+    let ours = go(&[]);
+    if let Some(real) = real_bios() {
+        let theirs = go(&real);
+        assert!(theirs.0.reached, "the real BIOS never finished the test program");
+        assert_eq!(ours.0, theirs.0, "registers: ours (left) against the real BIOS (right)");
+        assert_eq!(ours.1, theirs.1, "$00-$0F, $F9, $FA: ours (left), real (right)");
+        let first = ours.2.iter().zip(&theirs.2).position(|(a, b)| a != b);
+        assert_eq!(first, None, "the disk images part company at this byte");
+        assert_eq!(ours.2.len(), theirs.2.len());
+    } else {
+        eprintln!("note: no dumps/fds/disksys.rom, so this is not held against the oracle");
+    }
+    Some(ours)
+}
+
+/// Side 0's file count and boot read file code, from the .fds file.
+fn sc_side(disk: &[u8]) -> (u8, u8) {
+    let side = if disk.starts_with(b"FDS\x1a") { &disk[16..] } else { disk };
+    (side[57], side[25])
+}
+
+/// The count block 2 holds on a drive image: the byte after its $80 $02.
+fn sc_count_on(image: &[u8]) -> u8 {
+    image[image.windows(2).position(|w| w == [0x80, 0x02]).expect("block 2") + 2]
+}
+
+#[test]
+fn set_count_at_e305_rewrites_block_2_and_matches_the_real_bios() {
+    let Some(disk) = a_disk() else { return skipped() };
+    let (n, boot) = sc_side(&disk);
+    let Some((r, zp, image)) = sc_both(&sc_prog(n - 1, 0, None), false) else {
+        return skipped();
+    };
+    assert!(r.reached, "it never returned past its template word");
+    assert_eq!(sc_count_on(&image), n - 1, "block 2 says one file fewer");
+    let before = nes_core::Nes::from_fds_hle(&disk).unwrap().dbg_fds_image(0).to_vec();
+    let changed = image.iter().zip(&before).filter(|(a, b)| a != b).count();
+    assert_eq!(changed, 1, "and that byte is the only one the medium changed in");
+    assert_eq!((r.a, r.x, r.y), (0x00, 0x00, 0x00));
+    assert_eq!(r.p & 0xc7, 0x42, "V and Z set, N, C and I clear");
+    assert_eq!(&zp[0..3], &[0x00, 0x05, n - 1], "$00/$01 the template, $02 the count");
+    assert_eq!(&zp[5..9], &[0x02, n - 1, 0x02, boot], "$05-$08");
+    assert_eq!([zp[0x10], zp[0x11]], [0x91, 0x2f], "$F9 marked, $FA coasting");
+}
+
+#[test]
+fn set_count_takes_its_count_from_a_second_word_when_a_is_ff() {
+    // A count of 2, because $02 is the JAM opcode: a return two bytes early,
+    // over the first word only, lands on it and halts.
+    let Some(disk) = a_disk() else { return skipped() };
+    assert!(sc_side(&disk).0 > 2, "this needs a side with more than two files");
+    let Some((r, zp, image)) = sc_both(&sc_prog(0xff, 0x5a02, None), false) else {
+        return skipped();
+    };
+    assert!(r.reached, "it did not step over both words");
+    assert_eq!(r.a, 0x00);
+    assert_eq!(sc_count_on(&image), 0x02, "the low byte of word 2 is the count");
+    assert_eq!([zp[2], zp[3]], [0x02, 0x5a], "and word 2 is left in $02/$03");
+}
+
+#[test]
+fn set_count_with_the_wrong_disk_writes_nothing() {
+    // The loader's codes, by template byte; $08 holds the code in binary,
+    // which only differs at byte 9.
+    let Some(disk) = a_disk() else { return skipped() };
+    let before = nes_core::Nes::from_fds_hle(&disk).unwrap().dbg_fds_image(0).to_vec();
+    for (at, code, binary) in [(0u8, 0x04u8, 0x04u8), (9, 0x10, 0x0a)] {
+        let Some((r, zp, image)) = sc_both(&sc_prog(0x01, 0, Some(at)), false) else {
+            return skipped();
+        };
+        assert_eq!((r.a, r.x, r.y), (code, code, at), "template byte {at}");
+        assert_eq!(r.p & 0x41, 0x40, "V set, C clear");
+        assert_eq!([zp[0x05], zp[0x08]], [0x00, binary], "template byte {at}");
+        assert!(image == before, "and not a byte of the disk changed");
+    }
+}
+
+#[test]
+fn set_count_with_no_disk_returns_before_the_motor() {
+    let Some((r, zp, _)) = sc_both(&sc_prog(0x01, 0, None), true) else { return skipped() };
+    assert!(r.reached);
+    assert_eq!((r.a, r.x, r.y), (0x01, 0x01, 0x3c), "y comes from $0E");
+    assert_eq!(r.p & 0x05, 0x00, "C and I clear");
+    assert_eq!(zp[0x07], 0x00, "$07 cleared");
+    assert_eq!([zp[0x10], zp[0x11]], [0x11, 0x0d], "$F9 and $FA as found");
+}

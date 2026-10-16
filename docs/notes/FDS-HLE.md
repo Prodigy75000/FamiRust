@@ -243,7 +243,7 @@ work as taking transfer interrupts in the loader.
 
 ### The routines
 
-Thirty-one of the forty entry points are implemented. The other 9 are stubs that put
+Thirty-four of the forty entry points are implemented. The other 6 are stubs that put
 **NO ROUTINE** on the screen and stop, which is worth its 111 bytes: Zelda hands
 over correctly, runs its own code, jumps to `$EA84` and would otherwise
 disappear into the fill, looking like a hundred different bugs instead of one
@@ -282,6 +282,9 @@ missing routine. `fdstrace` names the address.
 | `$E997` | 1 | a nametable address to pixel coordinates | cycle-exact, 49; found behind `$E844` on Knight Move |
 | `$E239` | 2 | write a file at an index, then verify it | disk image byte-identical to the original's; about 4M cycles faster |
 | `$E237` | 1 | the same, appending: `lda #$FF` into `$E239` | 2 bytes; the stub here used to be `lda #0` and was wrong |
+| `$E3E7` | 1 | fetch the caller's inline arguments, two or four bytes, and check a disk is in | cycle-exact, 107 + 21 for four; no disk unwinds past the caller |
+| `$E32A` | 1 | read the whole side and write a directory of it into RAM | never writes the disk; millions of cycles faster |
+| `$E305` | 1 | set the side's file count by rewriting block 2 | disk image byte-identical; 40K cycles against 1.73M |
 
 **Where the cycle counts do not match, ours is faster, never slower.** That is
 deliberate. A game that runs one of these inside vblank has more room than it
@@ -465,6 +468,35 @@ start of the last file it loaded, where the original leaves it one past the end.
 | `$E3E7` | **1** |
 
 **111 of the 114 now reach their own code.** 3 are still stopped, one each.
+
+Then the last three, each measured by its own helper session in parallel and
+written from their specs. `$E3E7` is a prologue for a game routine called with
+inline arguments, like `$E844` one level up the stack, that also checks for a
+disk: with none it drops its own return address, so the error lands past the
+caller's arguments. A helper with a cycle number on every access fixed its
+shape, and the code written to it matched the original on 3000 fuzzed calls.
+`$E32A` reads the whole side into a directory, and `$E305` rewrites block 2 to
+set the file count, which is how Ginga Denshou drops its old save before
+appending the new one.
+
+Measuring `$E305` turned up a difference in what already shipped: the loader
+and the writer sent `$FF` to `$4026`, where the original ORs `$80` into `$F9`
+and sends that, on every exit that moves the motor. Fixed in the shared
+spin-up, and measured on three loader callers and two writer callers first.
+
+| entry | titles stuck on it now |
+|---|---|
+| `$E445` | **1** |
+
+**113 of the 114 now reach their own code.** The one left is Tobidase
+Daisakusen, which calls the BIOS's low-level disk primitives directly:
+`$E445`, `$E484`, `$E4A0`, `$E4F9` and `$E68F`, the last five stubs it
+reaches.
+
+One verdict moved the wrong way and is not a regression. At 1800 frames Ginga
+Denshou is BIOS-LOOP under ours and BOOT under the original, because ours gets
+to its save at frame 1681 and the original only at 2161, past the window. At
+3600 both are BOOT, and ours is faster in every disk routine it called.
 
 Ninety-nine is NOT "ninety-nine titles play correctly": thirty seconds of
 unattended running reaches what it reaches, and a game that needs a routine
