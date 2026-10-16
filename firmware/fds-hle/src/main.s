@@ -3213,7 +3213,9 @@ lf_spin:
   jsr lf_base
   ora #$02                  ; bit0 clear stops it, bit1 set means "do not start"
   sta FDS_CTRL
-  lda #$FF
+  lda $F9                   ; bit 7 of $F9 is marked and that goes to $4026,
+  ora #$80                  ; measured on the loader and the writer: an OR,
+  sta $F9                   ; since $11 planted came out $91
   sta FDS_EXT
   lda FDS_BATT              ; bit 7 is the battery; read as the real one does
   jsr lf_base

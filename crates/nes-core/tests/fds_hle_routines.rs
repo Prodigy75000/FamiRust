@@ -193,7 +193,18 @@ fn boot_to_handover(disk: &[u8], bios: &[u8]) -> nes_core::Nes {
 
 /// Boot `disk` under `bios` to handover, then run `prog` instead of the game.
 fn run(disk: &[u8], bios: &[u8], prog: &[u8], frames: u64) -> (Outcome, nes_core::Nes) {
+    run_poked(disk, bios, prog, frames, &[])
+}
+
+/// [`run`], with `pokes` written straight into memory at handover, for a cell
+/// a program cannot plant without moving its own addresses.
+fn run_poked(disk: &[u8], bios: &[u8], prog: &[u8], frames: u64, pokes: &[(u16, u8)])
+    -> (Outcome, nes_core::Nes)
+{
     let mut nes = boot_to_handover(disk, bios);
+    for &(a, v) in pokes {
+        nes.dbg_poke(a, v);
+    }
 
     for (i, b) in prog.iter().enumerate() {
         nes.dbg_poke(PROG + i as u16, *b);
@@ -3754,6 +3765,33 @@ fn fetch_args_is_cycle_exact() {
         assert_eq!(ours, want, "G at ${at:04x}, a=${a:02x}");
         if let Some(real) = real_bios() {
             assert_eq!(ours, cycles_of_call_in(&disk, &real, 0xe3e7, &prog), "G at ${at:04x}");
+        }
+    }
+}
+
+// --- $F9, which every routine that moves the motor marks --------------------
+
+/// Bit 7 of $F9 is ORed in by the spin-up of the loader and the writer, and
+/// that value, not $FF, is what goes to $4026. Measured by a helper on three
+/// loader callers and two writer callers, with $F9 planted at $00, $11 and
+/// $7F: an OR, never a store.
+#[test]
+fn the_spin_up_marks_bit_7_of_f9() {
+    let Some(disk) = a_disk() else { return skipped() };
+    let want = wanted_file_id(&disk);
+    let mut load = Prog::default();
+    load.bytes_at(LF_TEMPLATE, &[0xff; 10])
+        .bytes_at(LF_LIST, &[want, 0xff])
+        .jsr_with_args(0xe1f8, LF_TEMPLATE, LF_LIST)
+        .record_and_halt();
+    let write = wf_prog(0xe239, 0xff, false, None, false);
+    for (what, prog, frames) in [("$E1F8", load.0, 900u64), ("$E239", write, 3000)] {
+        let (r, mut nes) = run_poked(&disk, &[], &prog, frames, &[(0x00f9, 0x11)]);
+        assert!(r.reached, "{what} never returned");
+        assert_eq!(nes.peek(0x00f9), 0x91, "{what}: $F9 is ORed with $80");
+        if let Some(real) = real_bios() {
+            let (_, mut theirs) = run_poked(&disk, &real, &prog, frames, &[(0x00f9, 0x11)]);
+            assert_eq!(theirs.peek(0x00f9), 0x91, "{what}: and the original agrees");
         }
     }
 }
