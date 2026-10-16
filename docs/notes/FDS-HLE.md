@@ -243,7 +243,7 @@ work as taking transfer interrupts in the loader.
 
 ### The routines
 
-Thirty-four of the forty entry points are implemented. The other 6 are stubs that put
+All forty entry points are implemented. Until each was written it was a stub that put
 **NO ROUTINE** on the screen and stop, which is worth its 111 bytes: Zelda hands
 over correctly, runs its own code, jumps to `$EA84` and would otherwise
 disappear into the fill, looking like a hundred different bugs instead of one
@@ -285,6 +285,12 @@ missing routine. `fdstrace` names the address.
 | `$E3E7` | 1 | fetch the caller's inline arguments, two or four bytes, and check a disk is in | cycle-exact, 107 + 21 for four; no disk unwinds past the caller |
 | `$E32A` | 1 | read the whole side and write a directory of it into RAM | never writes the disk; millions of cycles faster |
 | `$E305` | 1 | set the side's file count by rewriting block 2 | disk image byte-identical; 40K cycles against 1.73M |
+| `$E445` | 1 | spin up and check block 1 against the template | one attempt, no retry; the loader's codes |
+| `$E484` | 1 | block 2, the file count into `$06` | y is `$23` on every exit |
+| `$E68F` | 1 | open the next block and check its type is a | x = y = the code a mismatch would give |
+| `$E4A0` | 1 | header bytes 1-10, the ID against the list | counts a match in `$0E` here, not at load |
+| `$E4F9` | 1 | the rest of the header, then the body | a RAM file that would wrap, or land on zero page or the stack, is refused |
+| `$E778` | 6 | coast: `$FA = ($FA & 9) \| $26` | cycle-exact, 29 |
 
 **Where the cycle counts do not match, ours is faster, never slower.** That is
 deliberate. A game that runs one of these inside vblank has more room than it
@@ -497,6 +503,28 @@ One verdict moved the wrong way and is not a regression. At 1800 frames Ginga
 Denshou is BIOS-LOOP under ours and BOOT under the original, because ours gets
 to its save at frame 1681 and the original only at 2161, past the window. At
 3600 both are BOOT, and ours is faster in every disk routine it called.
+
+Then Tobidase, which needed six more. It carries its own copy of the loader,
+built from the BIOS's pieces: `$E445` spins up and checks block 1, `$E484`
+reads the count, and per file `$E68F`, `$E4A0` and `$E4F9` open a block,
+match the ID and load the body, then `$E778` coasts. An error in any of them
+does not return: S goes back to the frame `$E3E7` left in `$04`, so the game
+gets the code past its own inline bytes. A helper measured all six and fuzzed
+a model of them on 2200 cases and 14402 chained calls.
+
+It found a drive bug first. Tobidase's side declares eight files and its
+loader reads a ninth past the count, which the drive never laid out, so under
+the real BIOS that read scanned to the end of the side and never returned.
+`fds.rs` now lays out every header block that follows, declared or not.
+
+Ours writes `$4025` with the byte IRQ bit clear throughout, because it polls.
+The original leaves the drive armed with interrupts enabled between `$E4A0`
+and `$E4F9`, and on ours that would be a level IRQ our handler returns into
+forever.
+
+**No stubs are left: every entry point the census found is written, and 114
+of the 114 hand over identically.** Tobidase runs to its side B prompt and,
+turned over, to the same screen under both BIOSes.
 
 Ninety-nine is NOT "ninety-nine titles play correctly": thirty seconds of
 unattended running reaches what it reaches, and a game that needs a routine

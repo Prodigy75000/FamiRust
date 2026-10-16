@@ -541,6 +541,113 @@ vint_wait:
   lda #$FF                  ; $E237: append. Two bytes, then $E239
 .org $E239
   jmp write_file            ; the body is at $F6E0
+.org $E23C
+; $E4F9: header bytes 11-15, then the body. $0A/$0B the address, $0C/$0D the
+; size less one, which counts down to $FFFF. A kind-0 file is REFUSED if it
+; would wrap past $FFFF or land in the first two pages of a 2K mirror below
+; $2000; that check comes first and sets y = $FF even when the file is then
+; skipped. Skipped ($09 nonzero): y = $09, and the body has no status checks
+; at all. Loaded: y = 0, and the block end's errors return C clear. A PPU
+; kind blanks the screen first. Header errors return y = 4.
+pf_e4f9:
+  lda #$40
+  sta $0101
+  ldx #$00
+@hdr:
+  lda LF_SHADOW
+  ora #$80                  ; before each byte, as the original
+  jsr pf_ctrl
+  jsr pf_rd
+  sta LF_DST,x
+  inx
+  cpx #$04
+  bne @hdr
+  jsr pf_rd                 ; the kind
+  pha
+  lda LF_CNT
+  bne @lo
+  dec LF_CNT+1
+@lo:
+  dec LF_CNT
+  ldy #$04
+  jsr pf_end1
+  lda #$04
+  jsr pf_arm
+  ldy #$00
+  pla
+  tax                       ; the kind, to the end
+  bne @checked              ; a PPU kind has no range check
+  lda LF_DST
+  clc
+  adc LF_CNT
+  lda LF_DST+1
+  adc LF_CNT+1
+  bcs @refuse               ; it would wrap
+  lda LF_DST+1
+  cmp #$20
+  bcs @checked
+  and #$07
+  cmp #$02
+  bcs @checked
+@refuse:
+  ldy #$FF
+@checked:
+  lda LF_SKIP
+  beq @take
+  cpy #$FF
+  beq @skip
+  tay                       ; skipped: y = $09
+@skip:
+  jsr pf_rd
+  jsr pf_down
+  bne @skip
+  jsr pf_rd                 ; the CRC, as data, and no checks
+  jsr pf_rd
+  jsr pf_off
+  jmp pf_ok
+@take:
+  cpy #$FF
+  beq @drop                 ; refused: read through, then the block end
+  txa
+  bne @ppu
+@ram:
+  jsr pf_rd
+  sta (LF_DST),y
+  inc LF_DST
+  bne @nowrap
+  inc LF_DST+1
+@nowrap:
+  jsr pf_down
+  bne @ram
+  beq @end
+@ppu:
+  lda LF_MASK
+  and #%11100111
+  sta LF_MASK
+  sta PPUMASK
+  bit PPUSTATUS
+  lda LF_DST+1
+  sta PPUADDR
+  lda LF_DST
+  sta PPUADDR
+@vram:
+  jsr pf_rd
+  sta PPUDATA
+  jsr pf_down
+  bne @vram
+  beq @end
+@drop:
+  jsr pf_rd
+  jsr pf_down
+  bne @drop
+@end:
+  ldx #$00                  ; the body's end errors return C clear
+  jsr pf_end
+  jmp pf_ok
+
+pf_body_end:
+.assert pf_body_end <= $E305
+
 .org $E305
   jmp set_count             ; the body is at $E4FC
 .org $E32A
@@ -626,18 +733,375 @@ fetch_args:
   txa                       ; a = $01, no disk
   cli
   rts
+; ===========================================================================
+; $E445 $E484 $E68F $E4A0 $E4F9 $E778: the loader in pieces
+; ===========================================================================
+;
+; Tobidase Daisakusen does not call $E1F8. It carries its own copy of it, one
+; that walks one file past the count to reach a hidden ninth, built from these
+; six entry points: $E3E7 for its arguments, then $E445 (spin up and check
+; block 1), $E484 (block 2), and per file $E68F (open a block of type a),
+; $E4A0 (header bytes 1-10, the ID against the list) and $E4F9 (the rest of
+; the header and the body), then $E778 to coast. The five Namco titles that
+; load through their own code at $0514 call $E778 as well.
+;
+; Measured by a helper, one call at a time and chained the way a loader
+; chains them, against a model fuzzed on 2200 cases and 14402 calls with 0
+; mismatches. What they share:
+;
+;   * an error does not return to the caller: S goes back to [$04], the
+;     frame $E3E7 left, and the rts lands past the game's own inline bytes,
+;     with a = x = the code, N and Z from it, I clear, D kept, C per check,
+;     and V set if the call read any byte of the disk. $FA = ($FA & 9) | $26.
+;   * $FA is ORed and ANDed a step at a time, never rebuilt: arm sets $40
+;     then $80, CRC mode $10, disarm keeps $2F. We write $4025 from it with
+;     the byte IRQ bit CLEAR, since we poll: the original leaves the drive
+;     armed with I clear between $E4A0 and $E4F9, and our IRQ handler would
+;     return into a level interrupt forever.
+;   * a block ends on one CRC byte and end of head ($28), CRC mode and the
+;     other byte and CRC ($27), disarm, then no disk ($01). Success returns
+;     $4032 shifted right in a, x = 1, V and I set.
+;
+; Every one but $E778 drops the original's counted delays, so they are
+; faster; $E778 is 29 cycles, as the original's.
+PF_TYPE   = $07           ; the block type expected
 .org $E445
-  jmp unimplemented
+  jmp pf_e445               ; the body is at $FF28
+
+; ---- the exits, and a $4025 write with the byte IRQ off --------------------
+
+; a = the code, y and C as the error returns. V set: a byte was read.
+pf_err_v:
+  bit lf_vflag              ; V, and C is kept
+pf_err:
+  tax
+  lda LF_SHADOW
+  and #$09
+  ora #$26
+  jsr pf_ctrl
+  txa
+  ldx LF_FRAME              ; back to the frame $E3E7 left
+  txs
+  tax                       ; a = x = the code, N and Z from it
+  cli
+  rts
+
+
+; $0C/$0D down one; Z clear until it has gone past zero to $FFFF.
+pf_down:
+  lda LF_CNT
+  bne @lo
+  dec LF_CNT+1
+@lo:
+  dec LF_CNT
+  lda LF_CNT
+  and LF_CNT+1
+  cmp #$FF
+  rts
+pf_low_end:
+.assert pf_low_end <= $E484
+
 .org $E484
-  jmp unimplemented
+; $E484: block 2. $06 = the count as it stands; y = $23 on every exit.
+  lda #$02
+  jsr pf_arm
+  jsr pf_rd
+  sta LF_LEFT
+  ldy #$23
+  jsr pf_end1
+  jmp pf_ok
+pf_count_end:
+.assert pf_count_end <= $E4A0
+
 .org $E4A0
-  jmp unimplemented
+; $E4A0: header bytes 1 and 2, the ID against the list at ($02), then the
+; eight name bytes. A match leaves $09 = 0 and counts it in $0E HERE, not when
+; the body loads. A list's $FF ends it; a list STARTING with $FF means the
+; boot set, ID <= the boot code in $08. Out: a = 0, x = the ID, y = where the
+; list stopped, V and Z set, I clear, C from the compare.
+  jsr pf_rd                 ; the file number, not wanted
+  jsr pf_rd
+  tax                       ; the ID, to the end
+  lda #$08
+  sta $0101                 ; name bytes to go, as the original counts them
+  ldy #$00
+  lda (LF_P2),y
+  cmp #$FF
+  beq @boot
+@scan:
+  lda (LF_P2),y
+  cmp #$FF
+  beq @miss1
+  txa
+  cmp (LF_P2),y
+  beq @hit1
+  iny
+  jmp @scan                 ; no end but the $FF, as measured
+@boot:
+  cpx LF_BOOT               ; C = ID >= the boot code
+  beq @hit
+  bcc @hit
+  bcs @miss
+@hit1:
+  sec
+@hit:
+  lda #$00
+  sta LF_SKIP
+  inc LF_LOADED
+  jmp @name
+@miss1:
+  sec
+@miss:
+  lda #$FF
+  sta LF_SKIP
+@name:
+  php                       ; the carry, for the exit
+@byte:
+  jsr pf_rd
+  dec $0101
+  bne @byte
+  pla
+  and #$09                  ; D and C kept
+  ora #$42                  ; V and Z
+  pha
+  lda #$00
+  plp
+  rts
+pf_match_end:
+.assert pf_match_end <= $E4F9
 .org $E4F9
-  jmp unimplemented
+  jmp pf_e4f9               ; the body is at $E23C
 .org $E68F
-  jmp unimplemented
+; $E68F: open the next block and check its type is a, any a. Out: a kept,
+; x = y = (a + $21) & $FF, the code a mismatch gives; V I Z C set.
+  jsr pf_arm
+  lda PF_TYPE
+  clc
+  adc #$21
+  tax
+  tay
+  php
+  pla
+  and #$08                  ; D kept
+  ora #$47
+  pha
+  lda PF_TYPE
+  plp
+  rts
+
+; a = what $4032 gave, shifted; y set. x = 1, V and I set, N Z C clear.
+pf_ok:
+  sei
+  clc
+  bit lf_vflag
+  ldx #$01
+  rts
+
+; a into $FA, and to the drive without the byte IRQ.
+pf_ctrl:
+  sta LF_SHADOW
+  and #$7F
+  sta FDS_CTRL
+  rts
+
+; ---- open a block of type a: $07, arm, the type byte ------------------------
+pf_arm:
+  sta PF_TYPE
+  lda LF_SHADOW
+  ora #$40
+  jsr pf_ctrl
+  lda #$40
+  sta $0101                 ; the original's byte-IRQ state; ours polls
+  lda LF_SHADOW
+  ora #$80
+  jsr pf_ctrl
+  jsr pf_rd
+  cmp PF_TYPE
+  bne @bad
+  rts
+@bad:
+  php                       ; C = disk byte >= the type
+  lda PF_TYPE
+  clc
+  adc #$21
+  tay
+  plp
+  tya
+  jmp pf_err_v
+
+; ---- one byte. Off the end of the side, where the original waits forever,
+; ours gives $28 ------------------------------------------------------------
+pf_rd:
+  jsr read_byte
+  bcs @eoh
+  rts
+@eoh:
+  lda #$28
+  jmp pf_err_v
+
+; ---- the end of a header-type block. y is what its errors return; x is
+; their carry, which pf_end1 sets ---------------------------------------------
+pf_end1:
+  ldx #$01
+pf_end:
+  jsr pf_rd                 ; CRC byte one
+  lda FDS_STATUS
+  and #$40
+  beq @crc
+  lda #$28
+  bne @fail
+@crc:
+  lda LF_SHADOW
+  ora #$10                  ; CRC mode
+  jsr pf_ctrl
+  jsr pf_rd                 ; and two
+  lda FDS_STATUS
+  and #$10
+  beq pf_off
+  lda #$27
+@fail:
+  cpx #$01
+  jmp pf_err_v
+; disarm, then the drive: a = $4032 shifted right, C clear; no disk is $01
+pf_off:
+  lda LF_SHADOW
+  and #$2F
+  jsr pf_ctrl
+  lda FDS_DRIVE
+  lsr a
+  bcs @gone
+  rts
+@gone:
+  lda #$01
+  jmp pf_err_v
+
+pf_high_end:
+.assert pf_high_end <= $E778
+
+.org $FF28
+; ---- $E445: spin up, then block 1 against the template at ($00) -------------
+; One attempt, no retry. $08 ends as the boot read file code.
+pf_e445:
+  lda LF_SHADOW
+  and #$08
+  ora #$26                  ; stop
+  sta FDS_CTRL
+  ora #$01
+  sta FDS_CTRL
+  and #$FD                  ; and start: $25 with the mirroring
+  sta LF_SHADOW
+  sta FDS_CTRL
+  lda $F9
+  ora #$80
+  sta $F9
+  sta FDS_EXT
+  lda FDS_BATT
+  bmi @battery
+  lda #$02
+  ldy #$00
+  sec
+  jmp pf_err                ; V kept: no byte read
+@battery:
+  lda LF_SHADOW
+  and #$08
+  ora #$26
+  sta FDS_CTRL
+  ora #$01
+  sta FDS_CTRL
+  and #$FD
+  sta LF_SHADOW
+  sta FDS_CTRL
+@ready:
+  lda FDS_DRIVE
+  lsr a
+  bcs @nodisk
+  lsr a
+  bcs @ready
+  lda #$01
+  jsr pf_arm
+  ldx #$00
+@magic:
+  jsr pf_rd
+  cmp lf_magic,x
+  bne @bad_magic
+  inx
+  cpx #14
+  bne @magic
+  lda #$04                  ; $08 walks the ID codes, BCD at the end
+  sta LF_BOOT
+  ldy #$00
+@id:
+  jsr pf_rd
+  pha
+  lda (LF_P1),y
+  cmp #$FF
+  beq @wild
+  tsx
+  cmp $0101,x
+  bne @id_bad
+@wild:
+  pla
+  cpy #$01                  ; it steps after bytes 0 and 4 to 9
+  bcc @step
+  cpy #$04
+  bcc @nostep
+@step:
+  inc LF_BOOT
+@nostep:
+  iny
+  cpy #10
+  bne @id
+  jsr pf_rd
+  sta LF_BOOT               ; disk-info byte $19
+  ldx #30
+@rest:
+  jsr pf_rd
+  dex
+  bne @rest
+  ldy #$00
+  jsr pf_end1
+  jmp pf_ok
+@nodisk:
+  lda #$01
+  ldy #$00
+  sec
+  jmp pf_err
+@bad_magic:
+  php                       ; C from the compare; y = 13 - x
+  txa
+  eor #$FF
+  clc
+  adc #14
+  tay
+  plp
+  lda #$21
+  jmp pf_err_v
+@id_bad:
+  lda LF_BOOT               ; the code is $08 in BCD, which only shows at 10
+  cmp #10
+  bne @bcd
+  lda #$10
+@bcd:
+  clc
+  jmp pf_err_v
+pf_e445_end:
+.assert pf_e445_end <= $FFFA
 .org $E778
-  jmp unimplemented
+; $E778: coast. $FA = ($FA & 9) | $26 to the drive, a = x = 0, y kept, Z set,
+; N and I clear, C V D kept. 29 cycles, the original's to the access.
+  ldx #$00
+  jmp @tail                 ; 3 cycles with nothing outside the BIOS
+@tail:
+  lda $FA                   ; literal: LF_SHADOW is defined further down, and
+  and #$09                  ; a forward name assembles absolute, two cycles over
+  ora #$26
+  sta $FA
+  sta FDS_CTRL
+  txa
+  cli
+  rts
+pf_coast_end:
+.assert pf_coast_end <= $E7BB
 ; --- $E7BB: walk a VRAM write structure the caller points at inline ---------
 ;
 ; 18 of the 114 corpus titles call it and six are stopped on it, Zelda among

@@ -4087,3 +4087,154 @@ fn set_count_with_no_disk_returns_before_the_motor() {
     assert_eq!(zp[0x07], 0x00, "$07 cleared");
     assert_eq!([zp[0x10], zp[0x11]], [0x11, 0x0d], "$F9 and $FA as found");
 }
+
+// --- $E445 $E484 $E68F $E4A0 $E4F9 $E778, the loader in pieces --------------
+
+/// Tobidase Daisakusen's own loader, rebuilt at $06A0: G takes the template
+/// and list inline through $E3E7, pushes $0101 and calls G2, which chains the
+/// primitives over every file block 2 counts. An error unwinds to the frame
+/// $E3E7 left, which is G2's return into G, exactly as in the game.
+const PF_G: u16 = 0x06a0;
+const PF_TEMPLATE: u16 = 0x0500;
+const PF_LIST: u16 = 0x0510;
+
+/// `list` is the file list: one ID then $FF, or $FF alone for the boot set.
+/// With `whole` clear, G2 stops after $E445 and $E484, so their own exit
+/// state is what gets compared rather than $E778's.
+fn pf_prog(list: &[u8], addr: u16, bad_at: Option<u8>, whole: bool) -> Vec<u8> {
+    let mut p = Prog::default();
+    p.poke(0x2000, 0x00);
+    p.raw(&[0xa2, 0x0f, 0xa9, 0xcc, 0x95, 0x00, 0xca, 0x10, 0xfb]); // $00-$0F
+    p.raw(&[0xa9, 0xff, 0xa2, 0x09, 0x9d, 0x00, 0x05, 0xca, 0x10, 0xfa]); // template
+    if let Some(i) = bad_at {
+        p.poke(PF_TEMPLATE + i as u16, 0x77);
+    }
+    p.bytes_at(PF_LIST, list);
+    // Scribble the destination, so a load that stores nothing cannot pass.
+    p.raw(&[0xa2, 0x1f, 0xa9, SCRIBBLE, 0x9d, addr as u8, (addr >> 8) as u8, 0xca, 0x10, 0xfa]);
+    p.poke(0x000e, 0x00).poke(0x0101, 0x80);
+    p.jsr(PF_G);
+    p.raw(&PF_TEMPLATE.to_le_bytes());
+    p.raw(&PF_LIST.to_le_bytes());
+    p.record_and_halt();
+    assert!(p.0.len() <= (PF_G - PROG) as usize, "the caller has grown into G");
+    p.0.resize((PF_G - PROG) as usize, 0x00);
+    p.raw(&[
+        0xa9, 0xff, 0x20, 0xe7, 0xe3, // G: lda #$FF : jsr $E3E7
+        0xad, 0x01, 0x01, 0x48, // lda $0101 : pha
+        0x20, 0xc0, 0x06, // jsr G2
+        0x68, 0x8d, 0x01, 0x01, // pla : sta $0101
+        0xa4, 0x0e, 0x8a, 0x60, // ldy $0E : txa : rts
+    ]);
+    p.0.resize((0x06c0 - PROG) as usize, 0x00);
+    if !whole {
+        p.raw(&[0x20, 0x45, 0xe4, 0x20, 0x84, 0xe4, 0x60]); // G2: $E445, $E484, rts
+        return p.0;
+    }
+    p.raw(&[
+        0x20, 0x45, 0xe4, 0x20, 0x84, 0xe4, // G2: jsr $E445 : jsr $E484
+        0xa9, 0x03, 0x20, 0x8f, 0xe6, // lda #3 : jsr $E68F
+        0x20, 0xa0, 0xe4, 0x20, 0xf9, 0xe4, // jsr $E4A0 : jsr $E4F9
+        0xc6, 0x06, 0xd0, 0xf1, // dec $06 : bne back to the lda #3
+        0x20, 0x78, 0xe7, 0x60, // jsr $E778 : rts
+    ]);
+    p.0
+}
+
+/// Registers, $00-$0F with $F9, $FA and $0101 after them, and the 32 bytes at
+/// `addr`, under ours and the real BIOS, which have to agree on all of it.
+fn pf_both(prog: &[u8], addr: u16) -> Option<(Outcome, Vec<u8>, Vec<u8>)> {
+    let disk = a_disk()?;
+    let go = |bios: &[u8]| {
+        let (out, mut nes) =
+            run_poked(&disk, bios, prog, 1500, &[(0x00f9, 0x11), (0x00fa, 0x0d)]);
+        let mut zp: Vec<u8> = (0x00..=0x0fu16).map(|a| nes.peek(a)).collect();
+        zp.extend([nes.peek(0x00f9), nes.peek(0x00fa), nes.peek(0x0101)]);
+        let got: Vec<u8> = (0..32u16).map(|i| nes.peek(addr.wrapping_add(i))).collect();
+        (out, zp, got)
+    };
+    let ours = go(&[]);
+    if let Some(real) = real_bios() {
+        let theirs = go(&real);
+        assert!(theirs.0.reached, "the real BIOS never finished the test program");
+        assert_eq!(ours.0, theirs.0, "registers: ours (left) against the real BIOS (right)");
+        assert_eq!(ours.1, theirs.1, "$00-$0F, $F9, $FA, $0101: ours (left), real (right)");
+        assert_eq!(ours.2, theirs.2, "the loaded bytes: ours (left), real (right)");
+    } else {
+        eprintln!("note: no dumps/fds/disksys.rom, so this is not held against the oracle");
+    }
+    Some(ours)
+}
+
+#[test]
+fn the_loader_in_pieces_loads_a_file_as_tobidase_does_and_matches_the_real_bios() {
+    let Some(disk) = a_disk() else { return skipped() };
+    let (want, addr, body) = wanted_file(&disk);
+    let Some((r, zp, got)) = pf_both(&pf_prog(&[want, 0xff], addr, None, true), addr) else {
+        return skipped();
+    };
+    assert!(r.reached, "the chain never came back through G");
+    assert_eq!(got, body[..32], "the file is over the scribble at ${addr:04x}");
+    assert_eq!(r.a, 0x00, "$E778's x, through G's txa");
+    assert!(r.y >= 1, "y = $0E, counted by $E4A0 as it matched");
+    assert_eq!(zp[0x06], 0x00, "every counted file walked");
+    assert_eq!(zp[0x07], 0x04, "the last block a body");
+    assert_eq!(zp[0x11], 0x2f, "$E778 left $FA coasting: ($0D & 9) | $26");
+    assert_eq!(zp[0x12], 0x80, "and G put $0101 back");
+}
+
+#[test]
+fn a_wrong_disk_unwinds_to_the_frame_with_the_loaders_code() {
+    // $E445 has no retry, and its error does not return to G2: S goes back to
+    // $04 and the rts lands in G after its jsr G2, with a = x = the code.
+    let Some(disk) = a_disk() else { return skipped() };
+    let (want, addr, _) = wanted_file(&disk);
+    for (at, code) in [(0u8, 0x04u8), (9, 0x10)] {
+        let Some((r, zp, got)) = pf_both(&pf_prog(&[want, 0xff], addr, Some(at), true), addr) else {
+            return skipped();
+        };
+        assert!(r.reached, "template byte {at}: the error did not land back in G");
+        assert_eq!(r.a, code, "template byte {at}");
+        assert_eq!(zp[0x07], 0x01, "stopped in block 1");
+        assert!(got.iter().all(|&b| b == SCRIBBLE), "and nothing was loaded");
+    }
+}
+
+#[test]
+fn the_loader_in_pieces_takes_the_boot_set_when_the_list_starts_with_ff() {
+    // $E4A0's boot mode: a file loads if its ID is at most the boot read file
+    // code that $E445 left in $08.
+    let Some(disk) = a_disk() else { return skipped() };
+    let (_, addr, _) = wanted_file(&disk);
+    let Some((r, zp, _)) = pf_both(&pf_prog(&[0xff], addr, None, true), addr) else {
+        return skipped();
+    };
+    assert!(r.reached);
+    assert_eq!(r.a, 0x00);
+    assert!(zp[0x0e] >= 1, "the boot set is at least one file");
+}
+
+#[test]
+fn spin_up_and_count_leave_their_own_exit_state() {
+    // Stopping after $E484 compares what $E445 and $E484 leave, $FA among
+    // it, rather than what $E778 then coasts over.
+    let Some(disk) = a_disk() else { return skipped() };
+    let (want, addr, _) = wanted_file(&disk);
+    let Some((r, zp, _)) = pf_both(&pf_prog(&[want, 0xff], addr, None, false), addr) else {
+        return skipped();
+    };
+    assert!(r.reached);
+    assert_eq!(zp[0x07], 0x02, "block 2 the last opened");
+    assert_eq!(zp[0x11], 0x2d, "$FA disarmed: ($0D & 8) | $25, then $40 and $80 off");
+    assert_eq!(r.y, 0x00, "$0E: nothing loaded yet");
+}
+
+#[test]
+fn coast_at_e778_is_cycle_exact() {
+    let Some(disk) = a_disk() else { return skipped() };
+    let ours = cycles_of_call(&disk, &[], 0xe778);
+    assert_eq!(ours, 29);
+    if let Some(real) = real_bios() {
+        assert_eq!(ours, cycles_of_call(&disk, &real, 0xe778));
+    }
+}
