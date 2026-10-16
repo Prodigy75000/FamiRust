@@ -546,7 +546,86 @@ vint_wait:
 .org $E32A
   jmp unimplemented
 .org $E3E7
-  jmp unimplemented
+; --- $E3E7: fetch the inline arguments of the routine that called us, and ---
+; --- check a disk is in --------------------------------------------------------
+;
+; 1 of the 114 corpus titles calls it: Tobidase Daisakusen, `jsr $E3E7` from
+; $62CA with a=$FF, inside a routine of its own that is called as `jsr G`
+; followed by its arguments. Like $E844 this reaches one level up the stack, to
+; G's return address, but it takes four bytes when a is $FF and two otherwise,
+; and it reads $4032 before it returns.
+;
+; Measured by a helper with a cycle number on every access, so the shape below
+; is fixed by where each access lands, dummy reads included:
+;
+;   * $04 = SP-1 at entry, kept to index the return address after the copy.
+;   * a php at $0100+SP is left below the stack and popped again; the pushed
+;     C is the sec's, which is why the final bcs is always taken.
+;   * $02 = a as given; a then survives the pointer fetch, so the fetch goes
+;     through y. The pointer lands in $05/$06 and stays there.
+;   * the bytes after G's jsr go to $00/$01, and $02/$03 too when a is $FF.
+;     G's return address steps over them with the carry rippled.
+;   * $4032 bit 0 only, write protect is ignored. A disk: a=0, x=1, y=2 or 4,
+;     back to G. No disk: a=1, x=1, y=[$0E], I cleared, and our return
+;     address is dropped, so G's caller gets the error past G's arguments.
+;
+; With SP at entry $FC or above, abs,x reaches page 2 rather than wrapping on
+; the stack, as the original's does; the same addressing modes give that for
+; free. 107 cycles, +21 for four bytes, +13 for no disk, plus one for each
+; page crossed. Matched against the original on 3000 fuzzed calls.
+fetch_args:
+  sec
+  bcs @body                 ; 3 cycles the original spends here
+@body:
+  tsx
+  dex                       ; N/Z of this end up in the pushed P
+  stx $04
+  php
+  sta $02
+  ldy $0104,x               ; G's return address, low
+  sty $05
+  ldy $0105,x               ; and high
+  sty $06
+  ldy #$01
+  cmp #$FF                  ; C set: four bytes
+  lda ($05),y
+  sta $00
+  iny
+  lda ($05),y
+  sta $01
+  nop                       ; 4 cycles with nothing observable
+  nop
+  bcc @two
+  iny
+  lda ($05),y
+  sta $02
+  iny
+  lda ($05),y
+  sta $03
+  clc
+@two:
+  ldx $04
+  tya                       ; y is the count, and C is clear on both paths
+  adc $05
+  sta $0104,x
+  lda #$00
+  adc $06
+  sta $0105,x
+  plp
+  ldx #$01
+  lda $4032
+  and #$01
+  bne @nodisk
+  bcs @done                 ; always taken: the pushed C is the sec's
+@done:
+  rts
+@nodisk:
+  pla                       ; drop our own return address
+  pla
+  ldy $0E
+  txa                       ; a = $01, no disk
+  cli
+  rts
 .org $E445
   jmp unimplemented
 .org $E484

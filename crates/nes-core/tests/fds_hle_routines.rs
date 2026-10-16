@@ -3606,3 +3606,154 @@ fn write_file_with_the_wrong_disk_writes_nothing() {
         assert!(image == before, "and not a byte of the disk changed");
     }
 }
+
+// --- $E3E7, the caller's inline arguments and a disk check ------------------
+
+/// Where the test's own `G` lives: `jsr $E3E7 : sta FETCH_BACK : rts`. The
+/// store marks the way home: a disk returns to G and writes it, no disk skips
+/// G and leaves it as planted. sta keeps the flags, so the recorder still sees
+/// the routine's own.
+const FETCH_G: u16 = 0x06c0;
+const FETCH_BACK: u16 = 0x0714;
+
+/// A caller for $E3E7, two levels deep: a stub at `at` does `jsr G` with
+/// `args` after it, then jumps to the recorder, which is only reached if G's
+/// return address was stepped over exactly those bytes. Everything compared
+/// is planted first, and the stack pinned, so the two boots' leftovers stay
+/// out of it.
+fn fetch_prog(at: u16, a: u8, args: &[u8]) -> Vec<u8> {
+    let mut p = Prog::default();
+    p.poke(0x2000, 0x00);
+    p.raw(&[0xa2, 0xef, 0x9a]); // ldx #$ef : txs
+    for zp in 0x00..=0x06u16 {
+        p.poke(zp, 0xcc);
+    }
+    p.poke(0x000e, 0x3c).poke(FETCH_BACK, 0xcc).poke(0x01eb, 0xcc);
+    p.bytes_at(FETCH_G, &[0x20, 0xe7, 0xe3, 0x8d, FETCH_BACK as u8, (FETCH_BACK >> 8) as u8, 0x60]);
+    // The stub's jmp target is the recorder, known once the fixed-size rest
+    // is counted: five bytes a poke, the stub's own, the lda/ldx/ldy and jmp.
+    let stub_len = 6 + args.len();
+    let tail = 5 * stub_len + 6 + 4;
+    let record = PROG + (p.0.len() + tail) as u16;
+    let mut stub = vec![0x20, FETCH_G as u8, (FETCH_G >> 8) as u8];
+    stub.extend_from_slice(args);
+    stub.extend_from_slice(&[0x4c, record as u8, (record >> 8) as u8]);
+    p.bytes_at(at, &stub);
+    p.lda(a).ldx(0x55).ldy(0x66);
+    p.raw(&[0x78, 0x4c, at as u8, (at >> 8) as u8]); // sei : jmp, so a cli shows
+    assert_eq!(PROG + p.0.len() as u16, record, "the recorder moved");
+    p.record_and_halt();
+    p.0
+}
+
+fn fetch_watch() -> Vec<u16> {
+    // $00-$06, the way home, and the byte the original's php leaves below the
+    // stack: the stub's jsr takes SP to $ED and G's to $EB, so it lands at
+    // $01EB.
+    let mut w: Vec<u16> = (0x00..=0x06).collect();
+    w.extend([FETCH_BACK, 0x01eb]);
+    w
+}
+
+/// [`both_watching`], with the disk taken out after boot when `eject` is set.
+fn fetch_both(prog: &[u8], eject: bool) -> Option<(Outcome, Vec<u8>)> {
+    let disk = a_disk()?;
+    let go = |bios: &[u8]| {
+        let mut nes = boot_to_handover(&disk, bios);
+        if eject {
+            nes.fds_eject();
+        }
+        for (i, b) in prog.iter().enumerate() {
+            nes.dbg_poke(PROG + i as u16, *b);
+        }
+        nes.dbg_poke(OUT_SENTINEL, 0);
+        nes.dbg_set_pc(PROG);
+        let stop = nes.dbg_frame() + 30;
+        while nes.dbg_frame() < stop && !nes.dbg_halted() && nes.peek(OUT_SENTINEL) != DONE {
+            nes.step();
+        }
+        let out = Outcome {
+            reached: nes.peek(OUT_SENTINEL) == DONE,
+            a: nes.peek(OUT),
+            x: nes.peek(OUT + 1),
+            y: nes.peek(OUT + 2),
+            p: nes.peek(OUT + 3),
+        };
+        let mem: Vec<u8> = fetch_watch().iter().map(|a| nes.peek(*a)).collect();
+        (out, mem)
+    };
+    let ours = go(&[]);
+    if let Some(real) = real_bios() {
+        let theirs = go(&real);
+        assert!(theirs.0.reached, "the real BIOS never finished the test program");
+        assert_eq!(ours, theirs, "ours (left) against the real BIOS (right)");
+    } else {
+        eprintln!("note: no dumps/fds/disksys.rom, so this is not held against the oracle");
+    }
+    Some(ours)
+}
+
+#[test]
+fn fetch_args_at_e3e7_takes_four_bytes_when_a_is_ff() {
+    // Tobidase Daisakusen's call. G's jsr is at $0570, so its return address
+    // is $0572, and the four bytes after it go to $00-$03.
+    let prog = fetch_prog(0x0570, 0xff, &[0x11, 0x22, 0x33, 0x44]);
+    let Some((r, m)) = fetch_both(&prog, false) else { return skipped() };
+    assert!(r.reached, "G did not return past its four bytes");
+    assert_eq!(m[0..4], [0x11, 0x22, 0x33, 0x44], "$00-$03 = the bytes after G's jsr");
+    assert_eq!([m[4], m[5], m[6]], [0xea, 0x72, 0x05], "$04 = SP-1, $05/$06 = G's return");
+    assert_eq!(m[7], 0x00, "it came back through G");
+    assert_eq!((r.a, r.x, r.y), (0x00, 0x01, 0x04));
+    assert_eq!(r.p & 0xc3, 0x03, "C and Z set, N and V clear: the a=0 of a disk");
+}
+
+#[test]
+fn fetch_args_takes_two_bytes_otherwise_and_keeps_a_in_02() {
+    // $FE as well: only $FF itself takes four.
+    for a in [0x37u8, 0xfe] {
+        let prog = fetch_prog(0x0570, a, &[0x11, 0x22]);
+        let Some((r, m)) = fetch_both(&prog, false) else { return skipped() };
+        assert!(r.reached, "a=${a:02x}: G did not return past its two bytes");
+        assert_eq!(m[0..4], [0x11, 0x22, a, 0xcc], "$02 = a, $03 untouched");
+        assert_eq!((r.a, r.y), (0x00, 0x02));
+    }
+}
+
+#[test]
+fn fetch_args_with_no_disk_returns_past_g_with_a_1() {
+    // G is skipped: our return address is dropped and the one under it has
+    // already been stepped, so G's caller gets the error past G's arguments.
+    let prog = fetch_prog(0x0570, 0xff, &[0x11, 0x22, 0x33, 0x44]);
+    let Some((r, m)) = fetch_both(&prog, true) else { return skipped() };
+    assert!(r.reached, "the error did not land past G's arguments");
+    assert_eq!(m[7], 0xcc, "and G never got control back");
+    assert_eq!((r.a, r.x, r.y), (0x01, 0x01, 0x3c), "y comes from $0E");
+    assert_eq!(r.p & 0x04, 0x00, "I cleared, though the call came in with it set");
+}
+
+#[test]
+fn fetch_args_carries_into_the_high_byte() {
+    // G's return address $04FD, plus four, is $0501.
+    let prog = fetch_prog(0x04fb, 0xff, &[0x11, 0x22, 0x33, 0x44]);
+    let Some((r, m)) = fetch_both(&prog, false) else { return skipped() };
+    assert!(r.reached, "the carry was dropped and G returned into $04xx");
+    assert_eq!(m[0..4], [0x11, 0x22, 0x33, 0x44]);
+}
+
+#[test]
+fn fetch_args_is_cycle_exact() {
+    // 107, +21 for four bytes, +1 for a pointer read across a page.
+    let Some(disk) = a_disk() else { return skipped() };
+    for (at, a, n, want) in [
+        (0x0570u16, 0x00u8, 2usize, 107u64),
+        (0x0570, 0xff, 4, 128),
+        (0x04fb, 0xff, 4, 130),
+    ] {
+        let prog = fetch_prog(at, a, &[0x11, 0x22, 0x33, 0x44][..n]);
+        let ours = cycles_of_call_in(&disk, &[], 0xe3e7, &prog);
+        assert_eq!(ours, want, "G at ${at:04x}, a=${a:02x}");
+        if let Some(real) = real_bios() {
+            assert_eq!(ours, cycles_of_call_in(&disk, &real, 0xe3e7, &prog), "G at ${at:04x}");
+        }
+    }
+}
