@@ -238,7 +238,12 @@ impl MediumSide {
             eprintln!("[layout] block1@0 ok, block2 file_count={files}");
         }
         // Per file: block 3 (16-byte header, type $03) then block 4 (1 + size).
-        for f in 0..files {
+        // NOT just the declared count: a side can carry files past it, and a
+        // game's own loader can walk them. Tobidase Daisakusen declares 8 and
+        // reads a 9th, $5D00 bytes to $8000; with only 8 laid out the real BIOS
+        // scanned to the end of the side for it and never returned. So the
+        // walk goes on while a header block follows, as on the medium.
+        for f in 0u16.. {
             if raw.get(pos) != Some(&0x03) || pos + 16 > raw.len() {
                 if dbg {
                     eprintln!(
@@ -1416,6 +1421,24 @@ mod tests {
         let side = MediumSide::build(&synth_side());
         assert_eq!(side.image.len(), 66740);
         assert!(side.image[295..].iter().all(|&b| b == 0), "and it is blank");
+    }
+
+    #[test]
+    fn a_file_past_the_declared_count_is_still_on_the_medium() {
+        // The synthetic side's one file, then a second the count does not
+        // mention: a header and a 2-byte body, which belong on the medium after
+        // the first file's blocks just as they sit in the .fds.
+        let mut raw = synth_side();
+        raw[79] = 0x03;
+        raw[79 + 1] = 0x01;
+        raw[79 + 13] = 2;
+        raw[95] = 0x04;
+        raw[96..98].copy_from_slice(&[0x5e, 0x5f]);
+        let side = MediumSide::build(&raw);
+        // 200 lead-in, then 60 + 6 + 20 + 9 for the declared file's blocks.
+        let at = 295;
+        assert_eq!(&side.image[at..at + 2], &[START_MARK, 0x03], "the hidden header");
+        assert_eq!(&side.image[at + 20..at + 24], &[START_MARK, 0x04, 0x5e, 0x5f]);
     }
 
     #[test]
