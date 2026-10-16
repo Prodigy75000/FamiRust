@@ -88,7 +88,7 @@ const CRC_FOOTER: usize = 2;
 /// The block start mark. On the physical medium each block is preceded by a gap
 /// of zero bits terminated by a set bit; in this byte-level model that is a $80
 /// byte right before the block's type byte. The BIOS *writes* this mark when it
-/// rewrites a block, so the reconstructed layout carries it too — otherwise a
+/// rewrites a block, so the reconstructed layout carries it too; otherwise a
 /// game's on-disk save (Zelda no Densetsu) writes a mark into a plain gap and the
 /// next read latches on it as a bogus block start (BIOS "ERR.24").
 const START_MARK: u8 = 0x80;
@@ -600,7 +600,7 @@ impl FdsAudio {
         w.bool(self.enabled);
         w.u8(self.div16);
         // `out`/`lp`/`dbg_peak` are audio output-path floats (like the APU's
-        // high-pass state) — never serialized, keeping the state integer-only.
+        // high-pass state), never serialized, keeping the state integer-only.
     }
 
     fn load(&mut self, r: &mut ReadCursor) -> Result<(), LoadError> {
@@ -1308,7 +1308,7 @@ impl SaveState for Fds {
         }
         // Dev only: keep the freshly-built disk image (skip the stored one) so a
         // state saved under an older medium layout can still be loaded to
-        // reproduce a bug — valid only for states with no on-disk writes yet.
+        // reproduce a bug, valid only for states with no on-disk writes yet.
         let keep_disk = std::env::var("FDS_STATE_KEEP_DISK").is_ok();
         for s in &mut self.sides {
             let len = r.u32()? as usize;
