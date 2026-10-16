@@ -3452,3 +3452,157 @@ fn tile_to_pixel_is_cycle_exact() {
         assert_eq!(ours, cycles_of_call_in(&disk, &real, 0xe997, &prog));
     }
 }
+
+// --- $E239 and $E237, writing a file to the disk ----------------------------
+
+const WF_TEMPLATE: u16 = 0x0500;
+const WF_DESC: u16 = 0x0510;
+const WF_SOURCE: u16 = 0x0540;
+const WF_LOADED: u16 = 0x0580;
+/// The file ID the tests write, and the size of its body.
+const WF_ID: u8 = 0x42;
+const WF_SIZE: u8 = 0x20;
+
+/// The byte the test writes at offset i, and expects to read back.
+fn wf_byte(i: u8) -> u8 {
+    i ^ 0x5a
+}
+
+/// A caller that writes one file through `entry` with `a` = `index`, then, if
+/// `read_back`, loads it again through $E1F8 into WF_LOADED and records THAT.
+/// The template is all wildcards, except a $77 at `bad_at` to make it the
+/// wrong disk; the descriptor says: ID $42, "TESTSAVE",
+/// load at WF_LOADED, $20 bytes, kind 0, from WF_SOURCE in CPU RAM, or from
+/// the PPU at $0000 if `ppu`.
+fn wf_prog(entry: u16, index: u8, read_back: bool, bad_at: Option<u8>, ppu: bool) -> Vec<u8> {
+    let mut p = Prog::default();
+    p.poke(0x2000, 0x00);
+    // $00-$0F painted, so cells a path leaves alone compare equal rather than
+    // comparing what each BIOS happened to leave there at boot.
+    p.raw(&[0xa2, 0x0f, 0xa9, 0xcc, 0x95, 0x00, 0xca, 0x10, 0xfb]);
+    p.raw(&[0xa9, 0xff, 0xa2, 0x09, 0x9d, 0x00, 0x05, 0xca, 0x10, 0xfa]); // template
+    p.raw(&[0xa2, WF_SIZE - 1, 0x8a, 0x49, 0x5a, 0x9d, 0x40, 0x05, 0xca, 0x10, 0xf7]); // data
+    if let Some(i) = bad_at {
+        p.poke(WF_TEMPLATE + i as u16, 0x77); // nothing on Zelda's side reads $77
+    }
+    let src = if ppu { 0x0000 } else { WF_SOURCE };
+    let mut desc = vec![WF_ID];
+    desc.extend_from_slice(b"TESTSAVE");
+    desc.extend_from_slice(&WF_LOADED.to_le_bytes());
+    desc.extend_from_slice(&[WF_SIZE, 0x00, 0x00]);
+    desc.extend_from_slice(&src.to_le_bytes());
+    desc.push(ppu as u8);
+    p.bytes_at(WF_DESC, &desc);
+    p.poke(0x05f0, WF_ID).poke(0x05f1, 0xff); // the file list $E1F8 reads back
+    p.lda(index);
+    p.jsr_with_args(entry, WF_TEMPLATE, WF_DESC);
+    if read_back {
+        p.jsr_with_args(0xe1f8, WF_TEMPLATE, 0x05f0);
+    }
+    p.record_and_halt();
+    assert!(p.0.len() < 0x100, "the caller has grown into its own answers");
+    p.0
+}
+
+/// Run a write under ours and, if present, the real BIOS, and require the
+/// registers, the zero page it works in and the WHOLE disk side to agree.
+fn wf_both(prog: &[u8]) -> Option<(Outcome, Vec<u8>, Vec<u8>, Vec<u8>)> {
+    let disk = a_disk()?;
+    let frames = 3000; // a write is about 650 frames of disk under the original
+    let (ours, mut nes) = run(&disk, &[], prog, frames);
+    let zp: Vec<u8> = (0x00..=0x0fu16).map(|a| nes.peek(a)).collect();
+    let loaded: Vec<u8> = (0..WF_SIZE as u16).map(|i| nes.peek(WF_LOADED + i)).collect();
+    let image = nes.dbg_fds_image(0).to_vec();
+    if let Some(real) = real_bios() {
+        let (theirs, mut their_nes) = run(&disk, &real, prog, frames);
+        assert!(theirs.reached, "the real BIOS never finished the test program");
+        assert_eq!(ours, theirs, "ours (left) disagrees with the real BIOS (right)");
+        let their_zp: Vec<u8> = (0x00..=0x0fu16).map(|a| their_nes.peek(a)).collect();
+        assert_eq!(zp, their_zp, "$00-$0F: ours (left) against the real BIOS (right)");
+        let theirs_img = their_nes.dbg_fds_image(0);
+        assert_eq!(image.len(), theirs_img.len());
+        let first = image.iter().zip(theirs_img).position(|(a, b)| a != b);
+        assert_eq!(first, None, "the disk images part company at this byte");
+    } else {
+        eprintln!("note: no dumps/fds/disksys.rom, so this is not held against the oracle");
+    }
+    Some((ours, zp, loaded, image))
+}
+
+#[test]
+fn write_file_at_e239_appends_a_file_that_loads_back_and_matches_the_real_bios() {
+    let Some((r, zp, loaded, _)) = wf_both(&wf_prog(0xe239, 0xff, true, None, false)) else {
+        return skipped();
+    };
+    assert!(r.reached, "the write or the load never returned");
+    assert_eq!(r.a, 0x00, "and the load found it");
+    assert_eq!(r.y, 0x01, "exactly one file loaded");
+    let want: Vec<u8> = (0..WF_SIZE).map(wf_byte).collect();
+    assert_eq!(loaded, want, "what $E239 wrote is what $E1F8 reads");
+    let _ = zp;
+}
+
+#[test]
+fn write_file_reports_success_and_leaves_its_working_set() {
+    let Some((r, zp, _, _)) = wf_both(&wf_prog(0xe239, 0xff, false, None, false)) else {
+        return skipped();
+    };
+    assert!(r.reached);
+    assert_eq!((r.a, r.x, r.y), (0x00, 0x00, 0x00));
+    assert_eq!(r.p & 0xc3, 0x42, "V and Z set, N and C clear");
+    assert_eq!(r.p & 0x04, 0x00, "and interrupts enabled on the way out");
+    assert_eq!(&zp[0..4], &[0x00, 0x05, 0x10, 0x05], "the two inline pointers");
+    assert_eq!([zp[0x05], zp[0x07], zp[0x08], zp[0x09]], [0x02, 0x04, 0x00, 0xff]);
+    assert_eq!([zp[0x0a], zp[0x0b]], [0x60, 0x05], "the source, one past its end");
+    assert_eq!([zp[0x0c], zp[0x0d], zp[0x0e]], [0xff, 0xff, 0xff], "and a as it came in");
+}
+
+#[test]
+fn e237_is_the_append_entry_whatever_a_says() {
+    // `lda #$FF` and fall into $E239: the same disk, whatever a is.
+    let Some((_, _, _, via_e237)) = wf_both(&wf_prog(0xe237, 0x00, false, None, false)) else {
+        return skipped();
+    };
+    let Some((_, _, _, via_e239)) = wf_both(&wf_prog(0xe239, 0xff, false, None, false)) else {
+        return skipped();
+    };
+    assert!(via_e237 == via_e239, "$E237 with a=0 should append exactly as $E239 with a=$FF");
+}
+
+#[test]
+fn write_file_at_an_index_hides_the_files_after_it() {
+    // Index 1: block 2 ends up saying two files, so whatever followed file 1
+    // is still on the medium but no longer counted.
+    let Some((r, _, _, image)) = wf_both(&wf_prog(0xe239, 0x01, false, None, false)) else {
+        return skipped();
+    };
+    assert_eq!(r.a, 0x00);
+    let count_at = image.windows(2).position(|w| w == [0x80, 0x02]).expect("block 2") + 2;
+    assert_eq!(image[count_at], 0x02, "the count is the index plus one");
+}
+
+#[test]
+fn write_file_from_ppu_memory_leaves_y_at_16() {
+    let Some((r, _, _, _)) = wf_both(&wf_prog(0xe239, 0xff, false, None, true)) else {
+        return skipped();
+    };
+    assert_eq!((r.a, r.y), (0x00, 0x10));
+}
+
+#[test]
+fn write_file_with_the_wrong_disk_writes_nothing() {
+    // The loader's codes, by template byte, and y says which byte. $08 holds
+    // the code in BINARY, which only shows at byte 9: $10 in a, $0A in $08.
+    let Some(disk) = a_disk() else { return skipped() };
+    let before = nes_core::Nes::from_fds_hle(&disk).unwrap().dbg_fds_image(0).to_vec();
+    for (at, code, binary) in [(0u8, 0x04u8, 0x04u8), (9, 0x10, 0x0a)] {
+        let Some((r, zp, _, image)) = wf_both(&wf_prog(0xe239, 0xff, false, Some(at), false))
+        else {
+            return skipped();
+        };
+        assert_eq!((r.a, r.x, r.y), (code, code, at), "template byte {at}");
+        assert_eq!(r.p & 0x41, 0x40, "V set, C clear");
+        assert_eq!([zp[0x05], zp[0x07], zp[0x08]], [0x00, 0x01, binary], "template byte {at}");
+        assert!(image == before, "and not a byte of the disk changed");
+    }
+}

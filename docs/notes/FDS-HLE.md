@@ -243,7 +243,7 @@ work as taking transfer interrupts in the loader.
 
 ### The routines
 
-Twenty-nine of the forty entry points are implemented. The other 11 are stubs that put
+Thirty-one of the forty entry points are implemented. The other 9 are stubs that put
 **NO ROUTINE** on the screen and stop, which is worth its 111 bytes: Zelda hands
 over correctly, runs its own code, jumps to `$EA84` and would otherwise
 disappear into the fill, looking like a hundred different bugs instead of one
@@ -280,6 +280,8 @@ missing routine. `fdstrace` names the address.
 | `$E9D3` | 3 | count zero-page timers down, the slow ones every tenth call | cycle-exact, including a walk that wraps the zero page |
 | `$E844` | 2 | fetch an inline pointer for the routine that called us | reaches past its own return address to its caller's. Cycle-exact, 64 |
 | `$E997` | 1 | a nametable address to pixel coordinates | cycle-exact, 49; found behind `$E844` on Knight Move |
+| `$E239` | 2 | write a file at an index, then verify it | disk image byte-identical to the original's; about 4M cycles faster |
+| `$E237` | 1 | the same, appending: `lda #$FF` into `$E239` | 2 bytes; the stub here used to be `lda #0` and was wrong |
 
 **Where the cycle counts do not match, ours is faster, never slower.** That is
 deliberate. A game that runs one of these inside vblank has more room than it
@@ -436,6 +438,34 @@ and 26.
 
 **109 of the 114 now reach their own code.** 5 are still stopped.
 
+Then `$E239` and `$E237`, the disk writer, which is how a game saves. Measured by
+a helper session diffing the disk image across each call, and the measuring
+found two defects in the DRIVE before it found anything about the BIOS: a side
+ended at its last block, so a save that appends a file ran the head off the end
+and hung the real BIOS as surely as ours, and a written block got one CRC byte
+where every other block has two. Both are fixed in `fds.rs`, and Hao-kun no
+Fushigi na Tabi saves under the real BIOS now, which it never did here before.
+
+The writer itself is held to the original by the disk image, not just the
+registers: written blocks have to land on the same bytes of the medium. That
+took one non-obvious step. The original reads one CRC byte in CRC mode, but it
+leaves its IRQ handler slowly enough that the drive has delivered the second by
+the time the transfer stops, so ours reads both or every block it writes lands a
+byte early. Across both callers, three indices, append, a PPU source, three
+forced ID errors and a forced verify failure, every register, every zero page
+byte, `$FA`, `$FE`, `$0101` and the whole side came out identical.
+
+The read-back test caught a loader bug in passing: `$E1F8` left `$0A/$0B` at the
+start of the last file it loaded, where the original leaves it one past the end.
+
+| entry | titles stuck on it now |
+|---|---|
+| `$E32A` | **1** |
+| `$E305` | **1** |
+| `$E3E7` | **1** |
+
+**111 of the 114 now reach their own code.** 3 are still stopped, one each.
+
 Ninety-nine is NOT "ninety-nine titles play correctly": thirty seconds of
 unattended running reaches what it reaches, and a game that needs a routine
 only when you open its menu has not asked yet.
@@ -471,7 +501,7 @@ the next person to find out.
 2. ~~Baseline smoke on the real BIOS, one ledger row per title.~~ The census
    rows and `fds-hle-check.py` are this.
 3. ~~HLE boot with our own graphics and no BIOS file present.~~ Done 2026-09-29.
-4. Routine by routine, each held against the real BIOS. Twenty-nine of forty
+4. Routine by routine, each held against the real BIOS. Thirty-one of forty
    done. The queue by BLOCKING is now a tail of twos and ones. See
    [`FDS-ROUTINES-PENDING.md`](FDS-ROUTINES-PENDING.md), which records why
    Kaettekita Mario Bros. jams, what `$EC22` has to do with it, and why a flag

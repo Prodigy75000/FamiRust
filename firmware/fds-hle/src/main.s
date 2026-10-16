@@ -538,11 +538,9 @@ vint_wait:
                             ; landing mid-wait resumes the spin correctly
 .assert @spin == $E1C5
 .org $E237
-  lda #0                    ; $E237 and $E239 are two apart, so this
-                            ; one falls into the stub below rather
-                            ; than having room for its own jmp
+  lda #$FF                  ; $E237: append. Two bytes, then $E239
 .org $E239
-  jmp unimplemented
+  jmp write_file            ; the body is at $F6E0
 .org $E305
   jmp unimplemented
 .org $E32A
@@ -3358,6 +3356,11 @@ lf_wanted:
   rts
 
 ; ---- move LF_CNT bytes into program RAM at LF_DST -------------------------
+;
+; LF_DST itself walks, and ends one past the last byte: measured on a file of
+; $20 loaded at $0580, which left $0A/$0B at $05A0 under the original. Walking
+; with y instead left it at the start, which nothing tested until the writer's
+; read-back did.
 lf_to_ram:
   ldy #0
 @loop:
@@ -3367,7 +3370,7 @@ lf_to_ram:
   jsr read_byte
   bcs @io
   sta (LF_DST),y
-  iny
+  inc LF_DST
   bne @nowrap
   inc LF_DST+1
 @nowrap:
@@ -3448,10 +3451,645 @@ lf_discard:
 lf_magic:
   .byte $2A, $4E, $49, $4E, $54, $45, $4E, $44, $4F, $2D, $48, $56, $43, $2A
 
-; Error codes by which template byte failed, in BCD. Byte 9 giving $10 rather
-; than $0A is what proves they are BCD at all.
+; lf_iderr, the disk-ID error codes, lives below $F600 with the writer's
+; read-back: this block is full to the byte.
+
+.org $F6E0
+; ===========================================================================
+; $E239 / $E237: write a file to the disk
+; ===========================================================================
+;
+; 3 of the 114 corpus titles save through these: Dandy and Hao-kun no Fushigi
+; na Tabi call $E239, Suishou no Dragon calls $E237. Measured black-box, with
+; the disk image diffed before and after, by a helper session on 2026-10-16.
+;
+; Two little-endian words sit inline after the jsr, as for $E1F8, and the
+; return address is stepped over them:
+;
+;   first   a 10-byte disk-ID template, compared against block-1 bytes
+;           $0F-$18 with $FF as a per-byte wildcard: the loader's check, its
+;           error table and its single retry exactly
+;   second  a 17-byte file descriptor: ID, name[8], load address, size, type,
+;           source address, source type (0 CPU RAM, anything else PPU)
+;
+;   a       the file index to write at. $FF means append: use the side's own
+;           file count. $E237 is `lda #$FF` and falls into $E239, which is what
+;           makes it the append entry: measured identical but for 2 cycles.
+;
+; Pass one reads block 1, then either rewrites block 2 with the count set to
+; the index or, appending, reads the count, walks that many files, and writes
+; the new header (03, index, then descriptor bytes 0-13) and data (04, then the
+; bytes from the source). Pass two spins the disk again, rewrites the count as
+; index + 1, walks back to the new file and compares it with the descriptor and
+; the source. Files past the new one stay on the medium, hidden by the count.
+; A verify that fails is retried once, and a second failure rolls the count
+; back to the index and returns $26.
+;
+; Every block read finishes with the CRC byte, in CRC mode, as the original
+; does. That is not ceremony: it leaves the head where the original leaves it,
+; so the blocks we write land on the same bytes of the medium as the
+; original's, and a test can hold the two images equal.
+;
+; Out: a = x = $00 and y = $00 on success ($10 for a PPU source), with V and Z
+; set, C and N clear, and interrupts enabled. Errors: $01 no disk and $03 write
+; protected, both before the motor moves and with y = a; $02 a flat battery,
+; carry set; the loader's ID codes $04-$10 with y = the template byte that
+; failed; $26 a verify failure. $4025 is left at $27 with the caller's
+; mirroring, and $0101 as it was found.
+;
+; Polls where the original takes the byte IRQ, for the same reason and with
+; the same caveat as $E1F8.
+
+WF_RET    = $05           ; 2: the caller's return address, while parsing
+WF_IDX    = $06           ; the index being written
+WF_BLK    = $07           ; the block in hand; ends $04
+WF_LEFT   = $08           ; files left to walk; ends $00
+WF_TMP    = $09           ; a $4025 value being built; ends $FF
+WF_SRC    = $0A           ; 2: the data source; ends past its end
+WF_CNT    = $0C           ; 2: bytes left; ends $FFFF
+WF_ARG    = $0E           ; a, as it came in
+WF_ERR_VERIFY = $26
+
+write_file:
+  sta WF_ARG
+  tsx
+  dex
+  dex
+  dex
+  stx LF_FRAME
+  pla                       ; the two inline words, and the return past them
+  sta WF_RET
+  pla
+  sta WF_RET+1
+  ldy #1
+  lda (WF_RET),y
+  sta LF_P1
+  iny
+  lda (WF_RET),y
+  sta LF_P1+1
+  iny
+  lda (WF_RET),y
+  sta LF_P2
+  iny
+  lda (WF_RET),y
+  sta LF_P2+1
+  lda WF_RET
+  clc
+  adc #4
+  tax
+  lda WF_RET+1
+  adc #0
+  pha
+  txa
+  pha
+  lda $0101
+  pha
+  lda WF_TMP                ; $09, which the disk-ID check borrows and the
+  pha                       ; original's never touches: put back on that exit
+
+  ; ---- the drive, before the motor moves ----
+  lda FDS_DRIVE
+  lsr a                     ; bit 0: no disk
+  bcc @disk
+  lda #$01
+  jmp wf_early
+@disk:
+  lsr a
+  lsr a                     ; bit 2: write protected
+  bcc @writable
+  lda #$03
+  jmp wf_early
+@writable:
+  jsr lf_spin
+  lda FDS_BATT
+  bmi @battery_ok
+  lda #$02
+  jmp wf_battery
+@battery_ok:
+
+  ; ---- pass one: find the place and write the file ----
+  lda #0
+  sta LF_K05                ; the disk-ID retry, as the loader's
+@attempt:
+  jsr lf_info
+  bcc @id_ok
+  ldy LF_K05
+  bne @id_fail
+  inc LF_K05
+  jsr lf_spin
+  jmp @attempt
+@id_fail:
+  txa                       ; the template byte that failed
+  tay
+  lda lf_iderr,x
+  jmp wf_id_exit
+@id_ok:
+  jsr wf_crc
+  lda WF_ARG
+  cmp #$FF
+  beq @append
+  sta WF_IDX
+  jsr wf_put_count          ; the count becomes the index, for now
+  jmp @walk
+@append:
+  jsr wf_get_count
+  bcs @io
+  sta WF_IDX
+@walk:
+  jsr wf_walk
+  bcs @io
+  jsr wf_put_header
+  jsr wf_put_data
+
+  ; ---- pass two: count it in and read it back ----
+  lda #$02
+  pha                       ; two goes at the verify
+@verify:
+  jsr lf_spin
+  jsr lf_info
+  bcs @verify_io
+  jsr wf_crc
+  lda WF_IDX
+  clc
+  adc #1
+  jsr wf_put_count_a
+  jsr wf_walk
+  bcs @verify_io
+  jsr wf_check_header
+  bcs @mismatch
+  jsr wf_check_data
+  bcs @mismatch
+  pla
+  ldx #16                   ; the source type
+  jsr wf_desc
+  ldy #$00
+  cmp #$00
+  beq @ram
+  ldy #$10                  ; measured: a PPU source leaves y at $10
+@ram:
+  lda #$00
+  jmp wf_exit
+@mismatch:
+  pla
+  sec
+  sbc #1
+  pha
+  bne @verify
+  pla
+  jsr lf_spin               ; give up: the count goes back to the index
+  jsr lf_info
+  jsr wf_crc
+  jsr wf_put_count
+  lda #WF_ERR_VERIFY
+  ldy #$00
+  jmp wf_verify_exit
+@verify_io:
+  pla
+@io:
+  lda #LF_ERR_IO
+  ldy #$00
+  ; fall through
+
+; ---- the epilogue for anything that moved the motor ------------------------
+; In: a = status, y = what y returns. Out: a = x = status, V set, C clear.
+wf_exit:
+  tax
+  pla                       ; $09 as found: not wanted on this exit
+  pla
+  sta $0101
+  lda LF_SHADOW
+  and #$08
+  ora #$27
+  sta LF_SHADOW
+  sta FDS_CTRL
+  lda #$02
+  sta LF_K05
+  lda #$FF
+  sta WF_TMP
+  sta WF_CNT
+  sta WF_CNT+1
+  cli
+  bit lf_vflag
+  clc
+  txa
+  rts
+
+; ---- the file would not read back --------------------------------------------
+; As the success exit but for two measured differences: $05 holds the code,
+; and $0A-$0D are left where the failed compare stopped, pointing at the byte
+; that differed with the count already past it.
+wf_verify_exit:
+  tax
+  pla
+  pla
+  sta $0101
+  lda LF_SHADOW
+  and #$08
+  ora #$27
+  sta LF_SHADOW
+  sta FDS_CTRL
+  stx LF_K05
+  lda #$FF
+  sta WF_TMP
+  cli
+  bit lf_vflag
+  clc
+  txa
+  rts
+
+; ---- the disk is not the one the caller named ------------------------------
+; Measured against the success exit: $05 goes to $00 rather than $02, $08
+; holds the code in BINARY ($0A where a says $10), and $09 and $0C/$0D are left
+; as found. a = x = the BCD code, y = the template byte that failed.
+wf_id_exit:
+  tax
+  cmp #$10
+  bne @binary
+  lda #$0A
+@binary:
+  sta WF_LEFT
+  pla
+  sta WF_TMP
+  pla
+  sta $0101
+  lda LF_SHADOW
+  and #$08
+  ora #$27
+  sta LF_SHADOW
+  sta FDS_CTRL
+  lda #$00
+  sta LF_K05
+  cli
+  bit lf_vflag
+  clc
+  txa
+  rts
+
+; ---- before the motor: no disk, or protected. V passes through -------------
+wf_early:
+  tax
+  ldy WF_ARG
+  pla
+  pla
+  sta $0101
+  cli
+  clc
+  txa
+  rts
+
+; ---- a flat battery: carry set, V passes through ---------------------------
+wf_battery:
+  tax
+  ldy #$00
+  pla
+  pla
+  sta $0101
+  cli
+  sec
+  txa
+  rts
+
+write_file_end:
+.assert write_file_end <= $F900
+
+; The writer's block primitives, in the free run below $F200.
+.org $F080
+; ---------------------------------------------------------------------------
+; Blocks
+; ---------------------------------------------------------------------------
+
+; Build a $4025 value: a without its mirroring, plus the caller's.
+wf_ctrl:
+  sta WF_TMP
+  lda LF_SHADOW
+  and #$08
+  ora WF_TMP
+  sta FDS_CTRL
+  rts
+
+; Finish a block read with its CRC, in CRC mode, then stop the transfer. BOTH
+; bytes: the original reads one under its IRQ, but it is slow enough leaving
+; the handler that the drive has delivered the second by the time the transfer
+; stops, and a write that follows starts on the gap after the CRC, not on its
+; second byte. Reading one left every block we wrote a byte early.
+wf_crc:
+  lda #$75
+  jsr wf_ctrl
+  jsr read_byte
+  jsr read_byte
+  lda #$25
+  jmp wf_ctrl
+
+; Read block 2 and return the count in a, carry set on a bad read.
+wf_get_count:
+  lda #$02
+  sta WF_BLK
+  jsr lf_next
+  jsr read_byte
+  bcs @out
+  jsr read_byte
+  bcs @out
+  pha
+  jsr wf_crc
+  pla
+  clc
+@out:
+  rts
+
+; Walk WF_IDX files: each header for its size, then the body read and thrown
+; away. Carry set on a bad read.
+wf_walk:
+  lda WF_IDX
+  sta WF_LEFT
+@file:
+  lda WF_LEFT
+  beq @done
+  dec WF_LEFT
+  lda #$03
+  sta WF_BLK
+  jsr lf_next
+  ldy #0
+@hdr:
+  jsr read_byte
+  bcs @out
+  cpy #13
+  bne @not_lo
+  sta WF_CNT
+@not_lo:
+  cpy #14
+  bne @not_hi
+  sta WF_CNT+1
+@not_hi:
+  iny
+  cpy #16
+  bne @hdr
+  jsr wf_crc
+  lda #$04
+  sta WF_BLK
+  jsr lf_next
+  jsr read_byte
+  bcs @out
+  jsr lf_discard
+  bcs @out
+  jsr wf_crc
+  jmp @file
+@done:
+  clc
+@out:
+  rts
+
+; Open a block for writing. The first byte out is the $00 already in the
+; register, which is the gap ahead of the start mark.
+wf_open:
+  sta WF_BLK
+  lda #$00
+  sta FDS_WRITE
+  lda #$21
+  jsr wf_ctrl
+  lda #$61
+  jsr wf_ctrl
+  lda #$80                  ; the start mark
+  jsr wf_put
+  lda WF_BLK                ; and the block type
+  ; fall through
+
+; Hand the drive one byte, once it has taken the last.
+wf_put:
+  pha
+@wait:
+  lda FDS_STATUS
+  and #$42
+  beq @wait
+  pla
+  sta FDS_WRITE
+  rts
+
+; Close a written block: a is the byte the original leaves in the register,
+; then CRC mode writes the two CRC bytes, then the transfer stops.
+wf_close:
+  jsr wf_put
+  lda #$71
+  jsr wf_ctrl
+@wait:
+  lda FDS_STATUS
+  and #$42
+  beq @wait
+  lda FDS_DRIVE
+  lda #$25
+  jmp wf_ctrl
+
+; Block 2 with the count set to the index, or to a.
+wf_put_count:
+  lda WF_IDX
+wf_put_count_a:
+  pha
+  lda #$02
+  jsr wf_open
+  pla
+  jsr wf_put
+  lda #$00
+  jmp wf_close
+
+; Descriptor byte x, in a, Z set if it is zero. Uses y.
+wf_desc:
+  txa
+  tay
+  lda (LF_P2),y
+  rts
+
+; Block 3: 03, the index as the file number, then descriptor bytes 0-13.
+wf_put_header:
+  lda #$03
+  jsr wf_open
+  lda WF_IDX
+  jsr wf_put
+  ldx #0
+@byte:
+  jsr wf_desc
+  jsr wf_put
+  inx
+  cpx #14
+  bne @byte
+  lda #$00
+  jmp wf_close
+
+; Point WF_SRC and WF_CNT at the data, and the PPU at it if that is where it
+; lives. Z clear on return for a PPU source.
+wf_source:
+  ldx #11
+  jsr wf_desc
+  sta WF_CNT
+  inx
+  jsr wf_desc
+  sta WF_CNT+1
+  ldx #14
+  jsr wf_desc
+  sta WF_SRC
+  inx
+  jsr wf_desc
+  sta WF_SRC+1
+  inx
+  jsr wf_desc
+  beq @ram
+  lda LF_MASK               ; screen off, as for a PPU file loaded
+  and #%11100111
+  sta LF_MASK
+  sta PPUMASK
+  bit PPUSTATUS
+  lda WF_SRC+1
+  sta PPUADDR
+  lda WF_SRC
+  sta PPUADDR
+  lda PPUDATA               ; the read buffer's stale byte
+  lda #$01
+@ram:
+  rts
+
+; Count one byte off WF_CNT. Z set when it was the last.
+wf_count:
+  lda WF_CNT
+  bne @lo
+  dec WF_CNT+1
+@lo:
+  dec WF_CNT
+  lda WF_CNT
+  ora WF_CNT+1
+  rts
+
+; Block 4: 04, then the data.
+;
+; The loop is kept short on purpose, about 40 cycles a byte against a byte
+; period of 149. Reading $4030 to see the drive is ready also clears the flag,
+; so if the drive's next period lands between that read and the store to
+; $4024 it writes the previous byte again. That only happens to a loop slow
+; enough to arrive at the poll late, and an earlier version, calling through a
+; descriptor lookup per byte, was: it doubled five bytes in seventy-two.
+wf_put_data:
+  jsr wf_source
+  lda #$04
+  jsr wf_open
+  ldx #16
+  jsr wf_desc               ; the source type, once
+  bne @ppu
+@ram:
+  lda WF_CNT
+  ora WF_CNT+1
+  beq @end
+  ldy #0
+  lda (WF_SRC),y
+  inc WF_SRC
+  bne @ram_put
+  inc WF_SRC+1
+@ram_put:
+  jsr wf_put
+  jsr wf_count
+  jmp @ram
+@ppu:
+  lda WF_CNT
+  ora WF_CNT+1
+  beq @end
+  lda PPUDATA
+  jsr wf_put
+  jsr wf_count
+  jmp @ppu
+@end:
+  lda #$FF
+  jmp wf_close
+
+wf_blocks_end:
+.assert wf_blocks_end <= $F200
+
+; And the read-back, below $F600.
+.org $F4B0
+; Read back the header and compare it. Carry set on a difference.
+wf_check_header:
+  lda #$03
+  sta WF_BLK
+  jsr lf_next
+  jsr read_byte
+  bcs @bad
+  cmp #$03
+  bne @bad
+  jsr read_byte
+  bcs @bad
+  cmp WF_IDX
+  bne @bad
+  ldx #0
+@byte:
+  jsr read_byte
+  bcs @bad
+  sta WF_TMP
+  jsr wf_desc
+  cmp WF_TMP
+  bne @bad
+  inx
+  cpx #14
+  bne @byte
+  jsr wf_crc
+  clc
+  rts
+@bad:
+  sec
+  rts
+
+; Read back the data and compare it with the source. Carry set on a difference.
+wf_check_data:
+  jsr wf_source
+  lda #$04
+  sta WF_BLK
+  jsr lf_next
+  jsr read_byte
+  bcs @bad
+  cmp #$04
+  bne @bad
+; The order is measured: a mismatch on the first byte of $48 left the count
+; at $47 and the source pointer still ON the byte, so the count goes down
+; before the compare and the pointer moves on only after it agrees.
+; Short for the same reason as the write: a late poll can lose a byte.
+  ldx #16
+  jsr wf_desc
+  bne @ppu
+@byte:
+  lda WF_CNT
+  ora WF_CNT+1
+  beq @end
+  jsr read_byte
+  bcs @bad
+  sta WF_TMP
+  jsr wf_count
+  ldy #0
+  lda (WF_SRC),y
+  cmp WF_TMP
+  bne @bad
+  inc WF_SRC
+  bne @byte
+  inc WF_SRC+1
+  jmp @byte
+@ppu:
+  lda WF_CNT
+  ora WF_CNT+1
+  beq @end
+  jsr read_byte
+  bcs @bad
+  sta WF_TMP
+  jsr wf_count
+  lda PPUDATA
+  cmp WF_TMP
+  bne @bad
+  jmp @ppu
+@end:
+  jsr wf_crc
+  clc
+  rts
+@bad:
+  sec
+  rts
+; Error codes by which template byte failed, in BCD, for the loader and the
+; writer alike. Byte 9 giving $10 rather than $0A is what proves they are BCD.
 lf_iderr:
   .byte $04, $05, $05, $05, $05, $06, $07, $08, $09, $10
+wf_checks_end:
+.assert wf_checks_end <= $F600
 
 ; ===========================================================================
 ; Vectors
