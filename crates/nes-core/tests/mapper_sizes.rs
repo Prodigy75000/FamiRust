@@ -21,7 +21,9 @@ fn rom(mapper: u16, prg_16k: usize, chr_8k: usize, seed: u32) -> Vec<u8> {
     v.push(((mapper & 0x0f) << 4) as u8);
     v.push((mapper & 0xf0) as u8);
     v.resize(16, 0);
-    let mut x = seed.wrapping_mul(2_654_435_761).wrapping_add(mapper as u32 + 1);
+    let mut x = seed
+        .wrapping_mul(2_654_435_761)
+        .wrapping_add(mapper as u32 + 1);
     for _ in 0..(prg_16k * 16384 + chr_8k * 8192) {
         x ^= x << 13;
         x ^= x >> 17;
@@ -59,5 +61,9 @@ fn no_mapper_panics_on_a_rom_of_an_odd_size() {
     }
     // The core has to have accepted something, or this test checks nothing.
     assert!(accepted > 100, "only {accepted} images loaded");
-    assert!(failures.is_empty(), "panicked:\n  {}", failures.join("\n  "));
+    assert!(
+        failures.is_empty(),
+        "panicked:\n  {}",
+        failures.join("\n  ")
+    );
 }
