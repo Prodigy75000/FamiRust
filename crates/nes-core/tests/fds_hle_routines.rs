@@ -513,6 +513,41 @@ fn the_real_bios_refuses_a_disk_without_the_licence_file_and_ours_does_not() {
 }
 
 #[test]
+fn set_scroll_entered_at_eaed_skips_only_the_status_read() {
+    // Two titles call $EAED, three bytes in, having reset the PPU write latch
+    // themselves. Leave the latch half way through a pair: $EAEA's status read
+    // would reset it, $EAED must not, so the scroll the PPU ends up with
+    // differs between the two entries, and ours has to match the real one.
+    let prog = |entry: u16| {
+        let mut p = Prog::default();
+        p.poke(0x00fd, 0x11).poke(0x00fc, 0x22).poke(0x00ff, 0x14);
+        p.raw(&[0xad, 0x02, 0x20, 0xa9, 0x00, 0x8d, 0x05, 0x20]); // reset, one write
+        p.ldx(0x77).ldy(0x88).jsr(entry).record_and_halt();
+        p.0
+    };
+    // The scroll the PPU holds: t and fine X. The rest of the debug line is
+    // each BIOS's own boot screen, which differs by design.
+    let scroll = |nes: &nes_core::Nes| {
+        let s = nes.dbg_ppu_scroll();
+        let t = s.split_whitespace().find(|w| w.starts_with("t=")).unwrap().to_string();
+        let f = s.split_whitespace().find(|w| w.starts_with("fineX=")).unwrap().to_string();
+        (t, f)
+    };
+    let Some(disk) = a_disk() else { return skipped() };
+    let (r, mut ours) = run(&disk, &[], &prog(0xeaed), 60);
+    assert!(r.reached);
+    assert_eq!((r.a, r.x, r.y), (0x14, 0x77, 0x88));
+    assert_eq!(ours.peek(0x00ff), 0x14, "the shadow is read, never written");
+    let (_, whole) = run(&disk, &[], &prog(0xeaea), 60);
+    assert_ne!(scroll(&ours), scroll(&whole), "the latch made no difference");
+    if let Some(real) = real_bios() {
+        let (theirs, real_nes) = run(&disk, &real, &prog(0xeaed), 60);
+        assert_eq!(r, theirs);
+        assert_eq!(scroll(&ours), scroll(&real_nes));
+    }
+}
+
+#[test]
 fn set_scroll_at_eaea_matches_the_real_bios() {
     // $EAEA, 32 of 114 titles. $FD and $FC are the horizontal and vertical
     // scroll shadows and $FF the PPUCTRL shadow; the routine pushes all three
@@ -1225,10 +1260,11 @@ fn the_plain_pad_read_still_works_after_sharing_its_read_pass() {
 /// than a loop over a transform. Any one of the five is indistinguishable
 /// from a routine that stores a constant until you run it twice from two
 /// different shadows, and the real BIOS was run twice from both.
-const MASK_FAMILY: [(u16, u8, u8, &str); 5] = [
+const MASK_FAMILY: [(u16, u8, u8, &str); 6] = [
     (0xe161, 0x00, 0xe7, "screen off"),
     (0xe16b, 0x18, 0xff, "screen on"),
     (0xe171, 0x00, 0xef, "sprites off"),
+    (0xe178, 0x10, 0xff, "sprites on"),
     (0xe17e, 0x00, 0xf7, "background off"),
     (0xe185, 0x08, 0xff, "background on"),
 ];

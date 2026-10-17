@@ -463,6 +463,13 @@ mask_off_end:
 .org $E171
   lda #%11101111            ; sprites off
   jmp mask_and
+; $E178, sprites on: seven titles, among them Cocona World and Santa Claus no
+; Takarabako, which call it after every metasprite draw. Six bytes between its
+; neighbours, five used. Like the other four it reads $FE on cycle 8 where the
+; original reads it on cycle 3; values and every write cycle agree.
+.org $E178
+  lda #%00010000
+  jmp mask_or
 .org $E17E
   lda #%11110111            ; background off
   jmp mask_and
@@ -2057,6 +2064,10 @@ read_pads:
 .org $EAEA
 set_scroll:
   lda PPUSTATUS             ; reset the write latch; the value is not used
+set_scroll_latched:
+  ; $EAED: the same without the status read, for a caller that has reset the
+  ; latch itself. Bodycon Quest I and Fruits Mahjong call it from their NMIs.
+.assert set_scroll_latched == $EAED
   lda $FD
   sta PPUSCROLL             ; first write is X
   lda $FC
