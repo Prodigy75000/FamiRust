@@ -350,6 +350,12 @@ fn main() -> ExitCode {
     let mut win_inside = 0u64;
     let mut win_outside = 0u64;
     let mut win_start = 0u64;
+    // Instructions inside a $E1B2 stay, and the game's $4032 reads at the
+    // window's start: a vblank wait is a prompt only if the game is also
+    // watching the drive.
+    let mut win_vint = 0u64;
+    let mut win_polls = nes.dbg_game_status_reads();
+    let mut win_bytes = nes.dbg_bytes_read();
     let mut swaps = 0u32;
     let mut side = 0usize;
 
@@ -393,7 +399,7 @@ fn main() -> ExitCode {
             // under them mid-game. A SET SIDE wait inside a load call still
             // counts, since that stay was entered through the load.
             if matches!(stay, Some(((_, 0xe1b2), _))) {
-                win_outside += 1;
+                win_vint += 1;
             } else {
                 win_inside += 1;
             }
@@ -409,8 +415,23 @@ fn main() -> ExitCode {
             // "no game code" is what a load in progress looks like, not a
             // prompt, and swapping discards the load.
             let booted = ins_outside > 0;
-            if autoswap && booted && sides > 1 && swaps < MAX_SWAPS && stalled(win_inside, win_outside)
-            {
+            // Stalled three ways: the BIOS is stuck on its own (a SET SIDE
+            // inside a load call); the game waits on vblank while polling the
+            // drive (Deep Dungeon); or the game spins on the drive status in a
+            // loop of its own (Cocona World's `lda $4032 / and #1 / beq`, which
+            // reads it about a million times a window, where a game checking
+            // for an eject once a frame reads it a few hundred).
+            let polls = nes.dbg_game_status_reads() - win_polls;
+            // And never while the drive is delivering: a load reads the disk
+            // and a prompt does not, so a window with a load in it is a load,
+            // however much it looks like waiting. Turning the disk under
+            // Metroid's boot write was this.
+            let loading = nes.dbg_bytes_read() - win_bytes > 256;
+            let prompt = !loading
+                && (stalled(win_inside, win_outside + win_vint)
+                    || (polls > 0 && stalled(win_inside + win_vint, win_outside))
+                    || polls > 100_000);
+            if autoswap && booted && sides > 1 && swaps < MAX_SWAPS && prompt {
                 side = (side + 1) % sides;
                 nes.fds_insert_side(side);
                 swaps += 1;
@@ -418,6 +439,9 @@ fn main() -> ExitCode {
             win_start = frame;
             win_inside = 0;
             win_outside = 0;
+            win_vint = 0;
+            win_polls = nes.dbg_game_status_reads();
+            win_bytes = nes.dbg_bytes_read();
         }
 
         let dw_before = nes.dbg_diskreg_writes();

@@ -317,6 +317,19 @@ pub trait Mapper: SaveState {
         0
     }
 
+    /// Debug: reads of the drive status ($4032) made from outside the BIOS,
+    /// as told by `dbg_census_ctx`. A game that polls it is waiting on the
+    /// disk itself, which is how a tracer tells a SET SIDE prompt in game code
+    /// from a game that is only waiting for vblank. Default zero.
+    fn dbg_game_status_reads(&self) -> u64 {
+        0
+    }
+
+    /// Debug: bytes the drive has delivered so far. Default zero.
+    fn dbg_bytes_read(&self) -> u64 {
+        0
+    }
+
     /// Pattern memory when the mapper owns it as RAM, for comparing two boots
     /// byte for byte. CPU-space RAM can be read through `peek`; this cannot,
     /// because it lives in PPU space. Empty for a CHR-ROM cartridge.

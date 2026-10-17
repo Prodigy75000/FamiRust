@@ -782,6 +782,8 @@ pub struct Fds {
     /// Which bank the next BIOS read lands in. Set per instruction by the
     /// tracer, which is the only thing that knows the PC.
     dbg_bios_ctx: usize,
+    /// $4032 reads made while `dbg_bios_ctx` said outside the BIOS.
+    dbg_game_status_reads: u64,
     /// Writes to the disk-control registers ($4024/$4025). Counted so a tracer
     /// can tell a game that leaves loading to the BIOS from one that drives the
     /// drive itself, because the second kind keeps the hardware path
@@ -846,6 +848,7 @@ impl Fds {
             dbg_first_bytes: 0,
             dbg_bios_reads: Vec::new(),
             dbg_bios_ctx: 0,
+            dbg_game_status_reads: 0,
             dbg_diskreg_writes: 0,
         }
     }
@@ -1163,6 +1166,9 @@ impl Fds {
                     s |= 0x02; // bit1: drive not ready (active low)
                 }
                 // bit2 write-protect (active low): our disks are writable = clear.
+                if self.dbg_bios_ctx == 1 {
+                    self.dbg_game_status_reads += 1;
+                }
                 if s != self.dbg_last_4032 {
                     self.dbg_last_4032 = s;
                     self.trace(format_args!("$4032 drive -> ${s:02x}"));
@@ -1330,6 +1336,14 @@ impl crate::cart::Mapper for Fds {
 
     fn dbg_diskreg_writes(&self) -> u64 {
         self.dbg_diskreg_writes
+    }
+
+    fn dbg_game_status_reads(&self) -> u64 {
+        self.dbg_game_status_reads
+    }
+
+    fn dbg_bytes_read(&self) -> u64 {
+        self.dbg_bytes_read
     }
 
     fn dbg_chr_ram(&self) -> &[u8] {

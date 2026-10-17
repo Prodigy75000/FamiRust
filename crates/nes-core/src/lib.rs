@@ -208,6 +208,17 @@ impl Nes {
         self.bus.mapper.dbg_census_reads()
     }
 
+    /// Debug: $4032 reads so far made from game code. See
+    /// [`cart::Mapper::dbg_game_status_reads`].
+    pub fn dbg_game_status_reads(&self) -> u64 {
+        self.bus.mapper.dbg_game_status_reads()
+    }
+
+    /// Debug: bytes the FDS drive has delivered so far.
+    pub fn dbg_bytes_read(&self) -> u64 {
+        self.bus.mapper.dbg_bytes_read()
+    }
+
     /// Debug: writes so far to the FDS disk-control registers ($4024/$4025).
     pub fn dbg_diskreg_writes(&self) -> u64 {
         self.bus.mapper.dbg_diskreg_writes()
