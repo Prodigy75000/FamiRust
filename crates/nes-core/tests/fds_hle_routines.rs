@@ -4744,13 +4744,18 @@ fn queue_from_zero_page_at_e8db_matches_the_real_bios() {
 
 /// [`sc_prog`] for `$E2BB`: same entry, same template, a is the operand.
 fn ac_prog(a: u8, bad_at: Option<u8>) -> Vec<u8> {
+    count_prog(0xe2bb, a, bad_at)
+}
+
+/// [`sc_prog`] calling `entry` in place of `$E305`: the family shares it.
+fn count_prog(entry: u16, a: u8, bad_at: Option<u8>) -> Vec<u8> {
     let mut p = sc_prog(a, 0, bad_at);
     let at = p
         .windows(3)
         .position(|w| w == [0x20, 0x05, 0xe3])
         .expect("the jsr $E305 in sc_prog");
-    p[at + 1] = 0xbb;
-    p[at + 2] = 0xe2;
+    p[at + 1] = entry as u8;
+    p[at + 2] = (entry >> 8) as u8;
     p
 }
 
@@ -4796,4 +4801,49 @@ fn adjust_count_with_no_disk_returns_before_the_motor() {
     assert_eq!(r.a, 0x01);
     assert_eq!(r.y, 0x3c, "y is $0E as found");
     assert_eq!(zp[9], 0, "$09 is cleared even here");
+}
+
+#[test]
+fn set_count_plus_one_at_e301_writes_a_plus_one() {
+    // $E301, 32 disks' save code: $E305 with one more than its operand.
+    let Some(disk) = a_disk() else { return skipped() };
+    let before = boot_to_handover(&disk, &[]).dbg_fds_image(0).to_vec();
+    let Some((r, zp, after)) = sc_both(&count_prog(0xe301, 0x04, None), false) else {
+        return skipped();
+    };
+    assert_eq!((r.a, r.x, r.y), (0, 0, 0), "success");
+    let changed: Vec<usize> = (0..before.len()).filter(|&i| before[i] != after[i]).collect();
+    assert!(!changed.is_empty(), "block 2 rewritten");
+    assert_eq!(after[changed[0]], 0x05, "the count is a + 1");
+    assert_eq!(zp[6], 0x05);
+}
+
+#[test]
+fn set_count_plus_one_with_no_disk_marks_seven() {
+    // The one exit that tells $E301 from $E305 without a disk: $07 = 1.
+    let Some((r, zp, _)) = sc_both(&count_prog(0xe301, 0x04, None), true) else {
+        return skipped();
+    };
+    assert_eq!(r.a, 0x01);
+    assert_eq!(zp[7], 0x01);
+}
+
+#[test]
+fn truncate_count_at_e2b7_sets_the_operand_and_refuses_to_grow() {
+    // $E2B7: the count becomes a, but only if a is not more than it was.
+    let Some(disk) = a_disk() else { return skipped() };
+    let before = boot_to_handover(&disk, &[]).dbg_fds_image(0).to_vec();
+    let Some((r, zp, after)) = sc_both(&count_prog(0xe2b7, 0x01, None), false) else {
+        return skipped();
+    };
+    assert_eq!((r.a, r.x, r.y), (0, 0, 0), "success");
+    assert_eq!(zp[9], 0xff, "$09 ends $FF");
+    let changed: Vec<usize> = (0..before.len()).filter(|&i| before[i] != after[i]).collect();
+    assert!(!changed.is_empty());
+    assert_eq!(after[changed[0]], 0x01, "the count is the operand");
+    let Some((r, _, after)) = sc_both(&count_prog(0xe2b7, 0xfe, None), false) else {
+        return skipped();
+    };
+    assert_eq!((r.a, r.y), (0x31, 0x23), "growing is refused");
+    assert_eq!(after, before);
 }

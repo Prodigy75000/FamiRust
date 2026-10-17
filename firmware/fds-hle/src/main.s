@@ -557,6 +557,7 @@ vint_wait:
 ; battery on the reading pass keeps the caller's V.
 adjust_count:
   ldx #$00
+@common:                    ; $E2B7 enters here with x = $FF
   stx $09
   sta $02                   ; the operand, or $FF for "it is inline"
   tsx
@@ -619,11 +620,25 @@ adjust_count:
   pha
   lda $09
   pha
-  lda #$80                  ; the reading pass, not yet retried; $06 keeps
+  lda $09                   ; $00 for $E2BB, $FF for $E2B7
+  and #$20
+  ora #$80                  ; the reading pass, not yet retried; $06 keeps
   sta $05                   ; the return address high, as measured
-  jmp set_count@attempt
+  jmp set_count_c@attempt
+@under:
+  lda #$02
+  sta $05
+  ldy #$23
+  lda #$31                  ; C clear and V from the subtraction
+  jmp set_count_c@tail
 @entry_end:
 .assert @entry_end <= $E2B7     ; $E2B7 is an entry point of its own
+
+; $E2B7, seven disks' save code: $E2BB's check, but the count becomes the
+; operand itself rather than count less it, and $09 ends $FF, not $00.
+.org $E2B7
+  ldx #$FF
+  bne @common
 
 .org $E2BB
   jmp adjust_count
@@ -638,7 +653,7 @@ adjust_count:
   beq @counted
   lda #$23
   ldy #$23
-  jmp set_count@fail        ; retried once, as every first-pass failure
+  jmp set_count_c@fail        ; retried once, as every first-pass failure
 @counted:
   jsr read_byte
   pha
@@ -652,16 +667,16 @@ adjust_count:
   sec
   sbc $02
   bcc @under
-  sta $06                   ; the new one, for $E305's write
-  lda #$00
+  tax
+  lda $05
+  and #$20
+  beq @less
+  ldx $02                   ; $E2B7: the operand itself
+@less:
+  stx $06                   ; the new count, for $E305's write
+  lda #$40
   sta $05                   ; the writing pass, its own retry fresh
-  jmp set_count@attempt
-@under:
-  lda #$02
-  sta $05
-  ldy #$23
-  lda #$31                  ; C clear and V from the subtraction
-  jmp set_count@tail
+  jmp set_count_c@attempt
 adjust_count_end:
 .assert adjust_count_end <= $E301     ; and so is $E301
 
@@ -778,6 +793,8 @@ pf_take:
 pf_body_end:
 .assert pf_body_end <= queue_step
 
+.org $E301
+  jmp set_count1
 .org $E305
   jmp set_count             ; the body is at $E4FC
 .org $E32A
@@ -5234,7 +5251,17 @@ disk_info_end:
 ; only tight budgets, 128 and 139 cycles in the original; these take 125 and
 ; 129. The rest is the original's counted delays gone.
 .org $E4FC
+; $E301, 32 disks' save code: $E305 with the count one more than its operand,
+; wrapping. Measured: every exit as $E305's but $07 = 1 where $E305 leaves 0
+; (no disk, protect, battery), which is the flag this path carries in y until
+; block 1 sets $07 for itself.
+set_count1:
+  ldy #$01
+  bne set_count_c           ; always; ldy leaves a and V alone
 set_count:
+  ldy #$00
+set_count_c:
+  sty $07                   ; 0 for $E305, 1 for $E301, before y is used
   sta $02                   ; the count, or $FF for "the count is inline"
   tsx
   dex
@@ -5274,8 +5301,6 @@ set_count:
   pha
   txa
   pha
-  lda #0
-  sta $07
   lda FDS_DRIVE
   lsr a
   bcc @disk
@@ -5299,6 +5324,11 @@ set_count:
   lda $09
   pha
   lda $02
+  ldx $07
+  beq @count
+  clc
+  adc #$01                  ; $E301: one more, and $FF wraps to 0
+@count:
   sta $06
   lda #0
   sta $05                   ; the retry flag; every late exit leaves $00
@@ -5318,8 +5348,9 @@ set_count:
   inc $05
   bne @attempt
 @flat:
-  lda $05                   ; $E2BB's first pass hands the caller's V back,
-  bmi @keep_v               ; measured; every other pass clears it
+  lda $05                   ; $E2BB and $E2B7 keep V on a flat battery: the
+  and #$C0                  ; caller's on the reading pass, the subtraction's
+  bne @keep_v               ; on the writing one. $E305 and $E301 clear it.
   clv
 @keep_v:
   lda #$02
