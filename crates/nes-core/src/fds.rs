@@ -707,6 +707,12 @@ pub struct Fds {
     sides: Vec<MediumSide>,
     /// The battery save: every side as a `.fds` side, back to back, the
     /// frontend's SAVE_RAM. Kept in step with the medium at each frame start.
+    ///
+    /// **Its length is a contract with every frontend: SIDE_LEN per side,
+    /// never anything else.** Android and Desktop both restore a stored save
+    /// only when its length equals the size reported now, and skip it
+    /// otherwise, so a build that changed this would quietly orphan every FDS
+    /// save already on a device.
     battery: Vec<u8>,
     /// What `battery` held before the frontend could touch it, to tell a
     /// restored save from the disk as it came.
