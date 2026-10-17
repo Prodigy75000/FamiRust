@@ -4459,7 +4459,9 @@ fn a_file_written_to_the_disk_is_in_the_battery_save() {
     let Some(disk) = a_disk() else { return skipped() };
     let mut nes = boot_to_handover(&disk, &[]);
     let before = nes.battery_save().expect("an FDS disk has a battery save").to_vec();
-    assert_eq!(before.len() % 65500, 0, "whole .fds sides");
+    // Absolute, not a multiple: frontends restore a save only at exactly the
+    // size reported, so this length is what keeps saves already on devices.
+    assert_eq!(before.len(), 65500 * nes.fds_side_count(), "65,500 bytes a side");
     assert!(battery_file(&before, WF_ID).is_none(), "the disk has no such file yet");
     assert!(run_frames(&mut nes, &wf_prog(0xe239, 0xff, false, None, false), 3000));
     let after = nes.battery_save().unwrap().to_vec();
