@@ -157,9 +157,10 @@ bootcode  = $E5           ; the disk's boot read file code
 kind      = $E6           ; 0 program RAM, 1 pattern RAM, 2 nametable
 wanted    = $E7           ; nonzero if this file is one we load
 tmp       = $E8
+booted    = $E9           ; files loaded so far; none means a disk with no boot file
 
 SCRATCH_LO = $E0
-SCRATCH_HI = $E9          ; one past the last scratch byte
+SCRATCH_HI = $EA          ; one past the last scratch byte
 
 ; The 16-byte file header, read whole so its fields can be picked out by index
 ; rather than by a chain of compares. Top of work RAM, cleared before handover.
@@ -3158,6 +3159,8 @@ load_disk:
   bcs @bad
   jsr read_count
   bcs @bad
+  lda #0
+  sta booted
 
 @each_file:
   lda files
@@ -3170,6 +3173,12 @@ load_disk:
   rts
 
 @done:
+  ; A side with no file at or below its boot code (the second disk of a
+  ; two-disk game, a data disk) loads nothing, and the real BIOS stops on
+  ; ERR.20 rather than jump through vectors nothing wrote. Twelve disks in the
+  ; merged corpus are this; handing over sent every one of them into the stack.
+  lda booted
+  beq @bad
   ; Stop the transfer but leave the motor turning, which is the state the drive
   ; is in when a game takes over and starts driving it itself.
   lda #CTRL_IDLE
@@ -3237,6 +3246,7 @@ load_one_file:
   bcc @body                 ; boot code below the file ID: not one of ours
   lda #1
   sta wanted
+  inc booted
 
 @body:
   jsr next_block

@@ -135,6 +135,38 @@ fn a_disk_boots_with_no_bios_file_at_all() {
 }
 
 #[test]
+fn a_side_with_no_boot_file_stops_in_the_bios() {
+    // The second disk of a two-disk game holds no file at or below its boot
+    // code, so a boot loads nothing and the vectors at $DFFA-$DFFF are
+    // whatever RAM held. The real BIOS stops there on ERR.20; ours handed over
+    // through them, and twelve disks in the merged corpus went into the stack.
+    let path = repo_root().join("dumps/fds/zelda.fds");
+    if skip(&path) {
+        return;
+    }
+    let mut d = disk("zelda.fds").unwrap();
+    let base = if &d[..4] == b"FDS" { 16 } else { 0 };
+    // Boot code 0, and every file ID on side 0 moved above it.
+    d[base + 25] = 0;
+    let mut at = base + 58;
+    while d[at] == 0x03 {
+        if d[at + 2] == 0 {
+            d[at + 2] = 1;
+        }
+        let size = usize::from(d[at + 13]) | (usize::from(d[at + 14]) << 8);
+        at += 16 + 1 + size;
+    }
+    let h = boot(&d, &[], 900);
+    assert!(!h.reached, "handed over to ${:04x} with nothing loaded", h.entry);
+    assert!(
+        h.entry >= BIOS_BASE,
+        "left the BIOS for ${:04x} after {} frames",
+        h.entry,
+        h.frames
+    );
+}
+
+#[test]
 fn the_registers_at_handover_are_the_ones_we_chose() {
     // These came from the real BIOS, which hands Zelda, Bio Miracle and Famicom
     // Grand Prix exactly this. They are NOT a contract, and the comment that
