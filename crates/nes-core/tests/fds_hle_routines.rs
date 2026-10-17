@@ -4739,3 +4739,61 @@ fn queue_from_zero_page_at_e8db_matches_the_real_bios() {
     assert_eq!((mem[8], mem[9]), (0x24, 0x21), "the address steps on a row");
     assert_eq!(r.a, 0xff);
 }
+
+// --- $E2BB: drop the side's file count, the save path's first step ---------
+
+/// [`sc_prog`] for `$E2BB`: same entry, same template, a is the operand.
+fn ac_prog(a: u8, bad_at: Option<u8>) -> Vec<u8> {
+    let mut p = sc_prog(a, 0, bad_at);
+    let at = p
+        .windows(3)
+        .position(|w| w == [0x20, 0x05, 0xe3])
+        .expect("the jsr $E305 in sc_prog");
+    p[at + 1] = 0xbb;
+    p[at + 2] = 0xe2;
+    p
+}
+
+#[test]
+fn adjust_count_at_e2bb_drops_the_count_as_the_real_bios_does() {
+    // Ultraman 2 hung on its save screen here: lda #1 / jsr $E2BB / template.
+    // The side's count goes down by a, block 2 rewritten in place, and the
+    // whole side has to match the real BIOS's byte for byte.
+    let Some(disk) = a_disk() else { return skipped() };
+    let before = boot_to_handover(&disk, &[]).dbg_fds_image(0).to_vec();
+    let Some((r, zp, after)) = sc_both(&ac_prog(1, None), false) else { return skipped() };
+    assert!(r.reached, "the call never came back");
+    assert_eq!((r.a, r.x, r.y), (0, 0, 0), "success");
+    assert_eq!(zp[9], 0, "$09 is cleared");
+    let changed: Vec<usize> = (0..before.len()).filter(|&i| before[i] != after[i]).collect();
+    assert!(!changed.is_empty() && changed.len() <= 3, "only block 2's count: {changed:?}");
+    let i = changed[0];
+    assert_eq!(after[i], before[i] - 1, "the count is one less");
+    assert_eq!(zp[6], after[i], "$06 is the new count");
+}
+
+#[test]
+fn adjust_count_refuses_to_go_below_zero_and_writes_nothing() {
+    let Some(disk) = a_disk() else { return skipped() };
+    let before = boot_to_handover(&disk, &[]).dbg_fds_image(0).to_vec();
+    let Some((r, zp, after)) = sc_both(&ac_prog(0xfe, None), false) else { return skipped() };
+    assert_eq!((r.a, r.y), (0x31, 0x23));
+    assert_eq!(r.p & 0x01, 0, "carry clear");
+    assert_eq!(zp[5], 2);
+    assert_eq!(after, before, "nothing written");
+}
+
+#[test]
+fn adjust_count_reports_a_template_mismatch_as_the_real_bios_does() {
+    let Some((r, _, _)) = sc_both(&ac_prog(1, Some(3)), false) else { return skipped() };
+    assert!(r.reached);
+    assert_ne!(r.a, 0, "a wrong ID is an error");
+}
+
+#[test]
+fn adjust_count_with_no_disk_returns_before_the_motor() {
+    let Some((r, zp, _)) = sc_both(&ac_prog(1, None), true) else { return skipped() };
+    assert_eq!(r.a, 0x01);
+    assert_eq!(r.y, 0x3c, "y is $0E as found");
+    assert_eq!(zp[9], 0, "$09 is cleared even here");
+}

@@ -539,6 +539,133 @@ vint_wait:
 .org $E239
   jmp write_file            ; the body is at $F6E0
 .org $E23C
+; --- $E2BB: drop the side's file count by a ---------------------------------
+;
+; Twenty-three disks save with it: Ultraman 2, Dirty Pair, both Deep Dungeons,
+; Super Boy Allan, Gun Fighter. Each is the same idiom, after a load that found
+; the old save: `lda #1 / jsr $E2BB / .word template / beq`, then $E237 appends
+; the new one. Forget the last file, then write it again.
+;
+; $E305's entry and $E305's write, with a reading pass in front: block 1 and
+; the ID checked against the template, block 2's count read off the medium,
+; the motor stopped, and then $E305's whole attempt with count - a. A borrow is
+; error $31 with y = $23 and nothing written. Measured by a helper and fuzzed
+; against the original on the Ultraman 2 call: 900 cases.
+;
+; Its exits are $E305's with three differences, all measured: $09 is cleared at
+; entry and so on every exit; the pre-motor exits leave $07 as found; a flat
+; battery on the reading pass keeps the caller's V.
+adjust_count:
+  ldx #$00
+  stx $09
+  sta $02                   ; the operand, or $FF for "it is inline"
+  tsx
+  dex
+  dex
+  dex
+  stx $04
+  pla
+  sta $05
+  pla
+  sta $06
+  ldy #1
+  lda ($05),y
+  sta $00
+  iny
+  lda ($05),y
+  sta $01
+  ldx #2
+  lda $02
+  cmp #$FF
+  bne @one
+  iny
+  lda ($05),y
+  sta $02
+  iny
+  lda ($05),y
+  sta $03
+  ldx #4
+@one:
+  php
+  txa
+  clc
+  adc $05
+  tax
+  lda $06
+  adc #0
+  plp
+  pha
+  txa
+  pha
+  lda FDS_DRIVE
+  lsr a
+  bcc @disk
+  lda #$01
+  bne @early
+@disk:
+  lsr a
+  lsr a
+  bcc @go
+  lda #$03
+@early:
+  tax
+  ldy $0E
+  cli
+  clc
+  txa
+  rts
+@go:
+  lda $0101
+  pha
+  lda $09
+  pha
+  lda #$80                  ; the reading pass, not yet retried; $06 keeps
+  sta $05                   ; the return address high, as measured
+  jmp set_count@attempt
+@entry_end:
+.assert @entry_end <= $E2B7     ; $E2B7 is an entry point of its own
+
+.org $E2BB
+  jmp adjust_count
+
+; Block 1 has passed; read block 2's count instead of writing it.
+@read:
+  lda #$02
+  sta $07
+  jsr lf_next
+  jsr read_byte
+  cmp #$02                  ; carry: type >= 2, as measured
+  beq @counted
+  lda #$23
+  ldy #$23
+  jmp set_count@fail        ; retried once, as every first-pass failure
+@counted:
+  jsr read_byte
+  pha
+  jsr wf_crc
+  lda LF_SHADOW
+  and #$08
+  ora #$27
+  sta FDS_CTRL              ; the motor stops between the passes
+  pla
+  sta $06                   ; the old count, which a borrow leaves here
+  sec
+  sbc $02
+  bcc @under
+  sta $06                   ; the new one, for $E305's write
+  lda #$00
+  sta $05                   ; the writing pass, its own retry fresh
+  jmp set_count@attempt
+@under:
+  lda #$02
+  sta $05
+  ldy #$23
+  lda #$31                  ; C clear and V from the subtraction
+  jmp set_count@tail
+adjust_count_end:
+.assert adjust_count_end <= $E301     ; and so is $E301
+
+.org $E7BE
 ; $E4F9: header bytes 11-15, then the body. $0A/$0B the address, $0C/$0D the
 ; size less one, which counts down to $FFFF. A kind-0 file is REFUSED if it
 ; would wrap past $FFFF or land in the first two pages of a 2K mirror below
@@ -590,7 +717,9 @@ pf_e4f9:
   ldy #$FF
 @checked:
   lda LF_SKIP
-  beq @take
+  bne @skipping
+  jmp pf_take               ; the second half is at $E8E4: 199 bytes fit in
+@skipping:                  ; no one gap once $E2BB needed this one
   cpy #$FF
   beq @skip
   tay                       ; skipped: y = $09
@@ -602,7 +731,11 @@ pf_e4f9:
   jsr pf_rd
   jsr pf_off
   jmp pf_ok
-@take:
+pf_e4f9_a_end:
+.assert pf_e4f9_a_end <= $E844
+
+.org $E8E4
+pf_take:
   cpy #$FF
   beq @drop                 ; refused: read through, then the block end
   txa
@@ -643,7 +776,7 @@ pf_e4f9:
   jmp pf_ok
 
 pf_body_end:
-.assert pf_body_end <= $E305
+.assert pf_body_end <= queue_step
 
 .org $E305
   jmp set_count             ; the body is at $E4FC
@@ -814,7 +947,7 @@ pf_count_end:
 .org $E4A0
   jmp pf_e4a0               ; the body is at $F550
 .org $E4F9
-  jmp pf_e4f9               ; the body is at $E23C
+  jmp pf_e4f9               ; the body is at $E7BE and $E8E4
 .org $E68F
 ; $E68F: open the next block and check its type is a, any a. Out: a kept,
 ; x = y = (a + $21) & $FF, the code a mismatch gives; V I Z C set.
@@ -5179,15 +5312,19 @@ set_count:
   sta FDS_EXT
   lda FDS_BATT
   bmi @batt_ok
-  ldx $05
+  lda $05                   ; bit 0 is the retry, bit 7 $E2BB's reading pass
+  and #$01
   bne @flat
   inc $05
   bne @attempt
 @flat:
+  lda $05                   ; $E2BB's first pass hands the caller's V back,
+  bmi @keep_v               ; measured; every other pass clears it
+  clv
+@keep_v:
   lda #$02
   ldy #$00
   sty $05
-  clv
   sec
   jmp @tail
 @batt_ok:
@@ -5238,6 +5375,10 @@ set_count:
   dey
   bne @rest
   jsr wf_crc
+  bit $05
+  bpl @write
+  jmp adjust_count@read     ; $E2BB's first pass reads block 2 instead
+@write:
   lda $06
   jsr wf_put_count_a        ; $07 ends $02 from wf_open
   lda #$02
@@ -5260,10 +5401,15 @@ set_count:
 @bin:
   clc
 @fail:
-  ldx $05
-  bne @give_up
+  pha                       ; the code; carry is the exit's and stays
+  lda $05
+  and #$01
+  bne @give_up_a
+  pla
   inc $05
   jmp @attempt
+@give_up_a:
+  pla
 @give_up:
   ldx #0
   stx $05
