@@ -1396,6 +1396,11 @@ vram_flush_end:
 ; than driving the PPU, so there is no window for it to be too fast for.
 .org $E8D2
   jmp vram_queue
+; $E8DB: $E8D2 with its arguments already in zero page, $00/$01 the data,
+; $02/$03 the address low first, $04 the count. Dogfight Spirit draws its rows
+; with it and Jirai Kun its palettes; both read $02 back, stepped by 32.
+.org $E8DB
+  jmp vram_queue_zp
 
 ; --- $E8E1: append SEVERAL blocks, with the shape packed into the data ------
 ;
@@ -1443,6 +1448,7 @@ vram_queue:
   stx $02                   ; 3   and low
   sty $04                   ; 3   the count is an argument here
   jsr queue_inline          ; 6
+vram_queue_zp:              ;     $E8DB enters here, the arguments already set
   lda #$01                  ; 2   one block
   sta $05                   ; 3
   ldx BUF-1                 ; 4   the write index: we append to what is there
@@ -1760,6 +1766,13 @@ counter_logic:
 .org $EA1F
   jmp read_pads             ; body below; 70 bytes will not fit in 45
 
+; $EA36: $EA4C on the raw pass, with no expansion merge: read both pads until
+; two passes agree, pad 2 compared first. Tarot's "press A or B" loop. The real
+; one costs 813 cycles when the first two passes agree; ours, the same passes
+; through pads_raw, a little under.
+.org $EA36
+  jmp verify_raw
+
 ; --- $EA4C: read both pads twice and only believe a repeated answer --------
 ;
 ; 17 of the 114 corpus titles call it and twelve were stopped on it. It is
@@ -1795,6 +1808,25 @@ verify_pads:
   cpx $F5
   bne @stash
   jmp pads_diff2
+
+; The body of $EA36, in the free bytes where the original has its bare read
+; pass; no disk in the corpus calls that address.
+.org $E9EB
+verify_raw:
+  jsr pads_raw
+@stash:
+  ldx $F5
+  lda $F6
+  pha
+  jsr pads_raw
+  pla
+  cmp $F6
+  bne @stash
+  cpx $F5
+  bne @stash
+  jmp pads_diff2
+verify_raw_end:
+.assert verify_raw_end <= $EA1A
 
 ; --- $EA68: four pads kept apart --------------------------------------------
 ;

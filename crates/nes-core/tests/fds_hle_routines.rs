@@ -4703,3 +4703,39 @@ fn the_vram_queue_is_left_empty_at_handover() {
         assert_eq!(got, want);
     }
 }
+
+#[test]
+fn verify_raw_pads_at_ea36_matches_the_real_bios() {
+    // $EA36, Tarot: $EA4C on the raw pass. Held buttons do not change between
+    // passes, so it returns after two, with newly pressed against $F7.
+    for &(held, was) in &[(0x01u8, 0x00u8), (0x81, 0x80), (0x5a, 0x0f)] {
+        let mut p = Prog::default();
+        p.poke(0x00fb, 0x00).poke(0x00f7, was).poke(0x00f8, 0x33);
+        p.jsr(0xea36).record_and_halt();
+        let Some((r, mem)) = both_holding(&p.0, held, &PAD_ZP) else { return skipped() };
+        let now = held.reverse_bits();
+        assert_eq!(mem[6], now, "$F7 is held now");
+        assert_eq!(mem[4], now & !was, "$F5 is newly pressed");
+        assert_eq!((r.a, r.x, r.y), (mem[4], 0xff, mem[6]));
+        assert_eq!(r.p & 0x01, 1, "carry set from the compare that passed");
+    }
+}
+
+#[test]
+fn queue_from_zero_page_at_e8db_matches_the_real_bios() {
+    // $E8DB, Dogfight Spirit and Jirai Kun: $E8D2 with the pointer, address
+    // and count already at $00-$04. It appends one block and steps $02/$03
+    // on a row, which both games read back.
+    let mut p = Prog::default();
+    p.bytes_at(0x0480, &[0x11, 0x22, 0x33]);
+    p.poke(0x0300, 0x40).poke(0x0301, 0x00);
+    p.poke(0x0000, 0x80).poke(0x0001, 0x04).poke(0x0002, 0x04).poke(0x0003, 0x21);
+    p.poke(0x0004, 0x03);
+    p.jsr(0xe8db).record_and_halt();
+    let watch = [0x0302u16, 0x0303, 0x0304, 0x0305, 0x0306, 0x0307, 0x0308, 0x0301, 0x02, 0x03];
+    let Some((r, mem)) = both_watching(&p.0, 60, &watch) else { return skipped() };
+    assert_eq!(&mem[..7], &[0x21, 0x04, 0x03, 0x11, 0x22, 0x33, 0xff]);
+    assert_eq!(mem[7], 0x06, "the write index is committed past the block");
+    assert_eq!((mem[8], mem[9]), (0x24, 0x21), "the address steps on a row");
+    assert_eq!(r.a, 0xff);
+}
