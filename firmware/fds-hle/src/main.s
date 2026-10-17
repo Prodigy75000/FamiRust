@@ -812,7 +812,7 @@ pf_count_end:
 .assert pf_count_end <= $E4A0
 
 .org $E4A0
-  jmp pf_e4a0               ; the body is at $E8E4
+  jmp pf_e4a0               ; the body is at $F550
 .org $E4F9
   jmp pf_e4f9               ; the body is at $E23C
 .org $E68F
@@ -1337,7 +1337,7 @@ vram_flush:
   sta $FF                   ; 3
   ldx PPUSTATUS             ; 4   reset the address latch, once for the call
   ldy #$00                  ; 2
-  jmp @check                ; 3
+  jmp vf_check              ; 3   the loop is at $F5B8, out of $E8B3's way
 ;
 ; The loop is laid out with its test at the BOTTOM, which costs this one `jmp`
 ; and is what makes the palette tail come out right. The palette block FALLS
@@ -1346,42 +1346,7 @@ vram_flush:
 ; rather than four stores plus a branch back. That is the difference between
 ; +15 and +18 cycles, and +18 would make us slower than the original on any
 ; entry that touches the palette.
-@body:
-  pha                       ; 3   kept for the $3F test after the data
-  sta PPUADDR               ; 4
-  iny                       ; 2
-  lda BUF,y                 ; 4
-  sta PPUADDR               ; 4
-  iny                       ; 2
-  ldx BUF,y                 ; 4   the count straight into x: all eight bits,
-  iny                       ; 2   and 0 means 256, which `dex`/`bne` gives
-@byte:
-  lda BUF,y                 ; 4
-  sta PPUDATA               ; 4
-  iny                       ; 2
-  dex                       ; 2
-  bne @byte                 ; 3
-  pla                       ; 4   the address high from the top of the entry
-  cmp #$3F                  ; 2   and this is also where carry comes from
-  bne @check                ; 3 taken on the common path
-  ; The palette-safe reset: point at $3F00, then at $0000, so the PPU is not
-  ; left showing a palette entry in place of the backdrop. `a` is still $3F
-  ; from the `pla` and `x` is $00 from the byte loop, so neither needs loading.
-  sta PPUADDR               ; 4
-  stx PPUADDR               ; 4
-  stx PPUADDR               ; 4
-  stx PPUADDR               ; 4
-@check:
-  lda BUF,y                 ; 4   the next entry's address high, or the end
-  bpl @body                 ; 3 taken
-  sta BUF                   ; 4   the terminator it found, echoed back
-  lda #$00                  ; 2
-  sta BUF-1                 ; 4   the game's write index
-  rts                       ; 6
-; 43 + 40 per entry + 15 per data byte + 15 per palette entry, exactly the
-; original's, and +1 for any read whose address crosses $03FF, which absolute
-; indexing gives for free.
-.assert (vram_flush_end - vram_flush) == 74
+.assert (vram_flush_end - vram_flush) == 17
 vram_flush_end:
 ; --- $E8D2: append one block to the VRAM transfer buffer at $0302 ----------
 ;
@@ -1787,6 +1752,11 @@ counter_logic:
 ; structural inference rather than measurement: our core never drives that bit,
 ; so it was never seen lit. Nothing in the corpus depends on it, and routing it
 ; here costs nothing if it is right and nothing if it is wrong.
+.org $EA1A
+; $EA1A: $EA1F without the expansion merge. Eight titles, among them both
+; Zatsugaku Olympic quizzes and Bishoujo Control. The expansion bits still land
+; in $00 and $01; they just do not reach $F5 and $F6. 427 cycles against ours.
+  jmp read_down
 .org $EA1F
   jmp read_pads             ; body below; 70 bytes will not fit in 45
 
@@ -1824,17 +1794,38 @@ verify_pads:
   bne @stash                ; measured skipping the pad-1 compare entirely
   cpx $F5
   bne @stash
-  ldx #$01                  ; pad 2 then pad 1, so a and y end as pad 1's
+  jmp pads_diff2
+
+; --- $EA68: four pads kept apart --------------------------------------------
+;
+; Bakutoushi Patton-kun and Kind Gal's, which take two more players on the
+; expansion port. The same read pass, no merge; the expansion pads become pads
+; 3 and 4 at $F7 and $F8, and newly-pressed for all four comes out in $F5-$F8
+; with the held state kept at $F1-$F4 instead. The old $F7 and $F8 are not
+; inputs. Exit as the others, but y is pad 1 held ($F1), not $F7.
+;
+; It fills $EA68-$EA83 exactly, which is why $EA4C hands its diff to the shared
+; one above: its own copy reached $EA70.
+.org $EA68
+read_four:
+  jsr pads_raw
+  lda $00
+  sta $F7
+  lda $01
+  sta $F8
+  ldx #$03
 @diff:
   lda $F5,x                 ; newly pressed = held now AND NOT held before
   tay
-  eor $F7,x
+  eor $F1,x
   and $F5,x
   sta $F5,x
-  sty $F7,x
+  sty $F1,x
   dex
-  bpl @diff                 ; x falls out $FF, with N set and Z clear
+  bpl @diff
   rts
+read_four_end:
+.assert read_four_end == $EA84
 ; --- $EA84: fill a page of video memory ------------------------------------
 ;
 ; 41 of the 114 corpus titles call it, the joint most-called routine after the
@@ -1995,7 +1986,7 @@ mem_fill:
 ; between, so the two entry points are one read pass and two different things
 ; done with it. Leaves the merged held state in $F5 and $F6 and the raw
 ; expansion bytes in $00 and $01.
-pads_held:
+pads_raw:
   ldy $FB
   iny
   sty JOY1                  ; strobe on:  $FB + 1
@@ -2019,7 +2010,11 @@ pads_held:
   lsr a
   rol $01
   dey
-  bpl @bit                  ; eight bits
+  bpl @bit                  ; eight bits; falls out with N set
+  rts                       ; carry is bit 0 of $01 as it came in, rotated out
+
+pads_held:
+  jsr pads_raw
   lda $00                   ; the expansion pad merges into the wired one
   ora $F5
   sta $F5
@@ -2028,21 +2023,22 @@ pads_held:
   sta $F6
   rts
 
+read_down:
+  jsr pads_raw
+  bmi pads_diff2            ; always: pads_raw returns with N set
 read_pads:
   jsr pads_held
-  lda $F6                   ; pad 2: newly = held AND NOT was-held
+pads_diff2:
+  ldx #$01                  ; pad 2 then pad 1, so a and y end as pad 1's
+@diff:
+  lda $F5,x                 ; newly pressed = held now AND NOT held before
   tay
-  eor $F8
-  and $F6
-  sta $F6
-  sty $F8
-  lda $F5                   ; pad 1 last, so a and y end as $F5 and $F7
-  tay
-  eor $F7
-  and $F5
-  sta $F5
-  sty $F7
-  ldx #$FF
+  eor $F7,x
+  and $F5,x
+  sta $F5,x
+  sty $F7,x
+  dex
+  bpl @diff                 ; x falls out $FF, with N set and Z clear
   rts
 ; --- $EAEA: write the scroll and PPUCTRL from their zero-page shadows -------
 ;
@@ -5258,7 +5254,7 @@ set_count:
 set_count_end:
 .assert set_count_end <= $E68F
 
-.org $E8E4
+.org $F550
 ; $E4A0: header bytes 1 and 2, the ID against the list at ($02), then the
 ; eight name bytes. A match leaves $09 = 0 and counts it in $0E HERE, not when
 ; the body loads. A list's $FF ends it; a list STARTING with $FF means the
@@ -5326,7 +5322,176 @@ pf_e4a0:
   lda #$28
   jmp pf_err_v
 pf_match_end:
-.assert pf_match_end <= $E997
+.assert pf_match_end <= vf_loop
+.assert (>pf_e4a0) == (>pf_match_end)  ; one page: no branch pays a crossing
+
+
+; --- $E8B3: read VRAM back into a table of 3-byte records ------------------
+;
+; Radical Bomber!! Jirai Kun reads the tile under its player with this. Each
+; record at $0300+x is an address high, low, and a slot for the byte; y is the
+; count, 0 meaning 256. One status read for the call, then per record the
+; address, a priming read and the real one. Every index wraps inside page 3.
+; 9 + 40y cycles, the original's. Exit a = the last byte, x += 3y, y = 0, Z set.
+.org $E8B3
+vram_read:
+  lda PPUSTATUS
+@rec:
+  lda $0300,x
+  sta PPUADDR
+  inx
+  lda $0300,x
+  sta PPUADDR
+  inx
+  lda PPUDATA               ; primes the read buffer
+  lda PPUDATA
+  sta $0300,x
+  inx
+  dey
+  bne @rec
+  rts
+vram_read_end:
+.assert vram_read_end == $E8D2
+
+; --- $E93C: step the queue index and check it against the buffer size ------
+;
+; Bishoujo Kachinuki Renju has its own copy of an $E8D2 append and calls this
+; after every byte. Room: back with the compare's flags, 15 cycles. Full: the
+; queue is cut back to its committed index with an $FF, our own return address
+; is dropped and a = 1, C set, comes back to the caller's caller; 35 cycles.
+; The same rollback $E8D2 makes at @full.
+.org $E93C
+queue_step:
+  inx
+  cpx BUF-2
+  bcc @room
+  ldx BUF-1
+  lda #$FF
+  sta BUF,x
+  pla
+  pla
+  lda #$01
+@room:
+  rts
+
+; --- $E94F: look an address up in record y, or put it there ----------------
+;
+; Jirai Kun again: it registers the address it wants read, and $E8B3 fills the
+; byte in at the next vblank. y is the record number from 1 (0 means 256) in
+; the table at $0300+x, and $00/$01 the address. A hit returns the cached byte
+; with C clear, x = r+2, y = r; a miss writes the address in and returns
+; a = [$01], C set, y = r+1, x = r or r+1 by which byte differed.
+;
+; V comes out of the walk, a 3 added per step, so it is set when the record is
+; $80-$82; that falls out of finding it by adding. 2 cycles under the
+; original's 54 + 9(y-1) hit, 56 + 9(y-1) and 67 + 9(y-1) misses: there was no
+; byte left to spend them.
+.org $E94F
+record_find:
+  txa
+  sec
+  sbc #$03
+@walk:
+  clc
+  adc #$03
+  dey
+  bne @walk
+  tax
+  tay
+  lda $0300,x
+  cmp $00
+  bne @miss
+  inx
+  lda $0300,x
+  cmp $01
+  bne @miss
+  inx
+  lda $0300,x
+  clc
+  rts
+@miss:
+  lda $00
+  sta $0300,y
+  iny
+  lda $01
+  sta $0300,y
+  sec
+  rts
+record_find_end:
+.assert record_find_end == $E97D
+.assert (>record_find) == (>record_find_end)
+
+; --- $E97D: pixel coordinates to a nametable address -----------------------
+;
+; The inverse of $E997, on its zero page: $02 = Y and $03 = X in, $00/$01 the
+; address in nametable 0 out, a = $01. Cocona World and Jirai Kun. The low
+; three bits of each coordinate are dropped; C ends as bit 2 of X. 48 cycles,
+; and the sequence is the one the access log admits, exactly 26 bytes.
+.org $E97D
+pixel_to_tile:
+  lda #$08
+  sta $00
+  lda $02
+  asl a
+  rol $00
+  asl a
+  rol $00
+  and #$E0
+  sta $01
+  lda $03
+  lsr a
+  lsr a
+  lsr a
+  ora $01
+  sta $01
+  rts
+pixel_to_tile_end:
+.assert pixel_to_tile_end == $E997
+
+; --- the $E86A loop, moved here whole so $E8B3 has its address -------------
+;
+; One page, like the old place, so no taken branch pays a crossing and the
+; counts in the commentary still hold.
+.org $F5B8
+vf_loop:
+vf_body:
+  pha                       ; 3   kept for the $3F test after the data
+  sta PPUADDR               ; 4
+  iny                       ; 2
+  lda BUF,y                 ; 4
+  sta PPUADDR               ; 4
+  iny                       ; 2
+  ldx BUF,y                 ; 4   the count straight into x: all eight bits,
+  iny                       ; 2   and 0 means 256, which `dex`/`bne` gives
+@byte:
+  lda BUF,y                 ; 4
+  sta PPUDATA               ; 4
+  iny                       ; 2
+  dex                       ; 2
+  bne @byte                 ; 3
+  pla                       ; 4   the address high from the top of the entry
+  cmp #$3F                  ; 2   and this is also where carry comes from
+  bne vf_check                ; 3 taken on the common path
+  ; The palette-safe reset: point at $3F00, then at $0000, so the PPU is not
+  ; left showing a palette entry in place of the backdrop. `a` is still $3F
+  ; from the `pla` and `x` is $00 from the byte loop, so neither needs loading.
+  sta PPUADDR               ; 4
+  stx PPUADDR               ; 4
+  stx PPUADDR               ; 4
+  stx PPUADDR               ; 4
+vf_check:
+  lda BUF,y                 ; 4   the next entry's address high, or the end
+  bpl vf_body                 ; 3 taken
+  sta BUF                   ; 4   the terminator it found, echoed back
+  lda #$00                  ; 2
+  sta BUF-1                 ; 4   the game's write index
+  rts                       ; 6
+; 43 + 40 per entry + 15 per data byte + 15 per palette entry, exactly the
+; original's, and +1 for any read whose address crosses $03FF, which absolute
+; indexing gives for free.
+vf_loop_end:
+.assert (>vf_loop) == (>vf_loop_end)
+.assert vf_loop_end <= $F600
 
 .org $FFFA
   .word nmi

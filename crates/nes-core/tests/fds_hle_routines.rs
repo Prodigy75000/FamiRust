@@ -4555,3 +4555,136 @@ fn loading_a_savestate_brings_its_disk_into_the_battery_save() {
     let want: Vec<u8> = (0..WF_SIZE).map(wf_byte).collect();
     assert_eq!(battery_file(other.battery_save().unwrap(), WF_ID), Some(want));
 }
+
+// --- the merged corpus's new entry points: pads, VRAM records, coordinates ---
+
+/// [`both_watching`] with pad 1 held, for routines whose input is the pad.
+fn both_holding(prog: &[u8], buttons: u8, watch: &[u16]) -> Option<(Outcome, Vec<u8>)> {
+    let disk = a_disk()?;
+    let (ours, mut nes) = run_holding(&disk, &[], prog, 60, buttons);
+    assert!(ours.reached, "our BIOS never finished the program");
+    let mine: Vec<u8> = watch.iter().map(|a| nes.peek(*a)).collect();
+    if let Some(real) = real_bios() {
+        let (theirs, mut their_nes) = run_holding(&disk, &real, prog, 60, buttons);
+        assert!(theirs.reached);
+        assert_eq!(ours, theirs, "ours (left) disagrees with the real BIOS (right)");
+        let hers: Vec<u8> = watch.iter().map(|a| their_nes.peek(*a)).collect();
+        assert_eq!(mine, hers, "memory at {watch:04x?}: ours (left), real (right)");
+    }
+    Some((ours, mine))
+}
+
+const PAD_ZP: [u16; 8] = [0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8];
+
+#[test]
+fn read_down_pads_at_ea1a_matches_the_real_bios() {
+    // $EA1A, eight titles: $EA1F without the expansion merge. $F7 holds the
+    // previous held state going in, so plant one that overlaps the buttons.
+    for &(held, was) in &[(0x01u8, 0x00u8), (0x81, 0x80), (0x5a, 0x0f)] {
+        let mut p = Prog::default();
+        p.poke(0x00fb, 0x00).poke(0x00f7, was).poke(0x00f8, 0x33);
+        p.jsr(0xea1a).record_and_halt();
+        let Some((r, mem)) = both_holding(&p.0, held, &PAD_ZP) else { return skipped() };
+        // Hardware order in, BIOS order out: the first bit read is bit 7.
+        let now = held.reverse_bits();
+        assert_eq!(mem[6], now, "$F7 is held now");
+        assert_eq!(mem[4], now & !was, "$F5 is newly pressed");
+        assert_eq!((r.a, r.x, r.y), (mem[4], 0xff, mem[6]));
+    }
+}
+
+#[test]
+fn read_four_pads_at_ea68_matches_the_real_bios() {
+    // $EA68, Patton-kun and Kind Gal's: held state at $F1-$F4, newly pressed
+    // at $F5-$F8, and the old $F7/$F8 are not inputs.
+    for &(held, was) in &[(0x01u8, 0x00u8), (0x81, 0x80), (0x5a, 0x0f)] {
+        let mut p = Prog::default();
+        p.poke(0x00fb, 0x00).poke(0x00f1, was).poke(0x00f7, 0xff).poke(0x00f8, 0xff);
+        p.jsr(0xea68).record_and_halt();
+        let Some((r, mem)) = both_holding(&p.0, held, &PAD_ZP) else { return skipped() };
+        let now = held.reverse_bits();
+        assert_eq!(mem[0], now, "$F1 is pad 1 held");
+        assert_eq!(mem[4], now & !was, "$F5 is pad 1 newly pressed");
+        assert_eq!((mem[6], mem[7]), (0, 0), "no expansion pads: $F7/$F8 clear");
+        assert_eq!((r.a, r.x, r.y), (mem[4], 0xff, mem[0]));
+    }
+}
+
+#[test]
+fn pixel_to_tile_at_e97d_matches_the_real_bios() {
+    for &(y, x) in &[(0x00u8, 0x00u8), (0x47, 0x9b), (0xef, 0xff), (0x80, 0x04)] {
+        let mut p = Prog::default();
+        p.poke(0x0002, y).poke(0x0003, x).ldx(0x11).ldy(0x22).jsr(0xe97d).record_and_halt();
+        let Some((r, mem)) = both_watching(&p.0, 60, &[0x00, 0x01]) else { return skipped() };
+        let hi = 0x20 | (y >> 6);
+        let lo = ((y << 2) & 0xe0) | (x >> 3);
+        assert_eq!((mem[0], mem[1]), (hi, lo), "Y={y:02x} X={x:02x}");
+        assert_eq!((r.a, r.x, r.y), (lo, 0x11, 0x22));
+        assert_eq!(r.p & 0x01, (x >> 2) & 1, "carry is bit 2 of X");
+    }
+}
+
+#[test]
+fn a_vram_record_is_registered_then_read_back_then_hit() {
+    // Jirai Kun's tile probe: $E94F misses and registers the address, $E8B3
+    // reads the byte there into the record, and $E94F then hits and returns
+    // it. The tile is planted first so there is something to find.
+    let mut p = Prog::default();
+    p.raw(&[0x2c, 0x02, 0x20]) // bit $2002
+        .poke(0x2006, 0x20)
+        .poke(0x2006, 0x41)
+        .poke(0x2007, 0x77);
+    p.bytes_at(0x03f0, &[0x00, 0x00, 0x00]);
+    p.poke(0x0000, 0x20).poke(0x0001, 0x41);
+    p.ldx(0xf0).ldy(0x01).jsr(0xe94f); // miss: registers $2041 at $03F0
+    p.ldx(0xf0).ldy(0x01).jsr(0xe8b3); // reads it into $03F2
+    p.ldx(0xf0).ldy(0x01).jsr(0xe94f).record_and_halt(); // hit
+    let Some((r, mem)) = both_watching(&p.0, 60, &[0x03f0, 0x03f1, 0x03f2]) else {
+        return skipped();
+    };
+    assert_eq!(mem, vec![0x20, 0x41, 0x77]);
+    assert_eq!(r.a, 0x77, "the hit returns the byte");
+    assert_eq!(r.p & 0x01, 0, "carry clear on a hit");
+    assert_eq!((r.x, r.y), (0xf2, 0xf0));
+}
+
+#[test]
+fn a_record_miss_on_the_low_byte_returns_its_own_shape() {
+    // Same high byte, different low: x stops one further than a high miss.
+    let mut p = Prog::default();
+    p.bytes_at(0x0310, &[0x21, 0x05, 0x99]);
+    p.poke(0x0000, 0x21).poke(0x0001, 0x06);
+    p.ldx(0x0a).ldy(0x03).jsr(0xe94f).record_and_halt(); // record 3 at $0310
+    let Some((r, mem)) = both_watching(&p.0, 60, &[0x0310, 0x0311, 0x0312]) else {
+        return skipped();
+    };
+    assert_eq!(mem, vec![0x21, 0x06, 0x99], "the address is rewritten, the byte kept");
+    assert_eq!((r.a, r.x, r.y), (0x06, 0x11, 0x11));
+    assert_eq!(r.p & 0x01, 1, "carry set on a miss");
+}
+
+/// `jsr $E93C`, then `lda #$EE` and `rts`: the lda only runs when the call
+/// came back to its own caller, so a reads $EE on room and $01 on full.
+const QUEUE_SUB: u16 = 0x0690;
+
+fn step_prog(size: u8, committed: u8, x: u8) -> Vec<u8> {
+    let mut p = Prog::default();
+    p.bytes_at(QUEUE_SUB, &[0x20, 0x3c, 0xe9, 0xa9, 0xee, 0x60]);
+    p.poke(0x0300, size).poke(0x0301, committed).poke(0x0302 + committed as u16, 0x55);
+    p.ldx(x).jsr(QUEUE_SUB).record_and_halt();
+    p.0
+}
+
+#[test]
+fn the_queue_step_at_e93c_returns_on_room_and_unwinds_when_full() {
+    let w = [0x0305u16];
+    let Some((room, _)) = both_watching(&step_prog(0x40, 0x03, 0x10), 60, &w) else {
+        return skipped();
+    };
+    assert_eq!((room.a, room.x), (0xee, 0x11), "room: back to the caller, x stepped");
+    let Some((full, mem)) = both_watching(&step_prog(0x40, 0x03, 0x3f), 60, &w) else {
+        return skipped();
+    };
+    assert_eq!((full.a, full.x), (0x01, 0x03), "full: past the caller, x committed");
+    assert_eq!(mem[0], 0xff, "the queue is cut at the committed index");
+}
