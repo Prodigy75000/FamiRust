@@ -750,7 +750,7 @@ impl Mapper for Axrom {
         match addr {
             0x8000..=0xffff => {
                 let base = (self.bank as usize % self.prg_banks32) * 32 * 1024;
-                self.prg[base + (addr as usize - 0x8000)]
+                self.prg[(base + (addr as usize - 0x8000)) % self.prg.len()] // 16 KiB mirrors
             }
             _ => 0,
         }
@@ -1130,7 +1130,7 @@ impl Mapper for BankSwap {
         match addr {
             0x8000..=0xffff => {
                 let base = (self.prg_bank % self.prg_banks32) * 32 * 1024;
-                self.prg[base + (addr as usize - 0x8000)]
+                self.prg[(base + (addr as usize - 0x8000)) % self.prg.len()] // 16 KiB mirrors
             }
             _ => 0,
         }
@@ -1266,7 +1266,7 @@ impl Mapper for Nina03 {
         match addr {
             0x8000..=0xffff => {
                 let base = (self.prg_bank % self.prg_banks32) * 32 * 1024;
-                self.prg[base + (addr as usize - 0x8000)]
+                self.prg[(base + (addr as usize - 0x8000)) % self.prg.len()] // 16 KiB mirrors
             }
             _ => 0,
         }
@@ -1389,7 +1389,7 @@ impl Mapper for Nina113 {
         match addr {
             0x8000..=0xffff => {
                 let base = (self.prg_bank % self.prg_banks32) * 32 * 1024;
-                self.prg[base + (addr as usize - 0x8000)]
+                self.prg[(base + (addr as usize - 0x8000)) % self.prg.len()] // 16 KiB mirrors
             }
             _ => 0,
         }
@@ -2112,7 +2112,7 @@ impl Mapper for Nina001 {
             0x6000..=0x7fff => self.prg_ram[(addr as usize - 0x6000) & (self.prg_ram.len() - 1)],
             0x8000..=0xffff => {
                 let base = (self.prg_bank % self.prg_banks32) * 32 * 1024;
-                self.prg[base + (addr as usize - 0x8000)]
+                self.prg[(base + (addr as usize - 0x8000)) % self.prg.len()] // 16 KiB mirrors
             }
             _ => 0,
         }
