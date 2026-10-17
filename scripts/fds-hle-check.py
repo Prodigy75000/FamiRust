@@ -40,6 +40,7 @@ about the file's own bytes rather than about the whole of video memory.
 
 import argparse
 import collections
+import concurrent.futures
 import io
 import json
 import os
@@ -49,7 +50,10 @@ import sys
 import tempfile
 import zipfile
 
-DEFAULT_ZIP = r"G:\My Drive\FamiRust\Dumps\Cylum's Famicom Disk System ROM Collection (02-16-2021).zip"
+# The merged corpus (2026-10-17): the 114 Cylum disks plus the No-Intro and
+# TOSEC-style sets, one file per distinct dump. The Cylum archive still works
+# with --zip.
+DEFAULT_ZIP = "out/corpus"
 
 ENTRY_RE = re.compile(r"entry \$(\w+) after (\d+) frames")
 REG_RE = re.compile(r"a=\$(\w+) x=\$(\w+) y=\$(\w+) sp=\$(\w+) p=\$(\w+)")
@@ -66,6 +70,12 @@ def group_of(name):
 
 
 def iter_disks(path):
+    if os.path.isdir(path):
+        for f in sorted(os.listdir(path)):
+            if f.lower().endswith(".fds"):
+                with open(os.path.join(path, f), "rb") as fh:
+                    yield os.path.splitext(f)[0], "original", fh.read()
+        return
     z = zipfile.ZipFile(path)
     for name in sorted(n for n in z.namelist() if n.lower().endswith(".zip")):
         title = os.path.splitext(os.path.basename(name))[0]
@@ -117,6 +127,7 @@ def main():
     ap.add_argument("--out", default="out/fds-hle-check.json")
     ap.add_argument("--frames", type=int, default=1500)
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("-j", "--jobs", type=int, default=os.cpu_count() or 1)
     args = ap.parse_args()
 
     if args.binary is None:
@@ -130,16 +141,23 @@ def main():
     real = os.path.abspath(args.real)
     hle = os.path.abspath(args.hle)
 
-    rows = []
-    with tempfile.TemporaryDirectory() as tmp:
-        for i, (title, group, data) in enumerate(iter_disks(args.zip)):
-            if args.limit and i >= args.limit:
-                break
+    disks = list(iter_disks(args.zip))
+    if args.limit:
+        disks = disks[:args.limit]
+
+    def one(disk):
+        title, group, data = disk
+        with tempfile.TemporaryDirectory() as tmp:
             row = check(binary, real, hle, data, args.frames, tmp)
-            row["title"] = title
-            row["group"] = group
+        row["title"] = title
+        row["group"] = group
+        return row
+
+    rows = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as ex:
+        for i, row in enumerate(ex.map(one, disks)):
             rows.append(row)
-            print("%3d %-16s %-48s %s" % (i + 1, row["verdict"], title[:48], group),
+            print("%3d %-16s %-48s %s" % (i + 1, row["verdict"], row["title"][:48], row["group"]),
                   flush=True)
 
     with open(args.out, "w", encoding="utf-8") as f:
