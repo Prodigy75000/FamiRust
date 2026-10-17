@@ -143,6 +143,7 @@ impl Nes {
     /// Run until the PPU completes a frame (reaches vblank), then return the
     /// ARGB8888 framebuffer (256x240).
     pub fn step_frame(&mut self) -> &[u32] {
+        self.bus.mapper.frame_start();
         self.bus.ppu.frame_complete = false;
         while !self.bus.ppu.frame_complete {
             self.cpu.step(&mut self.bus);
@@ -290,6 +291,14 @@ impl Nes {
     /// `None`. This is RA's `RETRO_MEMORY_SAVE_RAM` and the battery save.
     pub fn save_ram(&mut self) -> Option<&mut [u8]> {
         self.bus.mapper.save_ram()
+    }
+
+    /// What the frontend persists across launches: a cartridge's work RAM, or
+    /// for the FDS the whole disk as `.fds` sides. libretro's SAVE_RAM. Unlike
+    /// [`Nes::save_ram`] this is not memory the CPU sees, so it stays out of
+    /// the memory map RetroAchievements reads.
+    pub fn battery_save(&mut self) -> Option<&mut [u8]> {
+        self.bus.mapper.battery_save()
     }
 
     // ---- debug harness (see docs/DEBUG_HARNESS.md) ----

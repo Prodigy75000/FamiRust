@@ -202,9 +202,59 @@ struct MediumSide {
     image: Vec<u8>,
     /// Whether this side has been written to since load (needs battery persist).
     dirty: bool,
+    /// Written since the battery buffer last took a copy of it. Not part of a
+    /// savestate: loading one marks every side, since the medium came with it.
+    unsynced: bool,
 }
 
 impl MediumSide {
+    /// The medium read back into a `.fds` side: every block from the lead-in
+    /// on, without its gap, start mark or CRC, padded with zeros to `len`.
+    ///
+    /// The inverse of [`MediumSide::build`], and the shape a battery save is
+    /// kept in, so a save is an ordinary `.fds` side any tool can read. It
+    /// walks blocks the way the drive finds them: past the zero gap to the
+    /// start mark, then the block's own length from its type, a body's from
+    /// the header before it. `None` when there is no block 1 to start from,
+    /// which is a side `build` passed through raw.
+    fn to_raw(&self, len: usize) -> Option<Vec<u8>> {
+        let img = &self.image;
+        let mut out = Vec::with_capacity(len);
+        let mut pos = 0usize;
+        let mut body = 0usize; // the size the last header gave
+        let mut first = true;
+        loop {
+            while pos < img.len() && img[pos] == 0 {
+                pos += 1;
+            }
+            if pos + 1 >= img.len() || img[pos] != START_MARK {
+                break;
+            }
+            let start = pos + 1;
+            let size = match img[start] {
+                0x01 if first => 56,
+                0x02 if !first => 2,
+                0x03 if !first => 16,
+                0x04 if !first => 1 + body,
+                _ => break,
+            };
+            if start + size > img.len() || out.len() + size > len {
+                break;
+            }
+            if img[start] == 0x03 {
+                body = u16::from_le_bytes([img[start + 13], img[start + 14]]) as usize;
+            }
+            out.extend_from_slice(&img[start..start + size]);
+            pos = start + size + CRC_FOOTER;
+            first = false;
+        }
+        if first {
+            return None;
+        }
+        out.resize(len, 0);
+        Some(out)
+    }
+
     /// Walk the `.fds` block chain and rebuild the medium image with gaps.
     /// Unknown or truncated tails stop the walk; whatever parsed so far streams
     /// (the BIOS just CRC-fails past valid data).
@@ -292,6 +342,7 @@ impl MediumSide {
         MediumSide {
             image,
             dirty: false,
+            unsynced: false,
         }
     }
 }
@@ -654,6 +705,15 @@ pub struct Fds {
 
     // ---- disk ----
     sides: Vec<MediumSide>,
+    /// The battery save: every side as a `.fds` side, back to back, the
+    /// frontend's SAVE_RAM. Kept in step with the medium at each frame start.
+    battery: Vec<u8>,
+    /// What `battery` held before the frontend could touch it, to tell a
+    /// restored save from the disk as it came.
+    battery_base: Vec<u8>,
+    /// Whether the first frame has run, and so whether a restored save has
+    /// already been taken.
+    battery_primed: bool,
     current_side: usize,
     inserted: bool,
     /// Cycles left in the post-swap "disk absent" settle window (see
@@ -727,6 +787,15 @@ impl Fds {
     /// Build the RAM Adapter from a parsed disk and the 8 KiB BIOS image.
     pub fn new(disk: FdsDisk, bios: Vec<u8>) -> Self {
         let sides: Vec<MediumSide> = disk.sides.iter().map(|s| MediumSide::build(s)).collect();
+        let battery: Vec<u8> = disk
+            .sides
+            .iter()
+            .flat_map(|s| {
+                let mut s = s.clone();
+                s.resize(SIDE_LEN, 0);
+                s
+            })
+            .collect();
         let mut bios = bios;
         bios.resize(BIOS_LEN, 0);
         Fds {
@@ -734,6 +803,9 @@ impl Fds {
             chr_ram: vec![0u8; 8 * 1024],
             bios,
             sides,
+            battery_base: battery.clone(),
+            battery,
+            battery_primed: false,
             current_side: 0,
             inserted: true,
             reinsert_cycles: 0,
@@ -1018,10 +1090,12 @@ impl Fds {
                 }
                 self.head += CRC_FOOTER - 1; // the common advance takes the last
                 side.dirty = true;
+                side.unsynced = true;
             }
             XferMode::Write => {
                 side.image[self.head] = self.write_reg;
                 side.dirty = true;
+                side.unsynced = true;
             }
         }
         if self.mode == XferMode::Read && self.dbg_first_bytes > 0 {
@@ -1199,6 +1273,41 @@ impl crate::cart::Mapper for Fds {
         None
     }
 
+    /// The disk, as the battery save: what a game wrote to it is what the
+    /// frontend keeps, and what it hands back next launch is the disk the
+    /// game finds. The owner's design, 2026-10-17.
+    fn battery_save(&mut self) -> Option<&mut [u8]> {
+        Some(&mut self.battery)
+    }
+
+    fn frame_start(&mut self) {
+        // The frontend writes a stored save into `battery` before the first
+        // frame. Any side it changed is rebuilt from it, once, before the BIOS
+        // has read a byte of the disk.
+        if !self.battery_primed {
+            self.battery_primed = true;
+            if self.battery != self.battery_base {
+                for (i, side) in self.sides.iter_mut().enumerate() {
+                    let at = i * SIDE_LEN..(i + 1) * SIDE_LEN;
+                    if self.battery[at.clone()] != self.battery_base[at.clone()] {
+                        *side = MediumSide::build(&self.battery[at]);
+                    }
+                }
+            }
+            self.battery_base = Vec::new(); // not needed again
+        }
+        // And anything a game wrote since goes back the other way, so the
+        // buffer the frontend reads whenever it likes is the disk as it is.
+        for (i, side) in self.sides.iter_mut().enumerate() {
+            if side.unsynced {
+                side.unsynced = false;
+                if let Some(raw) = side.to_raw(SIDE_LEN) {
+                    self.battery[i * SIDE_LEN..(i + 1) * SIDE_LEN].copy_from_slice(&raw);
+                }
+            }
+        }
+    }
+
     fn dbg_census_on(&mut self) {
         self.dbg_bios_reads = vec![[0u32; 2]; BIOS_LEN];
     }
@@ -1326,6 +1435,7 @@ impl SaveState for Fds {
             s.image.resize(len, 0);
             r.bytes(&mut s.image)?;
             s.dirty = r.bool()?;
+            s.unsynced = true; // the battery save follows the disk that came in
         }
         self.current_side = r.u8()? as usize;
         self.inserted = r.bool()?;
@@ -1421,6 +1531,31 @@ mod tests {
         let side = MediumSide::build(&synth_side());
         assert_eq!(side.image.len(), 66740);
         assert!(side.image[295..].iter().all(|&b| b == 0), "and it is blank");
+    }
+
+    #[test]
+    fn a_side_reads_back_off_the_medium_as_it_went_on() {
+        // build then to_raw is the identity on a side, hidden files and all:
+        // the battery save is the .fds side itself, so a side that went onto
+        // the medium untouched has to come back off it byte for byte.
+        let mut raw = synth_side();
+        raw[79] = 0x03; // a second file past the count of one
+        raw[79 + 1] = 0x01;
+        raw[79 + 13] = 2;
+        raw[95] = 0x04;
+        raw[96..98].copy_from_slice(&[0x5e, 0x5f]);
+        let back = MediumSide::build(&raw).to_raw(SIDE_LEN).expect("a block 1 to start from");
+        assert_eq!(back.len(), SIDE_LEN);
+        let first = back.iter().zip(&raw).position(|(a, b)| a != b);
+        assert_eq!(first, None, "the side read back differs at this byte");
+    }
+
+    #[test]
+    fn a_side_with_no_block_1_has_no_raw_form() {
+        // build passes such a side through as it is; there is no block chain
+        // to read back, and the battery keeps the side as it came.
+        let side = MediumSide::build(&vec![0x5a; SIDE_LEN]);
+        assert!(side.to_raw(SIDE_LEN).is_none());
     }
 
     #[test]

@@ -251,6 +251,16 @@ pub trait Mapper: SaveState {
         None
     }
 
+    /// What the frontend persists as the battery save (libretro SAVE_RAM). For
+    /// a cartridge that is its work RAM; the FDS keeps its disk here instead,
+    /// which must NOT appear in the memory map as $6000 RAM, hence two methods.
+    fn battery_save(&mut self) -> Option<&mut [u8]> {
+        self.save_ram()
+    }
+
+    /// Called at the start of every frame, before the CPU runs.
+    fn frame_start(&mut self) {}
+
     /// Per-nametable CIRAM bank override (0 or 1), for mappers that pick the
     /// nametable from a bank register instead of a fixed mirroring mode (TxSROM).
     /// `nt` is the logical nametable 0..3. `None` = use [`Mapper::mirroring`].

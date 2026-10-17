@@ -570,6 +570,28 @@ Ninety-nine is NOT "ninety-nine titles play correctly": thirty seconds of
 unattended running reaches what it reaches, and a game that needs a routine
 only when you open its menu has not asked yet.
 
+### Saves persist as a battery save (2026-10-17)
+
+Until now a game's save lived only on the emulated disk, so it survived in a
+savestate and nowhere else. The owner's call: the frontend keeps it, as it
+keeps a cartridge's battery RAM. libretro SAVE_RAM for an FDS disk is the
+whole disk as `.fds` sides, 65,500 bytes each, back to back, so a save is an
+ordinary disk image any tool can read.
+
+- The frontend writes a stored save in before the first frame; at that frame
+  start each side that differs from the disk as loaded is rebuilt from it,
+  before the BIOS reads a byte.
+- A side the game writes is read back off the medium into the buffer at the
+  next frame start, so whenever the frontend reads it, it is the disk as it
+  is. A loaded savestate brings its disk in the same way.
+- It stays out of the memory map: SAVE_RAM in the map is `$6000` RAM to
+  RetroAchievements, and the disk is not memory the CPU sees. The savestate
+  layout is unchanged.
+
+Reading the medium back is the inverse of building it. Over the 198 sides in
+the collection, 155 come back byte for byte and 43 lose only bytes after
+their last block, which the medium never carried and no game can reach.
+
 ### How a routine gets worked out
 
 `fdsprof` puts the machine under an access log for the length of one call and

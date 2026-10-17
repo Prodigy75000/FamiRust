@@ -4418,3 +4418,102 @@ fn reset_with_the_warm_signature_returns_to_the_game_without_the_disk() {
         }
     }
 }
+
+// --- the disk as a battery save ----------------------------------------------
+
+/// The `.fds` side the battery holds for side 0, and where a file of `id`
+/// sits in it: its header, then its body.
+fn battery_file(battery: &[u8], id: u8) -> Option<Vec<u8>> {
+    let side = &battery[..65500];
+    let mut at = 58; // block 1 is 56 bytes, block 2 is 2
+    while at + 17 < side.len() && side[at] == 0x03 {
+        let size = u16::from_le_bytes([side[at + 13], side[at + 14]]) as usize;
+        if side[at + 2] == id && &side[at + 3..at + 11] == b"TESTSAVE" {
+            return Some(side[at + 17..at + 17 + size].to_vec());
+        }
+        at += 16 + 1 + size;
+    }
+    None
+}
+
+/// Run `prog` from handover under our BIOS with whole frames, as a frontend
+/// does: the battery buffer is synced at each frame start.
+fn run_frames(nes: &mut nes_core::Nes, prog: &[u8], frames: u64) -> bool {
+    for (i, b) in prog.iter().enumerate() {
+        nes.dbg_poke(PROG + i as u16, *b);
+    }
+    nes.dbg_poke(OUT_SENTINEL, 0);
+    nes.dbg_set_pc(PROG);
+    for _ in 0..frames {
+        nes.step_frame();
+        if nes.peek(OUT_SENTINEL) == DONE {
+            nes.step_frame(); // one more frame start, which takes the copy
+            return true;
+        }
+    }
+    false
+}
+
+#[test]
+fn a_file_written_to_the_disk_is_in_the_battery_save() {
+    let Some(disk) = a_disk() else { return skipped() };
+    let mut nes = boot_to_handover(&disk, &[]);
+    let before = nes.battery_save().expect("an FDS disk has a battery save").to_vec();
+    assert_eq!(before.len() % 65500, 0, "whole .fds sides");
+    assert!(battery_file(&before, WF_ID).is_none(), "the disk has no such file yet");
+    assert!(run_frames(&mut nes, &wf_prog(0xe239, 0xff, false, None, false), 3000));
+    let after = nes.battery_save().unwrap().to_vec();
+    let want: Vec<u8> = (0..WF_SIZE).map(wf_byte).collect();
+    assert_eq!(battery_file(&after, WF_ID), Some(want), "the saved file, in the .fds side");
+}
+
+#[test]
+fn a_battery_save_handed_back_is_the_disk_the_game_finds() {
+    // Write a file, take the battery buffer as the frontend would, then give
+    // it to a fresh machine before its first frame and have the BIOS load the
+    // file back off that machine's disk.
+    let Some(disk) = a_disk() else { return skipped() };
+    let mut first = boot_to_handover(&disk, &[]);
+    assert!(run_frames(&mut first, &wf_prog(0xe239, 0xff, false, None, false), 3000));
+    let saved = first.battery_save().unwrap().to_vec();
+
+    let mut fresh = nes_core::Nes::from_fds_hle(&disk).unwrap();
+    fresh.battery_save().unwrap().copy_from_slice(&saved);
+    fresh.step_frame(); // the first frame start takes the save
+    let mut p = Prog::default();
+    p.poke(0x2000, 0x00);
+    p.raw(&[0xa9, 0xff, 0xa2, 0x09, 0x9d, 0x00, 0x05, 0xca, 0x10, 0xfa]); // any disk
+    p.poke(0x05f0, WF_ID).poke(0x05f1, 0xff);
+    p.bytes_at(WF_LOADED, &[0xa5; WF_SIZE as usize]);
+    p.jsr_with_args(0xe1f8, WF_TEMPLATE, 0x05f0);
+    p.record_and_halt();
+    // Handover first, by stepping as the boot test does, then the load.
+    let deadline = fresh.dbg_frame() + 1500;
+    while fresh.dbg_frame() < deadline {
+        let pc = fresh.dbg_pc();
+        let v = u16::from(fresh.peek(VEC_RESET)) | (u16::from(fresh.peek(VEC_RESET + 1)) << 8);
+        if pc < BIOS_BASE && pc == v {
+            break;
+        }
+        fresh.step();
+    }
+    assert!(run_frames(&mut fresh, &p.0, 900), "the load never returned");
+    let got: Vec<u8> = (0..WF_SIZE as u16).map(|i| fresh.peek(WF_LOADED + i)).collect();
+    let want: Vec<u8> = (0..WF_SIZE).map(wf_byte).collect();
+    assert_eq!(fresh.peek(OUT), 0x00, "the load succeeded");
+    assert_eq!(got, want, "and found the file the other machine saved");
+}
+
+#[test]
+fn loading_a_savestate_brings_its_disk_into_the_battery_save() {
+    let Some(disk) = a_disk() else { return skipped() };
+    let mut first = boot_to_handover(&disk, &[]);
+    assert!(run_frames(&mut first, &wf_prog(0xe239, 0xff, false, None, false), 3000));
+    let state = first.save_state();
+    let mut other = boot_to_handover(&disk, &[]);
+    other.step_frame();
+    other.load_state(&state).expect("the state loads");
+    other.step_frame();
+    let want: Vec<u8> = (0..WF_SIZE).map(wf_byte).collect();
+    assert_eq!(battery_file(other.battery_save().unwrap(), WF_ID), Some(want));
+}

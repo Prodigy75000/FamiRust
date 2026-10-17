@@ -667,7 +667,7 @@ pub extern "C" fn retro_get_memory_data(id: u32) -> *mut c_void {
         match id {
             RETRO_MEMORY_SYSTEM_RAM => core.system_ram().as_mut_ptr() as *mut c_void,
             RETRO_MEMORY_SAVE_RAM => core
-                .save_ram()
+                .battery_save()
                 .map(|r| r.as_mut_ptr() as *mut c_void)
                 .unwrap_or(ptr::null_mut()),
             _ => ptr::null_mut(),
@@ -680,7 +680,7 @@ pub extern "C" fn retro_get_memory_size(id: u32) -> usize {
         let Some(core) = &mut s.core else { return 0 };
         match id {
             RETRO_MEMORY_SYSTEM_RAM => core.system_ram().len(),
-            RETRO_MEMORY_SAVE_RAM => core.save_ram().map(|r| r.len()).unwrap_or(0),
+            RETRO_MEMORY_SAVE_RAM => core.battery_save().map(|r| r.len()).unwrap_or(0),
             _ => 0,
         }
     })
