@@ -369,49 +369,38 @@ delay_131_end:
 ; That is what forces the shape below. `a` is preserved and the routine makes
 ; NO stack writes at all, so there is no `pha` available and `a` cannot be
 ; borrowed as a counter: `x` and `y` are the only registers in play and `y` is
-; already the argument. One 8-bit inner loop therefore has to cover 1790
-; cycles on its own, and the arithmetic has exactly three solutions. This is
-; the one with room in the outer pad for the `clc`:
+; already the argument. One 8-bit inner loop therefore covers 1790 cycles on
+; its own, and the compare that gives the carry sits inside it:
 ;
-;   2 (ldx) + [7*254 - 1] + 6 (pad) + 2 (dey) + 3 (bne) = 1790
+;   2 (ldx) + [8*223 - 1] + 2 (dey) + 3 (bne) = 1790
 ;
 ; Entry overhead has to be ZERO for the total to come out at 5 + 1790*y, so
 ; the loop starts on the entry point itself with nothing in front of it.
 ;
 ; Exit: `a` preserved, `x` and `y` both $00, N=0 and Z=1 from the final `dey`,
-; and **C = (a >= $20)**, which is why a compare is in the pad.
-; V, D and I are preserved. Decimal-proof by construction: nothing here adds.
+; and **C = (a >= [$00])**, the carry of the `cmp $00` in the loop. V, D and I
+; are preserved. Decimal-proof by construction: nothing here adds.
 ;
-; **Carry is `a >= $20`**, and it took three goes to get right. The note this
-; was written from recorded "C=0 always", measured by `fdsprof` on a live
-; Lutter whose calls were taking interrupts, so the game's handler was altering
-; the P it had pushed. Re-measuring with NMI off through $2000, with I set, and
-; on calls proven to make no writes at all said C=1 instead, which was just as
-; wrong: that program happened to hold `a`=$5A. Carry does not depend on the
-; carry coming in, on `y`, or on decimal mode. It depends on `a`, with a clean
-; threshold: $1F gives 0 and $20 gives 1, swept either side. Hence the compare
-; rather than a `sec`, which also explains how `a` survives a routine that
-; leaves a flag derived from it.
-;
-; The real one reads $0000 over and over while it waits. Those are dummy reads
-; with no effect, proven by forcing $00, $01, $70, $80 and $FF into it and
-; getting byte-identical 466,204-cycle calls, so ours does not reproduce them
-; and makes no bus access below $E000 at all.
+; **The carry took four goes.** "C=0 always" came from a live Lutter taking
+; interrupts mid-call, so its handler altered the pushed P. "C=1" came from a
+; probe that happened to hold `a`=$5A. "a >= $20" survived two rounds, because
+; the real BIOS leaves $20 at $0000 at handover and no test planted it. The
+; original's repeated reads of $0000 while it waits ARE the compare: forcing
+; $00 changed no cycle count, which is why they were first taken for dummy
+; reads, but it does change the carry. Super Lode Runner calls this with
+; a=$10 over a $00 below it and branches on the answer.
 .org $E153
 delay_ms:
-  ldx #254                  ; 2
+  ldx #223                  ; 2
 @inner:
-  nop                       ; 2
+  cmp $00                   ; 3   carry out is (a >= [$00]), measured
   dex                       ; 2
   bne @inner                ; 3, and 2 on the last pass
-  cmp #$20                  ; 2   carry out is (a >= $20), measured
-  nop                       ; 2
-  nop                       ; 2
   dey                       ; 2
   bne delay_ms              ; 3, and 2 on the last pass. y=0 wraps to 255 and
                             ;    so runs 256 times, which is the contract
   rts                       ; 6
-.assert (delay_ms_end - delay_ms) == 14
+.assert (delay_ms_end - delay_ms) <= 14
 delay_ms_end:
 ; --- $E161 $E16B $E171 $E17E $E185: the PPUMASK family ----------------------
 ;
@@ -651,7 +640,7 @@ pf_body_end:
 .org $E305
   jmp set_count             ; the body is at $E4FC
 .org $E32A
-  jmp disk_info             ; the body is at $E000, its blocks at $EF07
+  jmp disk_info             ; the body is at $FA00, its blocks at $EF07
 .org $E3E7
 ; --- $E3E7: fetch the inline arguments of the routine that called us, and ---
 ; --- check a disk is in --------------------------------------------------------
@@ -2165,8 +2154,22 @@ jump_table_end:
 ; direction for a routine a game may run inside vblank: it finishes earlier
 ; than the caller budgeted for, never later.
 .org $EBAF
-  jmp vram_upload           ; the body is 118 bytes and only 115 sit between
-                            ; this entry point and the next one
+; Two bodies, chosen by the mode bits in a's low nibble. A plain copy (all
+; four clear) takes the original routine, verified on 29 titles; anything else
+; takes vram_upload2, which does the fill, interleave and read-back modes as
+; measured. Bubble Bobble is why the split exists: it runs a task switcher off
+; its NMI, makes a 213-unit plain copy over two frames long, and halted when
+; that copy ran 3200 cycles slower in the general routine than in this one.
+; Both were faster than the original; which NMI lands inside the call is what
+; changed. Section-Z is why the modes exist: it expands a 1-bit font with a=$04.
+  pha
+  and #$0F
+  bne @modes
+  pla
+  jmp vram_upload
+@modes:
+  pla
+  jmp vram_upload2
 
 .org $FEB0
 vram_upload:
@@ -2702,35 +2705,58 @@ nmi_arm_end:
 ; So $0101 is the state machine of the BIOS's own disk-transfer interrupt, and
 ; only $C0 means "this one is the game's". That matches what profiling $E1F8
 ; found independently: it uses $0101 throughout a load as its transfer state,
-; holding $40 per block and counting $08 down to $00 in the gaps, and restores
-; the caller's value on the way out.
+; holding $40 per block and counting $08 down to $00 in the gaps.
 ;
-; **We have no transfer to service.** Our loader polls the drive rather than
-; taking its interrupts, and the timer is off at boot, so every interrupt
-; arriving after handover is one the game asked for and the only sensible thing
-; to do with it is give it to the game. Dispatching on bit 7 rather than on $C0
-; exactly is therefore a deliberate simplification of a rule we have measured
-; and chosen not to implement, not an approximation of one we failed to work
-; out. Returning instead would drop an interrupt a game enabled on purpose.
+; **Games drive that machinery themselves.** Our own loaders poll and never
+; arm the byte interrupt, so for a while this dispatched on bit 7 alone. Super
+; Lode Runner proved that wrong: it carries its own loader, sets $0101 = $40
+; and takes every disk byte through this handler. Returning without reading
+; $4031 left the interrupt asserted, it fired 4.7 million times, and the game
+; never got an NMI again. So every range is now served, as measured by forcing
+; $0101 at that game's first interrupt:
 ;
-; What is NOT known is what the $80 path does after it reads $4030 and finds no
-; drive interrupt pending, which is the case a game would actually hit, since
-; $80 is what boot leaves in $0101. Settling it needs the BIOS's transfer
-; machinery implemented, which is the same work as taking transfer interrupts
-; in the loader, and neither is needed while the loader polls.
-;
-; This dispatch costs 11 cycles against the real one's 14 on the $C0 path. The
-; difference is left rather than padded with an instruction chosen for its
-; duration: an IRQ is entered on a timer the game programmed, so a fixed
-; latency shifts every interrupt equally rather than moving one relative to
-; another.
+;   $00       rti, nothing read, nothing acknowledged
+;   $01-$3F   read and drop one byte, count $0101 down, rti
+;   $40-$7F   the byte from $4031 in a and x, the caller's a to $4024, then
+;             the interrupt frame is dropped and the rts returns from the
+;             routine the game was waiting in: N and Z from the byte, V set
+;   $80-$BF   read $4030 to acknowledge, rti, 164 cycles as the original
+;   $C0-$FF   the game's, through $DFFE
 .org $E1C7
 irq:
-  bit $0101
-  bpl @none
-  jmp (VEC_IRQ)
-@none:
+  bit $0101                 ; N = bit 7, V = bit 6
+  bmi @high
+  bvc @skip
+  ; $40-$7F: one byte of a transfer. The byte comes back in a and x, the
+  ; caller's a goes to the write register, and the interrupt's own frame is
+  ; dropped so the rts returns from the routine the game was waiting in.
+  ldx FDS_DATA
+  sta FDS_WRITE
+  pla
+  pla
+  pla
+  txa                       ; N and Z from the byte; V set by the bit above
+  rts
+@skip:                      ; $00-$3F: skip a byte, $0101 counts them down
+  pha
+  lda $0101
+  beq @skip_out             ; zero: nothing read, nothing acknowledged
+  dec $0101
+  lda FDS_DATA              ; reading the byte acknowledges it
+@skip_out:
+  pla
   rti
+@high:
+  bvc @ack
+  jmp (VEC_IRQ)             ; $C0-$FF: the game's
+@ack:                       ; $80-$BF: acknowledge through the status read
+  pha
+  lda FDS_STATUS
+  jsr $E149                 ; the original's 164 cycles: 27 + 6 + 131
+  pla
+  rti
+irq_end:
+.assert irq_end <= $E1F8
 
 ; ===========================================================================
 ; The boot screen
@@ -2748,9 +2774,10 @@ irq:
 ; tile instead of sixteen.
 load_font:
   bit PPUSTATUS
-  lda #$00
+  lda #$10
   sta PPUADDR
-  sta PPUADDR             ; pattern table 0, tile 0
+  lda #$00
+  sta PPUADDR             ; pattern table 1, tile 0
   lda #<font
   sta ptr
   lda #>font
@@ -2758,15 +2785,16 @@ load_font:
   ldx #FONT_TILES
 @tile:
   ldy #0
+  lda #$FF
 @plane0:
-  lda (ptr),y
   sta PPUDATA
   iny
   cpy #8
   bne @plane0
-  lda #0
   ldy #0
 @plane1:
+  lda (ptr),y
+  eor #$FF
   sta PPUDATA
   iny
   cpy #8
@@ -2800,21 +2828,7 @@ load_palette:
 
 ; --- clear both nametables -------------------------------------------------
 clear_screen:
-  bit PPUSTATUS
-  lda #$20
-  sta PPUADDR
-  lda #$00
-  sta PPUADDR
-  lda #0                  ; tile 0 is blank
-  ldx #8                  ; 8 x 256 bytes covers $2000-$27FF
-  ldy #0
-@loop:
-  sta PPUDATA
-  iny
-  bne @loop
-  dex
-  bne @loop
-  rts
+  jmp blank_nt
 
 ; --- write the string at (ptr) to the nametable address in tmp/tmp+1 -------
 ;
@@ -2925,7 +2939,7 @@ unimplemented:
   jmp @forever
 
 screen_on:
-  lda #0
+  lda #$10
   sta PPUCTRL               ; NMI off: the loader polls, it does not wait
   ; $2006 sets the scroll as well as the address, and $2000 means fine Y,
   ; coarse Y and coarse X all zero, so the top left corner without needing
@@ -2956,8 +2970,9 @@ reset:
   stx PPUCTRL
   stx PPUMASK
   stx DMC_FREQ              ; no DMC IRQ
-  lda #$40
-  sta APUFRAME              ; four-step frame counter, frame IRQ off
+  jsr warm_check
+  nop
+  nop
   bit PPUSTATUS
 
   ; The PPU is not usable until it has seen two vblanks from power-on.
@@ -3045,13 +3060,12 @@ reset:
   ; there. A file of kind 2 loads straight into this memory, and a game is
   ; entitled to find its own licence screen and nothing else.
   jsr screen_off
-  jsr clear_screen
+  jsr arm_c0                ; clears the screen, then NMI selector $C0
   jsr load_disk
   bcs fail
 
-  ; Rendering off before the game gets the machine, so it inherits a PPU it can
-  ; set up from scratch rather than one mid-frame with our screen on it.
-  jsr screen_off
+  ; The PPU and its shadows as the original leaves them, rendering off.
+  jsr ho_ppu
 
   ; Leave the work RAM we borrowed the way we found it.
   ldx #SCRATCH_LO
@@ -3286,7 +3300,7 @@ read_header:
 .org $F900
 
 palette:
-  .byte $0F, $30, $10, $00      ; black, white, grey, black
+  .byte $0F, $30, $10, $0F      ; black, white, grey, black
   .byte $0F, $30, $10, $00
 
 ; Status messages, indexed by the constants below.
@@ -3301,23 +3315,22 @@ status_table:
   .word str_bad_disk
   .word str_no_routine
 
-; Strings are font indices, terminated by $FF. Tile 0 is blank, so a space is
-; a zero and the terminator cannot be confused with one.
-GL_SPACE = 0
+; Strings are font indices, terminated by $FF: digits are 0-9, A-Z $0A-$23,
+; and a space is $24, the blank, as in every licence file.
 
 str_title:
-  .byte 6, 1, 13, 9, 18, 21, 19, 20, $FF        ; FAMIRUST
+  .byte 15, 10, 22, 18, 27, 30, 28, 29, $FF        ; FAMIRUST
 str_sub:
-  .byte 4, 9, 19, 11, 0, 19, 25, 19, 20, 5, 13, $FF   ; DISK SYSTEM
+  .byte 13, 18, 28, 20, 36, 28, 34, 28, 29, 14, 22, $FF   ; DISK SYSTEM
 str_no_disk:
-  .byte 9, 14, 19, 5, 18, 20, 0, 4, 9, 19, 11, 0, $FF     ; INSERT DISK
+  .byte 18, 23, 28, 14, 27, 29, 36, 13, 18, 28, 20, 36, $FF     ; INSERT DISK
 str_loading:
-  .byte 0, 0, 12, 15, 1, 4, 9, 14, 7, 0, 0, 0, $FF        ; LOADING
+  .byte 36, 36, 21, 24, 10, 13, 18, 23, 16, 36, 36, 36, $FF        ; LOADING
 str_bad_disk:
-  .byte 0, 4, 9, 19, 11, 0, 5, 18, 18, 15, 18, 0, $FF     ; DISK ERROR
+  .byte 36, 13, 18, 28, 20, 36, 14, 27, 27, 24, 27, 36, $FF     ; DISK ERROR
 
 str_no_routine:
-  .byte 0, 14, 15, 0, 18, 15, 21, 20, 9, 14, 5, 0, $FF     ; NO ROUTINE
+  .byte 36, 23, 24, 36, 27, 24, 30, 29, 18, 23, 14, 36, $FF     ; NO ROUTINE
 
 ; They are all the same width, so one overwrites another completely.
 .assert (str_loading - str_no_disk) == STATUS_LEN + 1
@@ -3328,12 +3341,33 @@ str_no_routine:
 ; The font
 ; ---------------------------------------------------------------------------
 ;
-; Tile 0 blank, tiles 1-26 A to Z, tiles 27-36 the digits. One bit plane, eight
-; bytes a glyph; `load_font` writes the second plane as zeros.
-.org $FA00
+; Digits $00-$09, A-Z $0A-$23, blank $24, then four marks. One bit plane,
+; eight bytes a glyph. `load_font` puts them in pattern table 1 as the
+; original leaves its own: colour 1 glyphs on a colour 3 cell.
+.org $E000
+  .byte $00                 ; $E000 reads zero: Super Lode Runner sums $6000
+                            ; through $E000 and checks the total
 font:
-  ; 0: blank
-  .byte %00000000,%00000000,%00000000,%00000000,%00000000,%00000000,%00000000,%00000000
+  ; 0
+  .byte %01111100,%11000110,%11001110,%11010110,%11100110,%11000110,%01111100,%00000000
+  ; 1
+  .byte %00011000,%00111000,%01111000,%00011000,%00011000,%00011000,%01111110,%00000000
+  ; 2
+  .byte %01111100,%11000110,%00000110,%00011100,%01110000,%11000000,%11111110,%00000000
+  ; 3
+  .byte %01111100,%11000110,%00000110,%00111100,%00000110,%11000110,%01111100,%00000000
+  ; 4
+  .byte %00001100,%00011100,%00111100,%01101100,%11111110,%00001100,%00001100,%00000000
+  ; 5
+  .byte %11111110,%11000000,%11111100,%00000110,%00000110,%11000110,%01111100,%00000000
+  ; 6
+  .byte %00111100,%01100000,%11000000,%11111100,%11000110,%11000110,%01111100,%00000000
+  ; 7
+  .byte %11111110,%00000110,%00001100,%00011000,%00110000,%00110000,%00110000,%00000000
+  ; 8
+  .byte %01111100,%11000110,%11000110,%01111100,%11000110,%11000110,%01111100,%00000000
+  ; 9
+  .byte %01111100,%11000110,%11000110,%01111110,%00000110,%00001100,%01111000,%00000000
   ; A
   .byte %00111000,%01101100,%11000110,%11000110,%11111110,%11000110,%11000110,%00000000
   ; B
@@ -3386,27 +3420,25 @@ font:
   .byte %11000110,%11000110,%01101100,%00111000,%00011000,%00011000,%00011000,%00000000
   ; Z
   .byte %11111110,%00001100,%00011000,%00110000,%01100000,%11000000,%11111110,%00000000
-  ; 0
-  .byte %01111100,%11000110,%11001110,%11010110,%11100110,%11000110,%01111100,%00000000
-  ; 1
-  .byte %00011000,%00111000,%01111000,%00011000,%00011000,%00011000,%01111110,%00000000
-  ; 2
-  .byte %01111100,%11000110,%00000110,%00011100,%01110000,%11000000,%11111110,%00000000
-  ; 3
-  .byte %01111100,%11000110,%00000110,%00111100,%00000110,%11000110,%01111100,%00000000
-  ; 4
-  .byte %00001100,%00011100,%00111100,%01101100,%11111110,%00001100,%00001100,%00000000
-  ; 5
-  .byte %11111110,%11000000,%11111100,%00000110,%00000110,%11000110,%01111100,%00000000
-  ; 6
-  .byte %00111100,%01100000,%11000000,%11111100,%11000110,%11000110,%01111100,%00000000
-  ; 7
-  .byte %11111110,%00000110,%00001100,%00011000,%00110000,%00110000,%00110000,%00000000
-  ; 8
-  .byte %01111100,%11000110,%11000110,%01111100,%11000110,%11000110,%01111100,%00000000
-  ; 9
-  .byte %01111100,%11000110,%11000110,%01111110,%00000110,%00001100,%01111000,%00000000
+  ; $24: blank
+  .byte %00000000,%00000000,%00000000,%00000000,%00000000,%00000000,%00000000,%00000000
+  ; $25: comma
+  .byte %00000000,%00000000,%00000000,%00000000,%00000000,%00011000,%00011000,%00110000
+  ; $26: full stop
+  .byte %00000000,%00000000,%00000000,%00000000,%00000000,%00011000,%00011000,%00000000
+  ; $27: apostrophe
+  .byte %00011000,%00011000,%00110000,%00000000,%00000000,%00000000,%00000000,%00000000
+  ; $28: registered mark
+  .byte %00111100,%01000010,%10111010,%10100110,%10111010,%10100110,%01000010,%00111100
 font_end:
+; The font is an interface, not just our boot screen's: games read it straight
+; out of the ROM. Dig Dug, Dig Dug II, Galaga, Galaxian, Pac-Man and Xevious
+; read $E001-$E148 under the original, and Section-Z expands it into pattern
+; RAM through $EBAF from $E001. 41 glyphs, one plane, in the index order every
+; licence file uses: digits, A to Z, blank at $24, then four marks. The glyph
+; ART is ours; only where each one sits is the interface.
+.assert font == $E001
+.assert font_end == $E149
 FONT_BYTES = font_end - font
 FONT_TILES = FONT_BYTES / 8
 
@@ -4601,7 +4633,7 @@ wf_checks_end:
 ; ===========================================================================
 ; Vectors
 ; ===========================================================================
-.org $E000
+.org $FA00
 ; ===========================================================================
 ; $E32A: read the whole side and write a directory of it into RAM
 ; ===========================================================================
@@ -4852,7 +4884,7 @@ di_off:
   rts
 
 di_helpers_end:
-.assert di_helpers_end <= $E149
+.assert di_helpers_end <= $FB28
 
 ; The four block routines, in the free run at $EF07.
 .org $EF07
@@ -5279,3 +5311,324 @@ pf_match_end:
   .word nmi
   .word reset
   .word irq
+
+.org $F850
+; ---- the PPU and the register shadows a game is handed --------------------
+;
+; Measured identical on every disk sampled under the original: PPUCTRL and $FF
+; $10 (background tiles from $1000, where the font is), PPUMASK and $FE $06
+; (rendering off, left columns shown), $FA $2F, $F9 $FF. Games lean on these
+; without setting them: Zelda 2 never sets PPUCTRL bit 4 itself, so with $00
+; here its whole screen drew from the wrong pattern table.
+ho_ppu:
+  lda #$10
+  sta $FF
+  sta PPUCTRL
+  lda #$06
+  sta $FE
+  sta PPUMASK
+  lda #$2F
+  sta $FA
+  lda #$FF
+  sta $F9
+  rts
+
+; Both nametables to the blank tile $24 with attributes $00, as the original
+; leaves nametable A: error screens and licence files print over it.
+blank_nt:
+  bit PPUSTATUS
+  lda #$20
+  sta PPUADDR
+  lda #$00
+  sta PPUADDR
+  ldx #4
+@nt:
+  ldy #$C0
+  lda #$24
+@t1:
+  sta PPUDATA
+  sta PPUDATA
+  sta PPUDATA
+  sta PPUDATA
+  sta PPUDATA
+  dey
+  bne @t1
+  lda #0
+  ldy #64
+@a:
+  sta PPUDATA
+  dey
+  bne @a
+  dex
+  bne @nt
+  rts
+
+; The boot load runs with NMI selector $C0, the game's own vector, as the
+; original's does. Dig Dug II's boot files include one that turns NMI on mid
+; load and expects its own handler to take it; with $00 the NMI landed in
+; ours and popped our loader's stack.
+arm_c0:
+  jsr clear_screen
+  lda #$C0
+  sta $0100
+  rts
+
+.org $EB13
+; ---- the warm boot -----------------------------------------------------------
+;
+; A game that jumps to reset with $0102/$0103 = $35/$AC (or the $35/$53 this
+; leaves behind) goes straight back in through $DFFC with no disk read and no
+; PPU memory touched; any other value is a cold boot. Dig Dug II's loader does
+; this, and without it the disk reloaded forever. The order of the writes is
+; the original's, measured from planted values; its $2E to $4025 (horizontal
+; mirroring) matters, or Dig Dug draws into the wrong nametable. The original
+; waits about 59,600 cycles; two vblanks stand in for it. Also where the APU
+; frame counter is set, because reset has no spare byte for the call.
+warm_check:
+  lda #$40
+  sta APUFRAME
+  lda $0102
+  cmp #$35
+  bne @cold
+  lda $0103
+  cmp #$AC
+  beq @warm
+  cmp #$53
+  beq @warm
+@cold:
+  rts
+@warm:
+  lda #$10
+  sta PPUCTRL
+  sta $FF
+  lda #$06
+  sta $FE
+  sta PPUMASK
+@wv1:
+  bit PPUSTATUS
+  bpl @wv1
+@wv2:
+  bit PPUSTATUS
+  bpl @wv2
+  lda #0
+  sta $4022
+  sta $4023
+  lda #$83
+  sta $4023
+  lda #0
+  sta $FD
+  sta $FC
+  sta $FB
+  lda #$2E
+  sta $FA
+  sta $4025
+  lda #$FF
+  sta $F9
+  sta $4026
+  lda #$C0
+  sta $0100
+  lda #$80
+  sta $0101
+  lda #$53
+  sta $0103
+  lda #0
+  sta $2005
+  sta $2005
+  lda #$10
+  sta PPUCTRL
+  ldx #$FF
+  txs
+  ldy #$00
+  lda #$10
+  sec
+  cli
+  jmp ($DFFC)
+
+.org $E32D
+; ---- $EBAF with its mode bits --------------------------------------------------
+;
+; Measured against the original with planted calls. The VRAM address is
+; y:(a & $F0). Bit 0 picks the fill byte, $FF or $00, left in $03. Bits 3-2
+; per unit: 00 sixteen source bytes; 01 eight source then eight fill; 10 eight
+; fill then eight source; 11 eight of source EOR fill then eight source. Bit 1
+; reads instead, after one dummy $2007 read, in the same shapes. Exit C = bit
+; 1, x = y = 0, Z set; $00/$01 the source advanced 16 or 8 a unit, $02 = 0,
+; $03 the fill, $04 = a. Section-Z expands the ROM font with a=$04.
+vram_upload2:
+  sta UP_LO
+  stx UP_UNITS
+  sty UP_HI
+  tsx
+  lda $0101,x
+  sta UP_RET
+  lda $0102,x
+  sta UP_RET+1
+  ldy #1
+  lda (UP_RET),y
+  sta UP_SRC
+  iny
+  lda (UP_RET),y
+  sta UP_SRC+1
+  lda UP_RET
+  clc
+  adc #2
+  sta $0101,x
+  lda UP_RET+1
+  adc #0
+  sta $0102,x
+  bit PPUSTATUS
+  lda $FF
+  and #$FB
+  sta $FF
+  sta PPUCTRL
+  lda UP_HI
+  sta PPUADDR
+  lda UP_LO
+  and #$F0
+  sta PPUADDR
+  lda UP_LO
+  lsr a
+  lda #0
+  bcc eb_f0
+  lda #$FF
+eb_f0:
+  sta UP_HI
+  lda UP_LO
+  lsr a
+  lsr a
+  and #$03
+  tax
+  lda UP_LO
+  and #$02
+  beq eb_unit
+  lda PPUDATA
+eb_unit:
+  lda UP_LO
+  and #$02
+  beq eb_write
+  jmp eb_read
+eb_write:
+  cpx #0
+  bne eb_w8
+  ldy #0
+eb_w16:
+  lda (UP_SRC),y
+  sta PPUDATA
+  iny
+  cpy #16
+  bne eb_w16
+  jmp eb_adv16
+eb_w8:
+  cpx #2
+  bne eb_wlo
+  jsr eb_fill8
+  jsr eb_src8
+  jmp eb_adv8
+eb_wlo:
+  cpx #1
+  bne eb_wxor
+  jsr eb_src8
+  jsr eb_fill8
+  jmp eb_adv8
+eb_wxor:
+  jsr eb_xor8
+  jsr eb_src8
+  jmp eb_adv8
+
+.org $F959
+eb_adv16:
+  lda UP_SRC
+  clc
+  adc #16
+  jmp eb_adv
+eb_adv8:
+  lda UP_SRC
+  clc
+  adc #8
+eb_adv:
+  sta UP_SRC
+  lda UP_SRC+1
+  adc #0
+  sta UP_SRC+1
+  dec UP_UNITS
+  beq eb_done
+  jmp eb_unit
+eb_done:
+  lda UP_LO
+  lsr a
+  lsr a
+  lda UP_SRC+1
+  ldx #0
+  ldy #0
+  rts
+
+eb_read:
+  cpx #0
+  bne eb_r8
+  ldy #0
+eb_r16:
+  lda PPUDATA
+  sta (UP_SRC),y
+  iny
+  cpy #16
+  bne eb_r16
+  jmp eb_adv16
+eb_r8:
+  cpx #1
+  bne eb_r2
+  jsr eb_get8
+  jsr eb_skip8
+  jmp eb_adv8
+eb_r2:
+  cpx #2
+  bne eb_r3
+  jsr eb_skip8
+  jsr eb_get8
+  jmp eb_adv8
+eb_r3:
+  jsr eb_xor8
+  jsr eb_get8
+  jmp eb_adv8
+eb_src8:
+  ldy #0
+eb_s8:
+  lda (UP_SRC),y
+  sta PPUDATA
+  iny
+  cpy #8
+  bne eb_s8
+  rts
+eb_fill8:
+  ldy #8
+  lda UP_HI
+eb_f8:
+  sta PPUDATA
+  dey
+  bne eb_f8
+  rts
+eb_xor8:
+  ldy #0
+eb_x8:
+  lda (UP_SRC),y
+  eor UP_HI
+  sta PPUDATA
+  iny
+  cpy #8
+  bne eb_x8
+  rts
+eb_get8:
+  ldy #0
+eb_g8:
+  lda PPUDATA
+  sta (UP_SRC),y
+  iny
+  cpy #8
+  bne eb_g8
+  rts
+eb_skip8:
+  ldy #8
+eb_k8:
+  lda PPUDATA
+  dey
+  bne eb_k8
+  rts

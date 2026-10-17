@@ -537,6 +537,35 @@ later than the original's.
 of the 114 hand over identically.** Tobidase runs to its side B prompt and,
 turned over, to the same screen under both BIOSes.
 
+### What a BIOS leaves behind is an interface too (2026-10-17)
+
+With every entry point written, a headless smoke of the collection (a minute
+of play each, mashed START, disks turned over) under both BIOSes found games
+that booted and still looked wrong, and the owner's phone found Ai Senshi
+Nicol's menu text garbled and Adian no Tsue broken after a side change. Two
+helper sessions traced every case to something the BIOS LEAVES rather than
+something a routine returns:
+
+- the PPU and its shadows at handover: PPUCTRL and `$FF` `$10`, PPUMASK and
+  `$FE` `$06`, `$FA` `$2F`, `$F9` `$FF`, nametable A all tile `$24`. Zelda 2
+  never sets its own pattern table.
+- the font: in pattern table 1, digits then A-Z with the blank at `$24`, the
+  order every licence file uses. Games print with it.
+- the font in the ROM itself, `$E001-$E148`: the Namco titles and Section-Z
+  read it directly. The glyph art is ours; only where each sits is the
+  interface. `$E000` reads `$00`, because Super Lode Runner checksums it.
+- `$EBAF`'s mode bits, which Section-Z uses and the old test never passed.
+- the boot load's NMI selector `$C0`, and the warm boot through `$35/$AC`,
+  which Dig Dug II depends on.
+- the IRQ handler, which games with their own loaders drive through `$0101`.
+- `$E153`'s carry, which is `a >= [$00]`. The test that said `a >= $20` only
+  passed because the real BIOS leaves `$20` at `$00` and nothing planted it.
+
+The handover check now matches the leftover registers on all 114 disks, up
+from 108, and 97 of the 114 smoke screens are within 1% of the original's,
+up from 83. The rest are the same game at a different moment, our loads
+finishing first, or the harness turning a disk mid-load.
+
 Ninety-nine is NOT "ninety-nine titles play correctly": thirty seconds of
 unattended running reaches what it reaches, and a game that needs a routine
 only when you open its menu has not asked yet.

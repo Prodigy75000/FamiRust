@@ -2280,14 +2280,17 @@ fn a_delay_of_zero_milliseconds_waits_two_hundred_and_fifty_six() {
 }
 
 #[test]
-fn the_delay_preserves_a_and_leaves_carry_as_a_is_at_least_twenty() {
+fn the_delay_preserves_a_and_leaves_carry_as_a_against_zero_page_0() {
     // `a` survives, `x` and `y` both come out zero, N and Z follow the final
     // `dey`, and V, D and I pass through.
     //
-    // Carry is the awkward one and took three goes. It is not cleared, not
-    // set, and not preserved: it comes out as `a >= $20`, with a clean
-    // threshold that $1F and $20 straddle. That is also how `a` can survive a
-    // routine which leaves a flag derived from it.
+    // Carry is the awkward one and took four goes. It is not cleared, not
+    // set, and not preserved: it is the carry of `cmp $00`, a against the
+    // byte at $0000, which is what the original's "dummy" reads of $0000 are.
+    // It read as `a >= $20` for three rounds only because the real BIOS leaves
+    // $20 at $00 at handover and no test planted it, so ours, leaving the same
+    // by accident of its boot, agreed. Found by Super Lode Runner, which calls
+    // it with a=$10 over a smaller $00. $00 is planted here for that reason.
     //
     // NMI is off for the duration and I is set. A 2 ms wait is 3585 cycles and
     // an interrupt can land inside it; when one does, the game's own handler
@@ -2297,9 +2300,21 @@ fn the_delay_preserves_a_and_leaves_carry_as_a_is_at_least_twenty() {
     if a_disk().is_none() {
         return skipped();
     }
-    for (a_in, want_carry) in [(0x00u8, 0u8), (0x1f, 0), (0x20, 1), (0x5a, 1), (0xff, 1)] {
+    for (a_in, zp0, want_carry) in [
+        (0x10u8, 0x00u8, 1u8),
+        (0x10, 0x10, 1),
+        (0x10, 0x11, 0),
+        (0x10, 0xff, 0),
+        (0x1f, 0x20, 0),
+        (0x20, 0x20, 1),
+        (0x20, 0x21, 0),
+        (0x00, 0x00, 1),
+        (0x80, 0x7f, 1),
+        (0x7f, 0x80, 0),
+    ] {
         let mut p = Prog::default();
         p.poke(0x2000, 0x00);
+        p.poke(0x0000, zp0);
         p.poke(0x00fd, 0x40);
         p.ldx(0xaa);
         p.0.extend_from_slice(&[0x24, 0xfd]); // bit $fd, whose bit 6 sets V
@@ -2318,7 +2333,7 @@ fn the_delay_preserves_a_and_leaves_carry_as_a_is_at_least_twenty() {
         assert_eq!(
             r.p & 0x01,
             want_carry,
-            "carry should be (a >= $20) for a=${a_in:02x}, not the carry going in"
+            "carry should be (a >= [$00]) for a=${a_in:02x} over ${zp0:02x}, not the carry going in"
         );
         assert_eq!(r.p & 0x02, 0x02, "Z from the final dey");
         assert_eq!(r.p & 0x80, 0x00, "N from the final dey");
@@ -2345,6 +2360,7 @@ fn the_millisecond_delay_is_decimal_proof() {
     // NMI off, as in the carry test above and for the same reason: an
     // interrupt landing mid-wait makes this a test of whose handler ran.
     p.poke(0x2000, 0x00);
+    p.poke(0x0000, 0x20); // the carry compares against it; plant it
     p.0.push(0xf8); // sed
     p.0.push(0x78); // sei
     p.ldy(0x02);
@@ -2359,9 +2375,8 @@ fn the_millisecond_delay_is_decimal_proof() {
 fn the_delay_touches_nothing_at_all() {
     // No writes anywhere, and in particular no stack writes: there is no `pha`
     // in it, which is exactly why `a` cannot be borrowed as a counter and why
-    // the loop has the shape it has. The real one also reads $0000 repeatedly
-    // while it waits, but those are dummy reads with no effect, so ours does
-    // not reproduce them and makes no access below $E000 at all.
+    // the loop has the shape it has. Its only access below $E000 is the
+    // repeated read of $0000 the carry comes from.
     let Some(disk) = a_disk() else { return skipped() };
     let mut p = Prog::default();
     p.ldy(0x01).jsr(0xe153).record_and_halt();
@@ -4236,5 +4251,170 @@ fn coast_at_e778_is_cycle_exact() {
     assert_eq!(ours, 29);
     if let Some(real) = real_bios() {
         assert_eq!(ours, cycles_of_call(&disk, &real, 0xe778));
+    }
+}
+
+// --- what the BIOS leaves for the game at handover --------------------------
+
+/// The PPU and its shadows as the original hands them over, the same on every
+/// disk sampled. Games lean on them: Zelda 2 takes PPUCTRL bit 4 from $FF and
+/// never sets it, so under a BIOS that left $00 its whole screen drew from the
+/// wrong pattern table; error screens print with tile $24 as the blank.
+#[test]
+fn handover_leaves_the_ppu_and_its_shadows_as_the_original_does() {
+    let Some(disk) = a_disk() else { return skipped() };
+    let look = |bios: &[u8]| {
+        let mut nes = boot_to_handover(&disk, bios);
+        let zp: Vec<u8> = [0xf9u16, 0xfa, 0xfc, 0xfd, 0xfe, 0xff].iter().map(|a| nes.peek(*a)).collect();
+        (zp, nes.dbg_ppu_ctrl(), nes.dbg_ppu_mask(), nes.dbg_ciram()[..0x400].to_vec())
+    };
+    let (zp, ctrl, mask, nt) = look(&[]);
+    assert_eq!(zp, [0xff, 0x2f, 0x00, 0x00, 0x06, 0x10], "$F9 $FA $FC $FD $FE $FF");
+    assert_eq!((ctrl, mask), (0x10, 0x06), "background from $1000, rendering off");
+    assert!(nt[..960].iter().all(|&t| t == 0x24), "nametable A is all the blank tile");
+    assert!(nt[960..].iter().all(|&t| t == 0x00), "with attributes zero");
+    if let Some(real) = real_bios() {
+        assert_eq!(look(&real), (zp, ctrl, mask, nt), "ours (left) against the original");
+    }
+}
+
+/// The font is read straight out of the ROM: $E001-$E148, 41 glyphs, one
+/// plane, in the licence-file order. The art is ours, so the glyph bytes are
+/// NOT compared with the original's; where the glyphs sit is.
+#[test]
+fn the_rom_font_sits_where_games_read_it() {
+    let Some(disk) = a_disk() else { return skipped() };
+    let rom = |bios: &[u8]| -> Vec<u8> {
+        let mut nes = boot_to_handover(&disk, bios);
+        (0xe000..0xe149u16).map(|a| nes.peek(a)).collect()
+    };
+    let ours = rom(&[]);
+    let glyph = |t: usize| -> Vec<u8> { ours[1 + t * 8..9 + t * 8].to_vec() };
+    assert_eq!(ours[0], 0x00, "$E000 reads zero: Super Lode Runner sums it");
+    assert!(glyph(0x24).iter().all(|&b| b == 0), "tile $24 is the blank");
+    let shapes: Vec<Vec<u8>> = (0..0x29).filter(|&t| t != 0x24).map(glyph).collect();
+    assert!(shapes.iter().all(|g| g.iter().any(|&b| b != 0)), "every other glyph has ink");
+    for (i, a) in shapes.iter().enumerate() {
+        assert!(shapes[i + 1..].iter().all(|b| b != a), "glyph {i} is drawn twice");
+    }
+    if let Some(real) = real_bios() {
+        let theirs = rom(&real);
+        assert_eq!(theirs[0], ours[0], "$E000 as the original's");
+        assert!(theirs[1 + 0x24 * 8..9 + 0x24 * 8].iter().all(|&b| b == 0), "its $24 is blank too");
+    }
+}
+
+// --- $EBAF's mode bits -------------------------------------------------------
+
+/// $EBAF with every low nibble of a, into pattern RAM at $1000 so both reads
+/// and writes are observable. Section-Z calls it with a=$04 to expand a 1-bit
+/// font into two planes; the old routine ignored the mode bits and copied 16
+/// bytes regardless, and the old test only ever passed a=$00.
+#[test]
+fn vram_upload_honours_its_mode_bits_as_the_original_does() {
+    const SRC: u16 = 0x0760;
+    let Some(disk) = a_disk() else { return skipped() };
+    let Some(real) = real_bios() else { return skipped() };
+    let pattern: Vec<u8> = (0..16u8).map(|i| i.wrapping_mul(29).wrapping_add(5)).collect();
+    for low in 0..16u8 {
+        let a = 0x40 | low; // VRAM $1040
+        let mut p = Prog::default();
+        p.poke(0x2000, 0x00).poke(0x00ff, 0x00);
+        p.raw(&[0xa2, 0x07, 0xa9, 0xcc, 0x95, 0x00, 0xca, 0x10, 0xfb]); // $00-$07
+        p.bytes_at(SRC, &pattern).lda(a).ldy(0x10).ldx(0x01);
+        p.jsr(0xebaf);
+        p.raw(&SRC.to_le_bytes());
+        p.record_and_halt();
+        let go = |bios: &[u8]| {
+            let (r, mut nes) = run(&disk, bios, &p.0, 120);
+            let zp: Vec<u8> = (0..8u16).map(|i| nes.peek(i)).collect();
+            let src: Vec<u8> = (0..16u16).map(|i| nes.peek(SRC + i)).collect();
+            (r, zp, src, nes.dbg_chr_ram()[0x1040..0x1050].to_vec())
+        };
+        let ours = go(&[]);
+        assert!(ours.0.reached, "a=${a:02x}: it never returned");
+        assert_eq!(ours, go(&real), "a=${a:02x}: ours (left) against the original (right)");
+    }
+}
+
+// --- the IRQ handler, by $0101 ----------------------------------------------
+
+/// `jsr wait`, where wait pushes a fake interrupt frame returning to RESUME
+/// and jumps into $E1C7, as a byte IRQ would arrive while a game's loader
+/// waits. $40-$7F hands the byte back and returns from `wait` itself; the
+/// others rti to RESUME. Super Lode Runner loads every byte this way.
+#[test]
+fn the_irq_handler_serves_every_range_of_0101_as_the_original_does() {
+    let Some(disk) = a_disk() else { return skipped() };
+    let Some(real) = real_bios() else { return skipped() };
+    const WAIT: u16 = 0x06c0;
+    for sel in [0x00u8, 0x01, 0x3f, 0x40, 0x7f, 0x80, 0xbf] {
+        let mut p = Prog::default();
+        p.poke(0x2000, 0x00).poke(0x0101, sel);
+        p.raw(&[0x78]); // sei: only the planted interrupt
+        p.ldx(0x66).ldy(0x77);
+        p.jsr(WAIT);
+        // Both ways home land here: $40 returns from WAIT to just after its
+        // jsr, the rest rti to RESUME, which is this same address.
+        let resume = PROG + p.0.len() as u16;
+        p.record_and_halt();
+        p.0.resize((WAIT - PROG) as usize, 0x00);
+        p.raw(&[0xa9, (resume >> 8) as u8, 0x48, 0xa9, resume as u8, 0x48]);
+        p.raw(&[0xa9, 0x5a, 0x08, 0x4c, 0xc7, 0xe1]); // lda #$5A : php : jmp $E1C7
+        let go = |bios: &[u8]| {
+            let (r, mut nes) = run(&disk, bios, &p.0, 30);
+            (r, nes.peek(0x0101), nes.cpu.sp)
+        };
+        let (mut ours, mut theirs) = (go(&[]), go(&real));
+        assert!(ours.0.reached, "$0101=${sel:02x}: it never came back");
+        if sel & 0xc0 == 0x40 {
+            // The byte handed back is whatever $4031 holds, and with no
+            // transfer running that is each boot's leftover. Each side has to
+            // hand it back in both a and x; then it and its N and Z are set
+            // aside and everything else must agree.
+            for (who, r) in [("ours", &mut ours), ("original", &mut theirs)] {
+                assert_eq!(r.0.a, r.0.x, "$0101=${sel:02x}, {who}: the byte in both a and x");
+                (r.0.a, r.0.x, r.0.p) = (0, 0, r.0.p & !0x82);
+            }
+        }
+        assert_eq!(ours, theirs, "$0101=${sel:02x}: ours (left), original (right)");
+    }
+}
+
+// --- the warm boot ------------------------------------------------------------
+
+/// A game that jumps to reset with $0102/$0103 = $35/$AC is let straight back
+/// in through $DFFC with no disk read; Dig Dug II's loader does exactly this.
+/// Any other signature is a cold boot, which reads the disk again and takes
+/// far longer than three frames.
+#[test]
+fn reset_with_the_warm_signature_returns_to_the_game_without_the_disk() {
+    let Some(disk) = a_disk() else { return skipped() };
+    let back_within = |bios: &[u8], sig: u8| -> Option<u64> {
+        let mut nes = boot_to_handover(&disk, bios);
+        let entry = u16::from(nes.peek(VEC_RESET)) | (u16::from(nes.peek(VEC_RESET + 1)) << 8);
+        nes.dbg_poke(0x0102, 0x35);
+        nes.dbg_poke(0x0103, sig);
+        nes.dbg_set_pc(0xee24);
+        let start = nes.dbg_frame();
+        while nes.dbg_frame() < start + 3 {
+            nes.step();
+            if nes.dbg_pc() == entry {
+                return Some(nes.dbg_frame() - start);
+            }
+        }
+        None
+    };
+    assert!(back_within(&[], 0xac).is_some(), "the warm signature should skip the disk");
+    assert!(back_within(&[], 0x53).is_some(), "and so should $53, what it leaves behind");
+    assert!(back_within(&[], 0x00).is_none(), "anything else is a cold boot");
+    if let Some(real) = real_bios() {
+        for sig in [0xacu8, 0x53, 0x00] {
+            assert_eq!(
+                back_within(&[], sig).is_some(),
+                back_within(&real, sig).is_some(),
+                "signature ${sig:02x}: ours against the original"
+            );
+        }
     }
 }
