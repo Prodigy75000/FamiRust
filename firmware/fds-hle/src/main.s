@@ -5462,16 +5462,16 @@ vf_body:
   sta PPUADDR               ; 4
   iny                       ; 2
   ldx BUF,y                 ; 4   the count straight into x: all eight bits,
-  iny                       ; 2   and 0 means 256, which `dex`/`bne` gives
+                            ;     and 0 means 256, which `dex`/`bne` gives
 @byte:
-  lda BUF,y                 ; 4
-  sta PPUDATA               ; 4
-  iny                       ; 2
-  dex                       ; 2
-  bne @byte                 ; 3
+  iny                       ; 2   step BEFORE the read, and once more after the
+  lda BUF,y                 ; 4   entry: the same count as stepping after, but
+  sta PPUDATA               ; 4   the pla and the palette writes then land on
+  dex                       ; 2   the original's cycles, two sooner than they
+  bne @byte                 ; 3   did
   pla                       ; 4   the address high from the top of the entry
   cmp #$3F                  ; 2   and this is also where carry comes from
-  bne vf_check                ; 3 taken on the common path
+  bne vf_next               ; 3 taken on the common path
   ; The palette-safe reset: point at $3F00, then at $0000, so the PPU is not
   ; left showing a palette entry in place of the backdrop. `a` is still $3F
   ; from the `pla` and `x` is $00 from the byte loop, so neither needs loading.
@@ -5479,9 +5479,11 @@ vf_body:
   stx PPUADDR               ; 4
   stx PPUADDR               ; 4
   stx PPUADDR               ; 4
+vf_next:
+  iny                       ; 2   past the last data byte
 vf_check:
   lda BUF,y                 ; 4   the next entry's address high, or the end
-  bpl vf_body                 ; 3 taken
+  bpl vf_body               ; 3 taken
   sta BUF                   ; 4   the terminator it found, echoed back
   lda #$00                  ; 2
   sta BUF-1                 ; 4   the game's write index

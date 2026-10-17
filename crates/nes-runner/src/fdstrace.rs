@@ -387,7 +387,16 @@ fn main() -> ExitCode {
             if frame >= tail_from {
                 tail_inside += 1;
             }
-            win_inside += 1;
+            // A frame spent in $E1B2 is the game waiting for vblank, not the
+            // BIOS waiting for a person: the Super PIG disks sit in a 256-frame
+            // loop of it, and counting that as a stall turned the disk over
+            // under them mid-game. A SET SIDE wait inside a load call still
+            // counts, since that stay was entered through the load.
+            if matches!(stay, Some(((_, 0xe1b2), _))) {
+                win_outside += 1;
+            } else {
+                win_inside += 1;
+            }
         } else {
             ins_outside += 1;
             if frame >= tail_from {
