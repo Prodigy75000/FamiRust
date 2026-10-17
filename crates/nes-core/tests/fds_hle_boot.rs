@@ -167,6 +167,29 @@ fn a_side_with_no_boot_file_stops_in_the_bios() {
 }
 
 #[test]
+fn only_side_a_of_disk_one_boots() {
+    // The original refuses a first side whose block 1 says side B (ERR.07) or
+    // a later disk (ERR.08). Two disks in the merged corpus say so.
+    let path = repo_root().join("dumps/fds/zelda.fds");
+    if skip(&path) {
+        return;
+    }
+    let good = disk("zelda.fds").unwrap();
+    let base = if &good[..4] == b"FDS" { 16 } else { 0 };
+    assert!(boot(&good, &[], 900).reached, "the unpatched disk boots");
+    for (at, what) in [(0x15, "side"), (0x16, "disk number")] {
+        let mut d = good.clone();
+        d[base + at] = 1;
+        let h = boot(&d, &[], 900);
+        assert!(!h.reached, "booted a disk whose {what} is 1");
+        assert!(h.entry >= BIOS_BASE, "left the BIOS for ${:04x}", h.entry);
+        if let Some(real) = real_bios() {
+            assert!(!boot(&d, &real, 900).reached, "the real BIOS boots it, so the rule is wrong");
+        }
+    }
+}
+
+#[test]
 fn the_registers_at_handover_are_the_ones_we_chose() {
     // These came from the real BIOS, which hands Zelda, Bio Miracle and Famicom
     // Grand Prix exactly this. They are NOT a contract, and the comment that

@@ -4688,3 +4688,18 @@ fn the_queue_step_at_e93c_returns_on_room_and_unwinds_when_full() {
     assert_eq!((full.a, full.x), (0x01, 0x03), "full: past the caller, x committed");
     assert_eq!(mem[0], 0xff, "the queue is cut at the committed index");
 }
+
+#[test]
+fn the_vram_queue_is_left_empty_at_handover() {
+    // The original leaves an empty $7D-byte queue, terminator in place, and a
+    // game that flushes before it fills (Dogfight Spirit) depends on it.
+    let Some(disk) = a_disk() else { return skipped() };
+    let mut ours = boot_to_handover(&disk, &[]);
+    let got: Vec<u8> = (0x0300..0x0303).map(|a| ours.peek(a)).collect();
+    assert_eq!(got, vec![0x7d, 0x00, 0xff]);
+    if let Some(real) = real_bios() {
+        let mut theirs = boot_to_handover(&disk, &real);
+        let want: Vec<u8> = (0x0300..0x0303).map(|a| theirs.peek(a)).collect();
+        assert_eq!(got, want);
+    }
+}

@@ -3206,7 +3206,7 @@ read_info:
   bne @bad
   ldy #1
 @byte:
-  jsr read_byte
+  jsr info_byte             ; read_byte, and refuse anything but side A, disk 1
   bcs @bad
   cpy #$19
   bne @not_code
@@ -5519,6 +5519,38 @@ ho_ppu:
   sta $FA
   lda #$FF
   sta $F9
+  ; The VRAM queue as the original leaves it: empty, a $7D-byte buffer with
+  ; its terminator in place. Big Challenge! Dogfight Spirit flushes it from its
+  ; first NMI without filling it, and a zeroed page sent $E86A walking 29,000
+  ; cycles of garbage into the next NMI until the stack ran out.
+  lda #$7D
+  sta BUF-2
+  lda #$00
+  sta BUF-1
+  lda #$FF
+  sta BUF
+  rts
+
+; One byte of block 1 for the boot load, y its offset. Bytes $15 and $16 are
+; the side and the disk number, and the original will not boot anything but
+; side A of disk 1 (ERR.07, ERR.08). The corpus holds two that claim otherwise,
+; Kind Gal's Disk 2 and Tantei Jinguuji's Kouhen; both stop under it too.
+; Carry set if the disk ended or the side is not one to boot.
+info_byte:
+  jsr read_byte
+  bcs @out
+  cpy #$15
+  bcc @ok
+  cpy #$17
+  bcs @ok
+  cmp #$00
+  bne @refuse
+@ok:
+  clc
+@out:
+  rts
+@refuse:
+  sec
   rts
 
 ; Both nametables to the blank tile $24 with attributes $00, as the original
@@ -5559,6 +5591,16 @@ arm_c0:
   jsr clear_screen
   lda #$C0
   sta $0100
+  ; What the original has set by the time it reads the first boot file. A
+  ; disk whose boot file lands on $2000 turns NMI on mid-load and the game
+  ; takes over there (Moero Yakyuuken), and it finds these, not our zeros:
+  ; $FE decides whether the left column shows, $0101 how a BRK is taken.
+  lda #$40
+  sta $0101
+  lda #$06
+  sta $FE
+  lda #$10
+  sta $FF
   rts
 
 .org $EB13
