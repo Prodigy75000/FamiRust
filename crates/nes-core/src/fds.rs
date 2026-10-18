@@ -889,6 +889,7 @@ impl Fds {
             self.reinsert_cycles = REINSERT_CYCLES;
             self.head = 0;
             self.end_transfer();
+            self.motor_on = false;
         }
     }
 
@@ -909,6 +910,14 @@ impl Fds {
         self.inserted = false;
         self.reinsert_cycles = 0;
         self.end_transfer();
+        // Taking the disk out stops the drive, and a disk put back in sits
+        // still until the next start command, so the status reads inserted
+        // but not ready ($42) in between. Michael English waits for exactly
+        // that after its PLEASE SET DISK B, and with the motor flag left on
+        // across a swap it read ready ($40) and waited for ever. Every loader,
+        // the original's and ours, stops and restarts the motor before it
+        // reads, so none of them notices.
+        self.motor_on = false;
     }
 
     /// Level of the combined FDS IRQ line. The timer IRQ latches until read; the
@@ -1706,6 +1715,32 @@ mod tests {
         fds.insert_side(1);
         assert_eq!(fds.current_side(), 1);
         assert_eq!(read_gamename(&mut fds), 0xBB);
+    }
+
+    #[test]
+    fn a_disk_put_in_sits_still_until_the_motor_is_started() {
+        // Michael English waits for $42, inserted but not ready, after its
+        // PLEASE SET DISK B. The motor bit used to survive a swap, so the new
+        // disk read ready at once and the game waited for ever.
+        let disk = FdsDisk::parse(&synth_side()).unwrap();
+        let mut fds = Fds::new(disk, vec![0u8; BIOS_LEN]);
+        fds.write_disk_reg(0x4023, 0x01);
+        fds.write_disk_reg(0x4025, 0x25); // start the motor, read mode
+        for _ in 0..SPINUP_CYCLES + 10 {
+            fds.clock();
+        }
+        assert_eq!(fds.read_disk_reg(0x4032) & 0x03, 0x00, "spun up: inserted and ready");
+        fds.insert_side(0);
+        for _ in 0..REINSERT_CYCLES + 10 {
+            fds.clock();
+        }
+        assert_eq!(fds.read_disk_reg(0x4032) & 0x03, 0x02, "back in, but not ready");
+        fds.write_disk_reg(0x4025, 0x26); // stop
+        fds.write_disk_reg(0x4025, 0x25); // and start
+        for _ in 0..SPINUP_CYCLES + 10 {
+            fds.clock();
+        }
+        assert_eq!(fds.read_disk_reg(0x4032) & 0x03, 0x00, "ready once started again");
     }
 
     #[test]
