@@ -292,6 +292,42 @@ missing routine. `fdstrace` names the address.
 | `$E4F9` | 1 | the rest of the header, then the body | a RAM file that would wrap, or land on zero page or the stack, is refused |
 | `$E778` | 6 | coast: `$FA = ($FA & 9) \| $26` | cycle-exact, 29 |
 
+Added 2026-10-18 for the merged 507-disk corpus. The count column there is
+disks in the merged set, by static scan where noted, not corpus titles of 114:
+
+| entry | disks | what it does | against the original |
+|---|---|---|---|
+| `$E178` | 7 | PPUMASK: sprites on | 21 cycles, the family's shape |
+| `$EAED` | 2 | `$EAEA` past its status read | already ours; now asserted |
+| `$EA1A` | 8 | `$EA1F` without the expansion merge | faster; 43,000 fuzz cases |
+| `$EA68` | 3 | four pads apart, held at `$F1-$F4` | faster |
+| `$EA36` | 1 | `$EA4C` on the raw pass | faster; 42,300 cases |
+| `$E8B3` | 1 | read VRAM back into 3-byte records | cycle-exact, 9 + 40y |
+| `$E94F` | 1 | look up or register a record | 2 cycles fast |
+| `$E97D` | 3 | pixel coordinates to a nametable address | cycle-exact, 48 |
+| `$E93C` | 1 | step the queue index, unwind when full | cycle-exact |
+| `$E8DB` | 2 | `$E8D2` with its arguments in zero page | Dogfight Spirit, Jirai Kun |
+| `$E2BB` | 23 static | file count less a, rewriting block 2 | Ultraman 2's save byte-identical |
+| `$E2B7` | 7 static | file count set to a, refused if it grows | 2,000 cases with the two below |
+| `$E301` | 32 static | `$E305` with a + 1 | |
+
+Measured but not written, since only Jingorou, Quick Hunter and Mario Bobble
+call them: `$E4DC`, `$E6E3`, `$E706`, `$E7A3`, `$E7A7`/`$E7AD`, the `jmp`
+targets `$E22F` and `$EFDF` (helper notes in `out/scratch-disk2/SPEC.md`).
+`$E492` and `$E4DA` have no game callers. Jingorou and Quick Hunter also need
+data past the last block that the drive model drops, in opposite layouts.
+
+A save path is what no run reaches: games save only when asked. A byte scan of
+every disk for `jsr` to the documented entry list found `$E2BB`, `$E301` and
+`$E2B7` after Ultraman 2 hung on the owner's phone. Drop any hit whose load
+address is `$E000` or above: some files carry copies of BIOS bytes there, and
+reading those is reading the BIOS.
+
+The drive model learned two things from the same smoke: taking a disk out stops
+the motor, so a disk put back reads inserted but not ready (`$42`) until it is
+started; and a scan, idle or armed, that reaches the end of the side stops the
+drive the same way. Michael English and Sylviana are written against both.
+
 **Where the cycle counts do not match, ours is faster, never slower.** That is
 deliberate. A game that runs one of these inside vblank has more room than it
 had rather than less, so being quick is safe and being slow is not. The
