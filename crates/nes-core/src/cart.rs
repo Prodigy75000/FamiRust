@@ -318,7 +318,7 @@ pub trait Mapper: SaveState {
     }
 
     /// Debug: reads of the drive status ($4032) made from outside the BIOS,
-    /// as told by `dbg_census_ctx`. A game that polls it is waiting on the
+    /// as told by `dbg_census_ctx`, while the motor is stopped. A game that polls it is waiting on the
     /// disk itself, which is how a tracer tells a SET SIDE prompt in game code
     /// from a game that is only waiting for vblank. Default zero.
     fn dbg_game_status_reads(&self) -> u64 {

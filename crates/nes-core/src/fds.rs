@@ -782,7 +782,7 @@ pub struct Fds {
     /// Which bank the next BIOS read lands in. Set per instruction by the
     /// tracer, which is the only thing that knows the PC.
     dbg_bios_ctx: usize,
-    /// $4032 reads made while `dbg_bios_ctx` said outside the BIOS.
+    /// $4032 reads made from outside the BIOS while the motor was stopped.
     dbg_game_status_reads: u64,
     /// Writes to the disk-control registers ($4024/$4025). Counted so a tracer
     /// can tell a game that leaves loading to the BIOS from one that drives the
@@ -981,6 +981,11 @@ impl Fds {
         if !self.motor_on {
             self.spinning_up = false;
         }
+        // Transfer released (bit6 1 -> 0) on a spun-up drive: the idle scan
+        // starts from here, so the end of the side is reached on time.
+        if !self.transfer_armed && prev_armed && self.motor_on && !self.spinning_up {
+            self.delay = self.scan_left();
+        }
         // Transfer armed (bit6 0 -> 1): reset the CRC accumulator and restart the
         // gap scan so the drive latches on the next block start (see the doc:
         // "waits for first set bit before accumulating serial data").
@@ -1037,12 +1042,26 @@ impl Fds {
             }
             if self.delay == 0 {
                 self.spinning_up = false; // disk now ready ($4032 clears not-ready)
-                self.delay = BYTE_CYCLES; // first byte one period later
+                self.delay = if self.transfer_active() {
+                    BYTE_CYCLES // first byte one period later
+                } else {
+                    self.scan_left()
+                };
             }
             return;
         }
-        // Spun up but transfer held in reset (or I/O disabled): idle, ready to go.
+        // Spun up but transfer held in reset (or I/O disabled). The head is
+        // parked here, which a short pause between blocks relies on, but a real
+        // drive's head keeps going to the end of the side, and the drive then
+        // stops and reads not ready until it is started again. Only that end
+        // is modelled: `delay` counts the time the rest of the side would take.
         if !self.transfer_active() {
+            if self.delay > 0 {
+                self.delay -= 1;
+                if self.delay == 0 {
+                    self.stop_at_end();
+                }
+            }
             return;
         }
         if self.delay > 0 {
@@ -1052,6 +1071,21 @@ impl Fds {
             self.transfer_byte();
             self.delay = BYTE_CYCLES;
         }
+    }
+
+    /// The scan reached the end of the side: the drive stops and reads not
+    /// ready until it is started again. Sylviana and Michael English both wait
+    /// for exactly that, inserted and not ready, once their boot load is done.
+    fn stop_at_end(&mut self) {
+        self.motor_on = false;
+        self.spinning_up = false;
+        self.trace(format_args!("end of side: the drive stops"));
+    }
+
+    /// Cycles the head would take from where it is to the end of the side.
+    fn scan_left(&self) -> u32 {
+        let len = self.sides.get(self.current_side).map_or(0, |s| s.image.len());
+        (len.saturating_sub(self.head) as u32).max(1) * BYTE_CYCLES
     }
 
     fn transfer_active(&self) -> bool {
@@ -1068,7 +1102,10 @@ impl Fds {
         }
         let side = &mut self.sides[self.current_side];
         if self.head >= side.image.len() {
+            // The end of the side stops the drive, armed or not, until it is
+            // started again; $4030 still reports the end of head.
             self.end_of_head = true;
+            self.stop_at_end();
             return;
         }
         // Gap scan: while not yet synced to a block, skip zero (gap) bytes at the
@@ -1175,7 +1212,10 @@ impl Fds {
                     s |= 0x02; // bit1: drive not ready (active low)
                 }
                 // bit2 write-protect (active low): our disks are writable = clear.
-                if self.dbg_bios_ctx == 1 {
+                // Counted only while the drive is stopped: a game waiting on a
+                // prompt polls a still drive, and one waiting for the drive to
+                // finish (Sylviana) polls a turning one.
+                if self.dbg_bios_ctx == 1 && !self.motor_on {
                     self.dbg_game_status_reads += 1;
                 }
                 if s != self.dbg_last_4032 {
@@ -1741,6 +1781,31 @@ mod tests {
             fds.clock();
         }
         assert_eq!(fds.read_disk_reg(0x4032) & 0x03, 0x00, "ready once started again");
+    }
+
+    #[test]
+    fn an_idle_drive_stops_when_its_scan_reaches_the_end_of_the_side() {
+        // Michael English's title and Sylviana's boot both wait for inserted
+        // and not ready once the load is done: the head has gone on to the end
+        // of the side and the drive has stopped. A parked head read ready for
+        // ever, and both waited for ever.
+        let disk = FdsDisk::parse(&synth_side()).unwrap();
+        let mut fds = Fds::new(disk, vec![0u8; BIOS_LEN]);
+        fds.write_disk_reg(0x4023, 0x01);
+        fds.write_disk_reg(0x4025, 0x65); // motor on, armed
+        for _ in 0..SPINUP_CYCLES + 10 {
+            fds.clock();
+        }
+        fds.write_disk_reg(0x4025, 0x25); // released: the idle scan starts
+        let side = fds.sides[0].image.len() as u32;
+        for _ in 0..(side - 1) * BYTE_CYCLES {
+            fds.clock();
+        }
+        assert_eq!(fds.read_disk_reg(0x4032) & 0x03, 0x00, "still scanning: ready");
+        for _ in 0..4 * BYTE_CYCLES {
+            fds.clock();
+        }
+        assert_eq!(fds.read_disk_reg(0x4032) & 0x03, 0x02, "at the end: stopped, not ready");
     }
 
     #[test]
