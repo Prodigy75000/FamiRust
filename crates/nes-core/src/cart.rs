@@ -1833,8 +1833,10 @@ impl Mapper for Mmc2 {
                     // $8000 switchable; $A000/$C000/$E000 = last three 8K banks.
                     let bank = match region {
                         0 => self.prg_bank as usize & 0x0f,
-                        1 => self.prg_banks - 3,
-                        2 => self.prg_banks - 2,
+                        // Wrapping: a 16 KiB ROM has two banks, and the board
+                        // repeats it, which the modulo below gives.
+                        1 => self.prg_banks.wrapping_sub(3),
+                        2 => self.prg_banks.wrapping_sub(2),
                         _ => self.prg_banks - 1,
                     };
                     self.prg[(bank % self.prg_banks) * 0x2000 + off]
