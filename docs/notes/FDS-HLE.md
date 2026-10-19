@@ -596,6 +596,12 @@ something a routine returns:
 - the IRQ handler, which games with their own loaders drive through `$0101`.
 - `$E153`'s carry, which is `a >= [$00]`. The test that said `a >= $20` only
   passed because the real BIOS leaves `$20` at `$00` and nothing planted it.
+- the sound chip (2026-10-19): `$4017` `$C0`, `$4015` `$0F`, `$4080` `$80`,
+  `$408A` `$E8`, measured from the original's writes. Ours wrote `$00` to
+  `$4015` and left `$408A` alone, so Metroid, which never enables the 2A03
+  channels itself, played only its FDS channel on the owner's phone. 83 of the
+  507 disks never write `$4015` in 25 seconds, and 206 drive the FDS channel
+  without setting `$408A`, which at 0 freezes every FDS envelope.
 
 The handover check now matches the leftover registers on all 114 disks, up
 from 108, and 97 of the 114 smoke screens are within 1% of the original's,

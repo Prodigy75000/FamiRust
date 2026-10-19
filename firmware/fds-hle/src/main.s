@@ -2419,6 +2419,34 @@ vram_upload:
   ldx #0
   ldy #0                    ; sets Z=1 and N=0, the measured exit flags
   rts
+.org $EBFE
+; ---- the sound chip at power-up ------------------------------------------------
+;
+; Silence the APU before anything can be heard, then turn sound back on the
+; way the original leaves it, measured from its writes: 5-step frame counter,
+; the four 2A03 channels enabled, the FDS volume envelope off and its
+; envelope clock at $E8. Some games never write $4015 themselves (Metroid
+; played only its FDS channel without it), and with $408A at 0 no FDS
+; envelope ever moves. Out here because reset has no room for it.
+apu_init:
+  lda #0
+  sta APUSTATUS
+  ldx #0
+@quiet:
+  sta $4000,x
+  inx
+  cpx #$14
+  bne @quiet
+  lda #$C0
+  sta APUFRAME
+  lda #$0F
+  sta APUSTATUS
+  lda #$80
+  sta $4080
+  lda #$E8
+  sta $408A
+  rts
+
 .org $EC22
 ; --- $EC22: draw a metasprite into the sprite page --------------------------
 ;
@@ -3192,15 +3220,7 @@ reset:
   bit PPUSTATUS
   bpl @vblank2
 
-  ; Silence the APU before anything can be heard.
-  lda #0
-  sta APUSTATUS
-  ldx #0
-@quiet:
-  sta $4000,x
-  inx
-  cpx #$14
-  bne @quiet
+  jsr apu_init
 
   ; Disk I/O and sound I/O on, timer IRQ off. Nothing works before this.
   lda #$03

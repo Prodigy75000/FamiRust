@@ -291,3 +291,51 @@ fn ours_is_not_slower_than_the_disk_it_reads() {
         a.frames
     );
 }
+
+/// The last value each sound register was written with before handover.
+fn sound_at_handover(disk: &[u8], bios: &[u8]) -> [Option<u8>; 4] {
+    let mut nes = nes_core::Nes::from_fds(disk, bios).expect("disk should parse");
+    let mut last = [None; 4];
+    nes.dbg_log_start(usize::MAX, 0x4090);
+    while nes.dbg_frame() < 900 {
+        let pc = nes.dbg_pc();
+        if pc < BIOS_BASE {
+            let v = u16::from(nes.peek(VEC_RESET)) | (u16::from(nes.peek(VEC_RESET + 1)) << 8);
+            if pc == v {
+                break;
+            }
+        }
+        nes.step();
+    }
+    for (addr, val, write) in nes.dbg_log_take() {
+        let slot = match addr {
+            0x4015 => 0,
+            0x4017 => 1,
+            0x4080 => 2,
+            0x408a => 3,
+            _ => continue,
+        };
+        if write {
+            last[slot] = Some(val);
+        }
+    }
+    last
+}
+
+#[test]
+fn the_game_is_handed_its_sound_switched_on() {
+    // Metroid never writes $4015 and relies on the BIOS having enabled the four
+    // 2A03 channels; ours wrote $00 there and the game played only its FDS
+    // channel. 83 of the 507 corpus disks never write $4015 in 25 seconds.
+    // $408A at 0 freezes every FDS envelope, and 206 disks never set it.
+    let path = repo_root().join("dumps/fds/zelda.fds");
+    if skip(&path) {
+        return;
+    }
+    let zelda = disk("zelda.fds").unwrap();
+    let ours = sound_at_handover(&zelda, &[]);
+    assert_eq!(ours, [Some(0x0f), Some(0xc0), Some(0x80), Some(0xe8)]);
+    if let Some(real) = real_bios() {
+        assert_eq!(sound_at_handover(&zelda, &real), ours, "the real BIOS hands over another sound setup");
+    }
+}
