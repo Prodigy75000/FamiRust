@@ -760,9 +760,10 @@ impl Apu {
         let p = (self.pulse1.output() + self.pulse2.output()) as usize;
         let t = (3 * self.triangle.output() + 2 * self.noise.output() + self.dmc.output()) as usize;
         // Cartridge/adapter expansion audio (FDS wavetable channel) sums in on top
-        // of the 2A03 mix. The FDS peaks at ~2.4x an APU square on a Famicom, same
-        // polarity; FDS_MIX scales its ~0..1 level to that. DC is removed below.
-        const FDS_MIX: f32 = 0.35;
+        // of the 2A03 mix, same polarity; DC is removed below. FDS_MIX is set so
+        // a full-volume FDS square is 1.69x the RMS of a full-volume 50% pulse
+        // at the same pitch, measured on Mesen (it was 0.35, which gave 2.28x).
+        const FDS_MIX: f32 = 0.26;
         let raw = self.pulse_table[p] + self.tnd_table[t] + self.ext_audio * FDS_MIX;
         // First-order DC-blocking high-pass for pleasant output.
         let out = raw - self.hp_prev_in + 0.9995 * self.hp_prev_out;

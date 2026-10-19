@@ -354,46 +354,60 @@ impl MediumSide {
 /// The FDS's built-in extra sound channel: a 64-step wavetable oscillator with a
 /// volume envelope and a frequency-modulation unit, on top of the 2A03 APU.
 /// Registers $4040-$408A / $4090-$4092. Clean-room from the NESdev FDS-audio
-/// hardware reference; the main oscillator and mod unit tick every 16 CPU cycles.
+/// hardware reference.
 ///
-/// Mod counter -> pitch is the documented "complicated" formula (see `wave_pitch`).
+/// Both accumulators run every CPU cycle: the wave steps one of its 64 samples
+/// each time `pitch` (plus the modulation) carries out of 16 bits, so a tone's
+/// frequency is CPU * pitch / 2^22, and the mod table steps the same way on
+/// the mod frequency. An earlier version stepped 16 times too fast, which put
+/// every FDS note four octaves high, measured against Mesen (pitch $0AC:
+/// 1174 Hz here, 73 Hz there).
+///
+/// The save-state layout predates that rewrite and is kept byte for byte, so
+/// two fields carry more than their names say; see `mod_accum` and `env_4x`.
 #[derive(Clone)]
 struct FdsAudio {
     // ---- main wavetable oscillator ----
-    wave: [u8; 64], // 6-bit samples ($4040-$407F)
-    wave_accum: u32, // 20-bit phase; top 6 bits index `wave`
-    wave_pos: u8,    // latched output position (0..63)
-    pitch: u16,      // 12-bit ($4082 + $4083 low nibble)
+    wave: [u8; 64],   // 6-bit samples ($4040-$407F)
+    wave_accum: u32,  // 16-bit phase; a carry out steps `wave_pos`
+    wave_pos: u8,     // current wave position (0..63)
+    pitch: u16,       // 12-bit ($4082 + $4083 low nibble)
     wave_write: bool, // $4089 bit7: wavetable write-enable + holds output
-    env_halt: bool,  // $4083 bit6: halt volume + mod envelopes
-    env_4x: bool,    // $4083 bit7: 4x envelope speed + halt mod accumulator
+    env_halt: bool,   // $4083 bit6: halt the volume and mod envelopes
+    env_4x: bool,     // $4083 bit7: halt the wave (phase held at 0) and both envelopes
 
     // ---- volume envelope ----
-    vol_gain: u8,    // current gain 0..63 (clamped to 32 at output)
-    vol_speed: u8,   // $4080 bits0-5
-    vol_dir_up: bool, // $4080 bit6
+    vol_gain: u8,      // current gain 0..63 (clamped to 32 at output)
+    vol_speed: u8,     // $4080 bits0-5
+    vol_dir_up: bool,  // $4080 bit6
     vol_env_off: bool, // $4080 bit7 (1 => fixed gain, no sweep)
     vol_timer: u32,
 
     // ---- modulation unit ----
-    mod_table: [u8; 32], // 3-bit entries
-    mod_accum: u32,      // 18-bit: [addr5][ghost1][freq12]
-    mod_counter: i32,    // 7-bit signed (-64..63)
-    mod_freq: u16,       // 12-bit ($4086 + $4087 low nibble)
-    mod_gain: u8,        // current mod gain 0..63
-    mod_speed: u8,       // $4084 bits0-5
-    mod_dir_up: bool,    // $4084 bit6
-    mod_env_off: bool,   // $4084 bit7
+    mod_table: [u8; 32], // 3-bit entries, each played for two of the 64 steps
+    /// Bits 0-15: the 16-bit mod accumulator. Bits 16-21: the mod table
+    /// position, 0..63. Bit 24: $4087 bit7, the mod unit halted.
+    mod_accum: u32,
+    mod_counter: i32, // 7-bit signed (-64..63)
+    mod_freq: u16,    // 12-bit ($4086 + $4087 low nibble)
+    mod_gain: u8,     // current mod gain 0..63
+    mod_speed: u8,    // $4084 bits0-5
+    mod_dir_up: bool, // $4084 bit6
+    mod_env_off: bool, // $4084 bit7
     mod_timer: u32,
 
-    env_speed: u8,   // $408A envelope clock multiplier (0 => envelopes off)
-    master_vol: u8,  // $4089 bits0-1
-    enabled: bool,   // $4023 bit1 (sound I/O enable)
-    div16: u8,       // 16-CPU-cycle divider for the oscillators
-    out: f32,        // cached, low-pass-filtered output for the mixer (0..~1)
-    lp: f32,         // 1-pole low-pass state (~2 kHz, per the hardware DAC filter)
-    dbg_peak: f32,   // max |out| seen (diagnostic; not serialized)
+    env_speed: u8,  // $408A envelope clock multiplier (0 => envelopes off)
+    master_vol: u8, // $4089 bits0-1
+    enabled: bool,  // $4023 bit1 (sound I/O enable)
+    div16: u8,      // 16-CPU-cycle divider for the output filter
+    out: f32,       // cached, low-pass-filtered output for the mixer (0..~1)
+    lp: f32,        // 1-pole low-pass state (~2 kHz, per the hardware DAC filter)
+    dbg_peak: f32,  // max |out| seen (diagnostic; not serialized)
 }
+
+const MOD_ACC: u32 = 0xffff;
+const MOD_POS_SHIFT: u32 = 16;
+const MOD_HALT: u32 = 1 << 24;
 
 impl FdsAudio {
     fn new() -> Self {
@@ -429,15 +443,22 @@ impl FdsAudio {
         }
     }
 
-    /// Reload value for an envelope timer: 8 * (speed+1) * (env_speed+1), quartered
-    /// when $4083's 4x bit is set. In CPU cycles.
+    /// Reload value for an envelope timer: 8 * (speed+1) * $408A, in CPU cycles.
     fn env_reload(&self, speed: u8) -> u32 {
-        let base = 8 * (speed as u32 + 1) * (self.env_speed as u32 + 1);
-        if self.env_4x {
-            base / 4
-        } else {
-            base
-        }
+        8 * (speed as u32 + 1) * self.env_speed as u32
+    }
+
+    fn mod_pos(&self) -> u32 {
+        (self.mod_accum >> MOD_POS_SHIFT) & 0x3f
+    }
+
+    fn set_mod_pos(&mut self, pos: u32) {
+        self.mod_accum =
+            (self.mod_accum & !(0x3f << MOD_POS_SHIFT)) | ((pos & 0x3f) << MOD_POS_SHIFT);
+    }
+
+    fn mod_halted(&self) -> bool {
+        self.mod_accum & MOD_HALT != 0
     }
 
     fn write(&mut self, addr: u16, val: u8) {
@@ -463,9 +484,13 @@ impl FdsAudio {
                 self.env_halt = val & 0x40 != 0;
                 self.env_4x = val & 0x80 != 0;
                 if self.env_4x {
-                    // High bit resets the main oscillator phase.
+                    // Halting the wave resets its phase.
                     self.wave_accum = 0;
                     self.wave_pos = 0;
+                }
+                if self.env_halt {
+                    self.vol_timer = self.env_reload(self.vol_speed);
+                    self.mod_timer = self.env_reload(self.mod_speed);
                 }
             }
             0x4084 => {
@@ -485,16 +510,21 @@ impl FdsAudio {
             0x4087 => {
                 self.mod_freq = (self.mod_freq & 0x00ff) | ((val as u16 & 0x0f) << 8);
                 if val & 0x80 != 0 {
-                    // Reset the mod accumulator (bits 0-12 cleared).
-                    self.mod_accum &= !0x1fff;
+                    // Halting the mod unit clears its accumulator.
+                    self.mod_accum = (self.mod_accum & !MOD_ACC) | MOD_HALT;
+                } else {
+                    self.mod_accum &= !MOD_HALT;
                 }
             }
             0x4088 => {
-                // Mod-table write: replaces the entry at the current position and
-                // advances by one entry (two of the 64 sub-steps).
-                let idx = ((self.mod_accum >> 13) & 0x1f) as usize;
-                self.mod_table[idx] = val & 0x07;
-                self.mod_accum = (self.mod_accum + 0x2000) & 0x3ffff;
+                // The mod table takes writes only while the unit is halted: the
+                // entry at the current position, which advances by one entry
+                // (two of the 64 steps).
+                if self.mod_halted() {
+                    let pos = self.mod_pos();
+                    self.mod_table[(pos >> 1) as usize] = val & 0x07;
+                    self.set_mod_pos(pos + 2);
+                }
             }
             0x4089 => {
                 self.master_vol = val & 0x03;
@@ -521,7 +551,7 @@ impl FdsAudio {
         }
     }
 
-    /// Advance one envelope (volume or mod). Returns the new gain.
+    /// Advance one envelope (volume or mod) by a CPU cycle.
     fn clock_env(timer: &mut u32, reload: u32, gain: &mut u8, dir_up: bool) {
         if *timer == 0 {
             *timer = reload;
@@ -537,25 +567,43 @@ impl FdsAudio {
         }
     }
 
-    /// The documented mod-counter -> 20-bit modulated pitch transform.
-    fn wave_pitch(&self) -> u32 {
-        let mut temp: i32 = self.mod_counter * self.mod_gain as i32;
-        if (temp & 0x0f) != 0 && (temp & 0x800) == 0 {
-            temp += 0x20;
+    /// What the mod unit adds to `pitch`: the documented counter * gain
+    /// product, with its odd rounding and wrap, scaled by the pitch.
+    fn mod_output(&self) -> i32 {
+        if self.mod_halted() || self.mod_freq == 0 {
+            return 0;
         }
-        temp += 0x400;
-        temp = (temp >> 4) & 0xff;
-        (self.pitch as i32 as u32).wrapping_mul(temp as u32) & 0xf_ffff
+        let mut temp = self.mod_counter * self.mod_gain as i32;
+        let rem = temp & 0x0f;
+        temp >>= 4;
+        if rem > 0 && temp & 0x80 == 0 {
+            if self.mod_counter < 0 {
+                temp -= 1;
+            } else {
+                temp += 2;
+            }
+        }
+        if temp >= 192 {
+            temp -= 256;
+        } else if temp < -64 {
+            temp += 256;
+        }
+        temp *= self.pitch as i32;
+        let rem = temp & 0x3f;
+        temp >>= 6;
+        if rem >= 32 {
+            temp += 1;
+        }
+        temp
     }
 
-    /// One CPU cycle. Envelopes run per-cycle (gated by their timers); the
-    /// oscillator + mod unit run every 16 cycles.
+    /// One CPU cycle.
     fn clock(&mut self) {
         if !self.enabled {
             return;
         }
-        // Envelopes (unless halted by $4083 bit6 or disabled by $408A == 0).
-        if !self.env_halt && self.env_speed != 0 {
+        // Envelopes, unless either $4083 bit halts them or $408A is 0.
+        if !self.env_halt && !self.env_4x && self.env_speed != 0 {
             if !self.vol_env_off {
                 let reload = self.env_reload(self.vol_speed);
                 Self::clock_env(&mut self.vol_timer, reload, &mut self.vol_gain, self.vol_dir_up);
@@ -566,21 +614,14 @@ impl FdsAudio {
             }
         }
 
-        self.div16 = self.div16.wrapping_add(1);
-        if self.div16 < 16 {
-            return;
-        }
-        self.div16 = 0;
-
-        // Modulation unit: advance the mod accumulator; on a carry out of bit 11,
-        // step the mod table position and apply its entry to the mod counter.
-        if !self.env_4x && self.mod_freq != 0 {
-            let before = self.mod_accum;
-            self.mod_accum = (self.mod_accum + self.mod_freq as u32) & 0x3ffff;
-            // Carry out of the 12-bit frequency field (bit 11 -> bit 12).
-            if (before & 0x1000) != (self.mod_accum & 0x1000) {
-                let idx = ((self.mod_accum >> 13) & 0x1f) as usize;
-                match self.mod_table[idx] {
+        // Modulation unit: a carry out of the 16-bit accumulator applies the
+        // table entry at the current position and steps to the next.
+        if !self.mod_halted() && self.mod_freq != 0 {
+            let acc = (self.mod_accum & MOD_ACC) + self.mod_freq as u32;
+            self.mod_accum = (self.mod_accum & !MOD_ACC) | (acc & MOD_ACC);
+            if acc > MOD_ACC {
+                let pos = self.mod_pos();
+                match self.mod_table[(pos >> 1) as usize] {
                     0 => {}
                     1 => self.mod_counter += 1,
                     2 => self.mod_counter += 2,
@@ -592,15 +633,27 @@ impl FdsAudio {
                 }
                 // Wrap to 7-bit signed (-64..63).
                 self.mod_counter = ((self.mod_counter & 0x7f) << 25) >> 25;
+                self.set_mod_pos(pos + 1);
             }
         }
 
-        // Main oscillator: accumulate the modulated pitch; the top 6 bits of the
-        // 20-bit accumulator are the wave position.
-        if !self.wave_write {
-            self.wave_accum = (self.wave_accum + self.wave_pitch()) & 0xf_ffff;
-            self.wave_pos = (self.wave_accum >> 14) as u8 & 0x3f;
+        // Main oscillator: held while halted or while the table is written.
+        if !self.env_4x && !self.wave_write {
+            let step = self.pitch as i32 + self.mod_output();
+            if step > 0 {
+                self.wave_accum += step as u32;
+                if self.wave_accum > 0xffff {
+                    self.wave_accum &= 0xffff;
+                    self.wave_pos = (self.wave_pos + 1) & 0x3f;
+                }
+            }
         }
+
+        self.div16 = self.div16.wrapping_add(1);
+        if self.div16 < 16 {
+            return;
+        }
+        self.div16 = 0;
 
         // Output = wave sample * min(volume,32) * master, normalised to ~0..1.
         let sample = self.wave[self.wave_pos as usize] as f32; // 0..63
@@ -614,7 +667,7 @@ impl FdsAudio {
         let raw = sample * vol * master / (63.0 * 32.0);
         // The real FDS DAC output passes through a low-pass that rolls off the
         // highs (approx. 1-pole, ~2 kHz cutoff), which is a big part of the
-        // channel's soft/warm character. Sampled at the 16-cycle oscillator rate
+        // channel's soft/warm character. Sampled every 16 cycles
         // (~111.86 kHz), a 2 kHz cutoff gives alpha ~= 0.10.
         const LP_ALPHA: f32 = 0.10;
         self.lp += LP_ALPHA * (raw - self.lp);
@@ -1541,6 +1594,97 @@ impl SaveState for Fds {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An FDS channel playing a square table at fixed volume 32, mod halted.
+    fn fds_tone(pitch: u16) -> FdsAudio {
+        let mut a = FdsAudio::new();
+        a.enabled = true;
+        a.write(0x4089, 0x80);
+        for i in 0..64u16 {
+            a.write(0x4040 + i, if i < 32 { 0x3f } else { 0 });
+        }
+        a.write(0x4089, 0x00);
+        a.write(0x4080, 0xa0);
+        a.write(0x4087, 0x80);
+        a.write(0x4082, pitch as u8);
+        a.write(0x4083, (pitch >> 8) as u8);
+        a
+    }
+
+    /// Full wave cycles (position wrapping 63 -> 0) in one second of CPU time.
+    fn cycles_per_second(a: &mut FdsAudio) -> u32 {
+        let mut n = 0;
+        let mut last = a.wave_pos;
+        for _ in 0..1_789_773 {
+            a.clock();
+            if a.wave_pos < last {
+                n += 1;
+            }
+            last = a.wave_pos;
+        }
+        n
+    }
+
+    #[test]
+    fn an_fds_tone_plays_at_the_pitch_mesen_plays_it() {
+        // Mesen plays pitch $0AC at 73.3 Hz and $158 at 146.7 Hz: CPU * pitch
+        // / 2^22. This core played the first at 1174 Hz, four octaves high,
+        // which is how Metroid's low hum became a beep.
+        assert_eq!(cycles_per_second(&mut fds_tone(0x0ac)), 73);
+        assert_eq!(cycles_per_second(&mut fds_tone(0x158)), 146);
+    }
+
+    #[test]
+    fn a_halted_fds_wave_holds_still() {
+        // $4083 bit 7 stops the wave and resets its phase.
+        let mut a = fds_tone(0x158);
+        a.write(0x4083, 0x81);
+        assert_eq!(cycles_per_second(&mut a), 0);
+        assert_eq!(a.wave_pos, 0);
+    }
+
+    #[test]
+    fn the_fds_mod_table_takes_writes_only_while_the_unit_is_halted() {
+        let mut a = fds_tone(0x158);
+        a.write(0x4087, 0x00); // running
+        a.write(0x4088, 0x05);
+        assert_eq!(a.mod_table, [0; 32], "a running mod unit took a table write");
+        a.write(0x4087, 0x80); // halted
+        a.write(0x4088, 0x05);
+        a.write(0x4088, 0x03);
+        assert_eq!(&a.mod_table[..3], &[5, 3, 0]);
+    }
+
+    #[test]
+    fn fds_modulation_bends_the_pitch_both_ways() {
+        // A table of +1 for half its length and -1 for the rest swings the
+        // counter up and back. Mesen plays this (pitch $158, mod freq $040,
+        // gain $10) between 153 and 216 Hz, a median of 187.
+        let mut a = fds_tone(0x158);
+        for i in 0..32 {
+            a.write(0x4088, if i < 16 { 1 } else { 7 });
+        }
+        a.write(0x4084, 0x90);
+        a.write(0x4086, 0x40);
+        a.write(0x4087, 0x00);
+        let mut lo = u32::MAX;
+        let mut hi = 0;
+        let mut since = 0u32;
+        let mut last = a.wave_pos;
+        for _ in 0..1_789_773 * 2 {
+            a.clock();
+            since += 1;
+            if a.wave_pos < last {
+                lo = lo.min(since);
+                hi = hi.max(since);
+                since = 0;
+            }
+            last = a.wave_pos;
+        }
+        // Periods in CPU cycles: 216 Hz is 8286, 153 Hz is 11698.
+        assert!((8000..8600).contains(&lo), "fastest period {lo}");
+        assert!((11300..12100).contains(&hi), "slowest period {hi}");
+    }
 
     /// A synthetic one-side disk: block1 (56) + block2 (2) + one file
     /// header(16)+body(1+4). Enough to exercise the block walker and the drive.
