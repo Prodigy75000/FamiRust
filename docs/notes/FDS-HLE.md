@@ -602,6 +602,14 @@ something a routine returns:
   channels itself, played only its FDS channel on the owner's phone. 83 of the
   507 disks never write `$4015` in 25 seconds, and 206 drive the FDS channel
   without setting `$408A`, which at 0 freezes every FDS envelope.
+- the 2A03's registers as the original's boot sound leaves them, then the
+  same day: `$4001`/`$4005` `$7F` matter, since at `$00` the sweep target
+  overflows on any period from `$400` and mutes a game's low pulse notes.
+  `$4017` is `$C0` on the warm path too (the Namco disks re-enter there). A
+  register-by-register diff of every write before handover, all 507 disks,
+  now differs only on `$4025` bits 1, 5 and 7 (left: the drive model is tuned
+  on it and nothing fails), `$4023` bit 7 and `$4026` (inert in this core),
+  and registers the original never writes.
 
 The handover check now matches the leftover registers on all 114 disks, up
 from 108, and 97 of the 114 smoke screens are within 1% of the original's,

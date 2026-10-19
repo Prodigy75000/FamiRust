@@ -2419,26 +2419,32 @@ vram_upload:
   ldx #0
   ldy #0                    ; sets Z=1 and N=0, the measured exit flags
   rts
-.org $EBFE
+.org $EBC8
 ; ---- the sound chip at power-up ------------------------------------------------
 ;
-; Silence the APU before anything can be heard, then turn sound back on the
-; way the original leaves it, measured from its writes: 5-step frame counter,
-; the four 2A03 channels enabled, the FDS volume envelope off and its
-; envelope clock at $E8. Some games never write $4015 themselves (Metroid
-; played only its FDS channel without it), and with $408A at 0 no FDS
-; envelope ever moves. Out here because reset has no room for it.
+; The original plays a short sound while it boots and leaves the 2A03's
+; registers as that sound left them, then turns sound on: the four channels
+; enabled, the FDS volume envelope off and its envelope clock at $E8. All of
+; it measured from its writes. Here the same values go in while the channels
+; are still disabled, so nothing sounds and the length counters stay at 0,
+; which is where the original's have run down to by the handover.
+;
+; Two of them are an interface. Some games never write $4015 themselves
+; (Metroid played only its FDS channel without it), and with $408A at 0 no
+; FDS envelope ever moves. And $7F in $4001/$4005 leaves the sweep negated
+; with shift 7; at $00 the sweep's target overflows on any period from $400
+; and a game that never writes $4001 loses its low pulse notes. Out here
+; because reset has no room for it.
 apu_init:
   lda #0
   sta APUSTATUS
   ldx #0
-@quiet:
+@regs:
+  lda @left,x
   sta $4000,x
   inx
   cpx #$14
-  bne @quiet
-  lda #$C0
-  sta APUFRAME
+  bne @regs
   lda #$0F
   sta APUSTATUS
   lda #$80
@@ -2446,6 +2452,10 @@ apu_init:
   lda #$E8
   sta $408A
   rts
+@left:
+  .byte $10, $7F, $47, $58, $10, $7F, $5F, $58
+  .byte $20, $00, $71, $58, $00, $00, $00, $00
+  .byte $00, $00, $00, $00
 
 .org $EC22
 ; --- $EC22: draw a metasprite into the sprite page --------------------------
@@ -5842,9 +5852,10 @@ arm_c0:
 ; the original's, measured from planted values; its $2E to $4025 (horizontal
 ; mirroring) matters, or Dig Dug draws into the wrong nametable. The original
 ; waits about 59,600 cycles; two vblanks stand in for it. Also where the APU
-; frame counter is set, because reset has no spare byte for the call.
+; frame counter is set, because reset has no spare byte for the call: $C0,
+; 5-step with no IRQ, which is what the original leaves on both paths.
 warm_check:
-  lda #$40
+  lda #$C0
   sta APUFRAME
   lda $0102
   cmp #$35

@@ -293,9 +293,9 @@ fn ours_is_not_slower_than_the_disk_it_reads() {
 }
 
 /// The last value each sound register was written with before handover.
-fn sound_at_handover(disk: &[u8], bios: &[u8]) -> [Option<u8>; 4] {
+fn sound_at_handover(disk: &[u8], bios: &[u8]) -> [Option<u8>; 6] {
     let mut nes = nes_core::Nes::from_fds(disk, bios).expect("disk should parse");
-    let mut last = [None; 4];
+    let mut last = [None; 6];
     nes.dbg_log_start(usize::MAX, 0x4090);
     while nes.dbg_frame() < 900 {
         let pc = nes.dbg_pc();
@@ -313,6 +313,8 @@ fn sound_at_handover(disk: &[u8], bios: &[u8]) -> [Option<u8>; 4] {
             0x4017 => 1,
             0x4080 => 2,
             0x408a => 3,
+            0x4001 => 4,
+            0x4005 => 5,
             _ => continue,
         };
         if write {
@@ -328,13 +330,18 @@ fn the_game_is_handed_its_sound_switched_on() {
     // 2A03 channels; ours wrote $00 there and the game played only its FDS
     // channel. 83 of the 507 corpus disks never write $4015 in 25 seconds.
     // $408A at 0 freezes every FDS envelope, and 206 disks never set it.
+    // $7F in the sweep registers keeps a never-written sweep from muting
+    // every pulse period from $400 up.
     let path = repo_root().join("dumps/fds/zelda.fds");
     if skip(&path) {
         return;
     }
     let zelda = disk("zelda.fds").unwrap();
     let ours = sound_at_handover(&zelda, &[]);
-    assert_eq!(ours, [Some(0x0f), Some(0xc0), Some(0x80), Some(0xe8)]);
+    assert_eq!(
+        ours,
+        [Some(0x0f), Some(0xc0), Some(0x80), Some(0xe8), Some(0x7f), Some(0x7f)]
+    );
     if let Some(real) = real_bios() {
         assert_eq!(sound_at_handover(&zelda, &real), ours, "the real BIOS hands over another sound setup");
     }
