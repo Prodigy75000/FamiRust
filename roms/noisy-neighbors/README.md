@@ -32,7 +32,7 @@ lockstep netplay delay.
 *do*: the only asymmetry that exists so far is how loud they are. Carryable
 crates, vents, held plates. Real rooms, of which there are none; there is one
 room and it is a shakedown rig rather than a puzzle. Its own art and its own
-tune, both still borrowed from MONKEY FARCE next door, and the wardrobe
+tune, both still borrowed from MONKEY FARCE (an earlier cart, since removed), and the wardrobe
 currently reads too much like the door for something you have to pick out in
 two seconds. `tools/reach2.py`, the two-body solver. The one-player mode.
 

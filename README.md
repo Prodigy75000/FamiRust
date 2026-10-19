@@ -5,180 +5,56 @@ Copyright (C) 2026 Prodigy75000
 
 # FamiRust
 
-A clean-room **Nintendo Entertainment System / Famicom** emulator core, written
-from scratch in Rust: accuracy-first, with **byte-identical, platform-agnostic
-save states** as a hard design constraint (for cross-engine netplay and
-rollback). SuperRust (SNES) and UltraRust (N64) are sibling cores built for the
-same netplay experiments.
+A clean-room NES / Famicom emulator core in Rust, shipped as a
+[libretro](https://www.libretro.com/) core. Accuracy comes first, and save
+states are byte-identical across platforms, so they work for netplay and
+rollback.
 
-It ships as a [libretro](https://www.libretro.com/) core and runs the commercial
-NES library: hundreds of licensed titles boot and play.
+## Features
 
-## Design goals, in priority order
+- **CPU**: cycle-accurate 2A03. Passes the full
+  [SingleStepTests](https://github.com/SingleStepTests/65x02) 6502 suite,
+  unofficial opcodes included.
+- **PPU**: dot-accurate 2C02 with mid-frame raster effects and sprite-0 splits.
+- **APU**: all five channels, with DMC DMA stalls.
+- **Mappers**: 0, 1, 2, 3, 4, 5, 7, 9, 11, 13, 34, 64, 65, 66, 69, 71, 79, 113,
+  118, 119, 228, 232.
+- **Famicom Disk System**: drive, disk writes and saves, the expansion sound
+  channel, and side swapping through the libretro disk interface. No BIOS
+  file is needed (see below).
+- **Headers**: iNES and NES 2.0, with a correction database for bad dumps.
+- **RetroAchievements**: system RAM and cartridge RAM are exposed through the
+  libretro memory map.
+- **Save states**: every field is serialized little-endian in a fixed order,
+  with no pointers, floats or `usize`. A state saved on Android loads on
+  Windows or macOS. See [`docs/SAVESTATE.md`](docs/SAVESTATE.md).
 
-1. **Correctness / accuracy.** A cycle-stepped Ricoh 2A03 CPU (an NMOS 6502 with
-   decimal mode fused off) interleaved three-dots-per-cycle with a dot-accurate
-   2C02 PPU and the 2A03 APU. The CPU passes the full
-   [TomHarte / SingleStepTests](https://github.com/SingleStepTests/65x02) 6502
-   corpus (all 256 opcodes, 10 000 vectors each, per-cycle bus trace), including
-   every unofficial opcode, before it is allowed to drive anything else.
-2. **Byte-identical, deterministic save states**, a requirement, not a feature.
-   Cross-engine netplay and rollback are only sound when two machines in the same
-   logical state serialize to the *same bytes* on every platform/ABI/compiler.
-   See [`crates/nes-core/src/save.rs`](crates/nes-core/src/save.rs): every mutable
-   field is serialized little-endian in a fixed order; no `usize`, pointer, float,
-   or hash-ordering ever enters a state; load is the strict inverse and *refuses*
-   truncated, malformed, or over-long buffers. A state made on the Android `.so`
-   loads on the Windows `.dll`/macOS `.dylib` and vice-versa.
-3. **Clean-room.** Built from hardware documentation only (the NESdev wiki
-   reference pages, distilled into [`docs/notes/`](docs/notes/)). No third-party
-   emulator source was consulted. Measured reference *data* (e.g. the 2C02
-   master palette) is used as data, and cited where it is.
+## FDS without a BIOS file
 
-## What works
+The core carries its own 8 KiB FDS BIOS, written in 6502 from the documented
+RAM Adapter interface and from the real BIOS's behaviour, observed as a black
+box. If the frontend supplies a `disksys.rom`, that is used instead.
 
-- **CPU**: cycle-accurate 2A03; full TomHarte pass incl. all illegal opcodes + JAM.
-- **PPU**: dot-accurate 2C02: loopy v/t/x/w scrolling, background + sprite
-  pipelines, sprite-0 hit, 8-sprite-per-line evaluation/overflow, the `$2002`
-  read/NMI races, and mid-frame raster splits (sprite-0 status bars, scroll
-  splits), the tricky timing that games like *Bart vs. the Space Mutants* rely on.
-- **APU**: all five channels (2 pulse, triangle, noise, DMC) with DMC DMA
-  CPU stall; audio resampled for the host.
-- **Mappers**: 0 (NROM), 1 (MMC1), 2 (UxROM), 3 (CNROM), 4 (MMC3), 5 (MMC5,
-  incl. extended-attribute mode), 7 (AxROM), 9 (MMC2), 11 (Color Dreams),
-  13 (CPROM), 34 (BNROM/NINA-001), 64 (RAMBO-1), 65 (Irem H3001), 66 (GxROM),
-  69 (Sunsoft FME-7), 71 (Camerica), 79 (NINA-03), 113 (NINA-113),
-  118 (TxSROM), 119 (TQROM), 228 (Active Enterprises), 232 (Camerica BF9096).
-  Mapper 228 is there for *Action 52* and *Cheetahmen II*: a board whose whole
-  register is the write address, with four chip selects over three populated
-  chips, which is why the cart is a non-power-of-two 1536 KiB with a hole in
-  the middle of its address space.
-- **Famicom Disk System**: the RAM adapter (mapper 20), **with no firmware file
-  required**: disk-image parsing, the byte-level drive with gap/mark framing,
-  timer + transfer IRQs, disk reads *and writes* (in-game saves), the RP2C33
-  wavetable + modulation expansion sound channel, and the libretro disk-control
-  interface for side/disk swapping. A real `disksys.rom` is used when the
-  frontend has one and is the oracle our own BIOS is measured against; see
-  below.
-- **Headers**: iNES + NES 2.0 parsing, with a CRC32 correction DB for known-bad
-  dumps (e.g. "DiskDude!"-corrupted headers).
-- **RetroAchievements**: exposes system RAM + cartridge work RAM over the
-  libretro memory interface.
-- **Save states**: see goal #2; validated byte-identical across platforms.
-
-## Layout
-
-```
-crates/
-  nes-core/       the emulator core (lib crate: nes_core)
-  nes-libretro/   libretro C ABI cdylib -> libnescore_libretro.{so,dll,dylib}
-  nes-runner/     dev harnesses: `tomharte` (CPU conformance), `nes` (headless
-                  render + audio dump), `play` (scripted input, for driving
-                  something playable), `fingerprint` (save-state parity check),
-                  `fdstrace` (what a disk asks the BIOS for), `fdsdiff` (two
-                  BIOSes, one disk, compared at handover)
-  nes-asm/        a small dependency-free 6502 assembler, used to build the carts
-firmware/
-  fds-hle/        our own FDS BIOS: 6502 source and the 8 KiB image it builds
-roms/
-  famirust-demo/  the demo cartridge: source, art, and the built .nes (CC0)
-  monkey-farce/     MONKEY FARCE, a one-screen platformer (CC0)
-  noisy-neighbors/  NOISY NEIGHBORS, a two-player escape (CC0, in progress)
-docs/notes/       clean-room hardware reference notes
-dumps/            cart images (gitignored, bring your own)
-tests/vendor/     vendored TomHarte 6502 vectors (gitignored)
-```
-
-This is a standalone Cargo workspace.
-
-## Build & run
+The real BIOS serves as the reference. On a corpus of 507 disks, 490 are
+handed the same machine state by both BIOSes at the moment the game starts.
+The details are in [`docs/notes/FDS-HLE.md`](docs/notes/FDS-HLE.md).
 
 ```sh
-cargo build --release            # builds the core, libretro cdylib, and harnesses
-cargo test                       # unit tests (core, save-state golden, PPU timing)
-
-# headless: render N frames of a ROM to a PNG (+ WAV of the audio)
-cargo run --release -p nes-runner --bin nes -- path/to/game.nes 300 out.png
-
-# the shipped libretro core:
-#   target/release/libnescore_libretro.so   (Linux/Android)
-#   target/release/nescore_libretro.dll     (Windows)
-#   target/release/libnescore_libretro.dylib (macOS)
+scripts/build-fds-bios.sh          # firmware/fds-hle/src/main.s -> the image
+python scripts/fds-hle-check.py    # compare both BIOSes over a corpus
 ```
 
-Driving something playable, rather than rendering it, is `play`. The frames are
-part of the script, both pads are addressable, and a script can assert against
-RAM instead of leaving PNGs for somebody to look at:
+## Building
 
 ```sh
-# pad 1 walks right and jumps; pad 2 waits, then goes left. `.` leaves a pad
-# exactly as it was, so moving one player never means restating the other.
-cargo run -p nes-runner --bin play -- roms/monkey-farce/monkey-farce.nes \
-    "40=start;60=right;92=right+a;120=./left;135?mode=M_PLAY;135?lives=LIVES_START;170#both" out
-
-# what a lockstep netplay peer's core actually consumes: every input four
-# frames late, on both pads, and zero at all through the warmup window
-cargo run -p nes-runner --bin play -- game.nes "40=start;60=right/left;200" out --delay 4
+cargo build --release   # core, libretro cdylib and dev tools
+cargo test
 ```
 
-Names come from `<rom>.sym` beside the ROM, which is why an assertion can read
-`300?lives=LIVES_START` rather than `300?$0046=10`. A failed assertion fails the
-process, and that is what lets a two-player script be a test rather than a demo.
+The libretro core lands in `target/release/` as `nescore_libretro.dll`,
+`libnescore_libretro.so` or `libnescore_libretro.dylib`.
 
-`fdstrace` answers a different question: what an FDS game actually asks the
-BIOS to do. It watches control crossing into `$E000-$FFFF` rather than looking
-for call opcodes, which catches jumps and interrupt dispatch as well as calls,
-and it counts every read of the window split by whether the BIOS or the game
-made it. That split is the constraint on replacing `disksys.rom`, because a byte
-only the BIOS reads goes away with the routine that read it.
-
-```sh
-cargo run --release -p nes-runner --bin fdstrace -- disk.fds --frames 1800 --mash
-python scripts/fds-census.py      # the same over a whole corpus, rolled up
-```
-
-Run over 114 disks it found forty entry points, and that 100 of the 114 read
-nothing at all out of the BIOS image beyond the interrupt vectors.
-
-## FDS with no firmware file
-
-The Famicom Disk System was the last platform here that demanded a copyrighted
-ROM before it would do anything. It does not any more: the core carries its own
-8 KiB BIOS, written in 6502 from the published RAM Adapter interface and from
-behaviour measured off the real one as a black box, with our own boot screen.
-
-```sh
-scripts/build-fds-bios.sh            # firmware/fds-hle/src/main.s -> the image
-python scripts/fds-hle-check.py      # every disk in the corpus, both BIOSes
-```
-
-A real `disksys.rom` is still used when the frontend has one, because it is the
-**oracle** this is held against and never a requirement. `fdsdiff` boots a disk
-under both and compares the machine each hands the game at handover, the instant
-the BIOS dispatches through the `$DFFC` pseudo-vector.
-
-Measured that way, **all 114 disks in the corpus are handed the machine the real
-BIOS hands them**: same entry address, same program RAM, byte for byte.
-[`docs/notes/FDS-HLE.md`](docs/notes/FDS-HLE.md) has what was measured and how,
-which of it turned out not to be a contract after all, and the two wrong numbers
-this check produced before the tooling was right.
-
-It is a boot, not a finished BIOS. Three of the forty entry points are
-implemented; the other 37 are stubs that say **NO ROUTINE** and stop, so a game
-that wants one says so instead of wandering into the fill.
-
-The three clients each take the core as a different artifact, and because save
-states are versioned they want rebuilding together:
-
-```sh
-scripts/deploy-android-debug.sh   # arm64 .so -> TrophyHubAndroid jniLibs (+ APK)
-cargo build --release -p nes-libretro
-#   -> target/release/nescore_libretro.dll, for TrophyHubDesktop
-scripts/build-ios-dylib.sh both   # macOS only: dylib -> TrophyHubIOS iosApp/cores
-```
-
-**Android (arm64)** with the NDK, 16 KB-page-aligned (required by Google Play for
-apps targeting API 35+):
+Android (arm64) needs 16 KB page alignment for Google Play:
 
 ```sh
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=<ndk>/.../aarch64-linux-android21-clang
@@ -186,101 +62,63 @@ RUSTFLAGS="-C link-arg=-Wl,-z,max-page-size=16384" \
   cargo build --release -p nes-libretro --target aarch64-linux-android
 ```
 
-**macOS**, native build:
+macOS needs no extra flags. For a universal binary, build both
+`x86_64-apple-darwin` and `aarch64-apple-darwin` and join them with `lipo`.
+
+## Dev tools
+
+`crates/nes-runner` has these headless tools:
+
+| tool | what it does |
+|---|---|
+| `tomharte` | runs the CPU conformance suite |
+| `nes` | renders N frames to a PNG and dumps the audio |
+| `play` | runs scripted input on both pads, with RAM assertions |
+| `fingerprint` | checks save-state parity |
+| `fdstrace` | shows which BIOS routines an FDS game calls |
+| `fdsdiff` | boots one disk under two BIOSes and compares them |
 
 ```sh
-cargo build --release -p nes-libretro
-# -> target/release/libnescore_libretro.dylib
+cargo run --release -p nes-runner --bin nes -- game.nes 300 out.png
+cargo run -p nes-runner --bin play -- game.nes "40=start;60=right;92=right+a" out
 ```
 
-Universal (Intel + Apple Silicon) binary:
+[`docs/DEBUG_HARNESS.md`](docs/DEBUG_HARNESS.md) covers the rest.
+
+## Layout
+
+```
+crates/nes-core/      the emulator (lib crate nes_core)
+crates/nes-libretro/  libretro C ABI
+crates/nes-runner/    dev tools
+crates/nes-asm/       a small 6502 assembler
+firmware/fds-hle/     the built-in FDS BIOS
+roms/famirust-demo/   the demo cartridge (CC0)
+roms/noisy-neighbors/ a two-player game, in progress (CC0)
+docs/                 hardware notes and design docs
+```
+
+## Demo cartridge
+
+[`roms/famirust-demo/`](roms/famirust-demo/) is an original NES cartridge,
+public domain under CC0 1.0. Five screens each stress one part of the
+hardware: sprites and the per-line limit, a sprite-0 scroll split, the
+palette, all five sound channels, and both controllers. It also serves as a
+test fixture that needs no user-supplied ROM.
 
 ```sh
-rustup target add x86_64-apple-darwin aarch64-apple-darwin
-cargo build --release -p nes-libretro --target x86_64-apple-darwin
-cargo build --release -p nes-libretro --target aarch64-apple-darwin
-lipo -create -output libnescore_libretro.dylib \
-  target/x86_64-apple-darwin/release/libnescore_libretro.dylib \
-  target/aarch64-apple-darwin/release/libnescore_libretro.dylib
+scripts/build-demo-rom.sh
+cargo test -p nes-core --test demo_cart
 ```
 
-> **On 16 KB pages / macOS:** the `max-page-size=16384` flag above is an *Android*
-> requirement. macOS needs no equivalent: Apple Silicon uses 16 KB pages
-> natively and Apple's linker (`ld64`) already aligns Mach-O segments to the
-> target page size by default, so the plain `cargo build` above is correctly
-> aligned for both arm64 (16 KB) and x86_64 (4 KB) Macs.
-
-Nothing here includes or requires copyrighted ROMs or BIOS images; supply your
-own legally obtained dumps. The one cartridge that does ship with this
-repository is our own, and is described below.
-
-## The demo cartridge
-
-[`roms/famirust-demo/`](roms/famirust-demo/) holds **FamiRust Demo Cart**, an NES
-cartridge written from scratch for this project and **dedicated to the public
-domain under CC0 1.0**. Every byte of it is original: the 6502 source, the font,
-the graphics, the music, and the assembler that builds it.
-
-It is not a game. It is five screens that each put one part of the machine under
-load: 64 sprites and the eight-per-scanline limit, a sprite-0 raster split over a
-two-nametable scroll, the 2C02 master palette, all five APU channels including a
-DPCM sample, and a live two-port controller readout.
-
-```sh
-scripts/build-demo-rom.sh          # rebuild it, and re-hash it
-cargo test -p nes-asm --test demo_rom_reproduces   # committed .nes == committed source
-cargo test -p nes-core --test demo_cart            # it boots, scrolls, and round-trips a save state
-```
-
-Because it carries no third-party rights, it can be redistributed, bundled into a
-commercial application, or handed to anyone who needs a working cartridge to test
-an emulator with. See [`roms/famirust-demo/README.md`](roms/famirust-demo/README.md)
-and the statement of permission beside it.
-
-It doubles as a fixture the core is tested against: `crates/nes-core/tests/demo_cart.rs`
-needs no ROM the user has to supply, so it runs on a fresh clone on any machine.
-
-## MONKEY FARCE
-
-[`roms/monkey-farce/`](roms/monkey-farce/) holds a second original cartridge, also
-**CC0 1.0**, and this one is a game: a one-screen platformer in which some of the
-floor is not the floor. The blocks that hold you up and the blocks that do not
-are drawn from the same tiles out of the same palette, so there is nothing to
-spot. Six rooms, sixteen bananas, ten lives for the lot.
-
-![MONKEY FARCE](roms/monkey-farce/screenshots/1-first-lie.png)
-
-A room is typed out as sixteen-by-thirteen ASCII in the source and the traps
-configure themselves from the drawing: a saw finds its patrol by looking along
-its own row, a shooter takes its firing phase from where it sits. The tune is
-written as notes for the same reason, and a four-voice player mixes it against
-the sound effects by ducking rather than mixing.
-
-There is a solver, `tools/reach.py`, that ports the physics out of the assembly
-and proves every room can be finished and every banana taken. Four of the six
-rooms in the first draft could not be finished and all four looked fine; three
-later had prizes nobody could reach.
-
-```sh
-scripts/build-monkey-farce.sh                        # regenerate, check, rebuild, test
-cargo test -p nes-core --test monkey_farce           # it plays, and the liar is invisible
-python roms/monkey-farce/tools/reach.py              # every room is still finishable
-```
-
-As a core fixture it exercises considerably more of the machine than a menu
-does: sixty-odd sprites, per-block attribute palettes, mid-frame palette writes,
-a vertical-blank write queue, all five APU channels driven every frame, and a
-save state taken in the middle of a jump.
+No copyrighted ROMs or BIOS images are included. Supply your own legally
+obtained dumps.
 
 ## License
 
-GPL-3.0-or-later. See [LICENSE](LICENSE).
+GPL-3.0-or-later, see [LICENSE](LICENSE). The cartridges in `roms/` are CC0
+1.0, each with its own `LICENSE`.
 
-The two cartridges in `roms/` are the exception: `famirust-demo` and
-`monkey-farce` are both CC0 1.0, so that the artifacts meant to be passed around
-freely have nothing attached to them. Each carries its own `LICENSE` and a
-signed statement of permission.
-
-"Nintendo Entertainment System", "Famicom", and "NES" are trademarks of Nintendo.
-FamiRust is an independent, clean-room reimplementation and is not affiliated with
-or endorsed by Nintendo.
+"Nintendo Entertainment System", "Famicom" and "NES" are trademarks of
+Nintendo. FamiRust is an independent clean-room implementation, not
+affiliated with or endorsed by Nintendo.
